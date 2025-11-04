@@ -2,7 +2,7 @@
 
 # Script to setup local codebuff alias for development
 
-set -e
+set -e & set -a && source .env
 
 # Get the absolute path to the codebuff project root
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -78,5 +78,9 @@ echo "To use the alias in your current terminal, run:"
 echo "  source $RC_FILE"
 echo ""
 echo "Or simply restart your terminal."
+echo ""
+echo "⚠️  IMPORTANT: Make sure backend is running before using codebuff CLI:"
+echo "  cd $PROJECT_ROOT"
+echo "  make start-local"
 echo ""
 echo "Test with: codebuff --version"

@@ -135,29 +135,29 @@ export const getModelForMode = (
 ) => {
   if (operation === 'agent') {
     return {
-      lite: models.openrouter_gemini2_5_flash,
-      normal: models.openrouter_claude_sonnet_4,
-      max: models.openrouter_claude_sonnet_4,
-      experimental: models.openrouter_gemini2_5_pro_preview,
-      ask: models.openrouter_gemini2_5_pro_preview,
+      lite: models.glm4_5_air, // GLM lightweight for fast operations
+      normal: models.glm4_5, // GLM standard for balanced performance
+      max: models.glm4_6, // GLM premium for complex tasks
+      experimental: models.glm4_6, // GLM premium for experimental features
+      ask: models.glm4_5, // GLM standard for ask mode
     }[costMode]
   }
   if (operation === 'file-requests') {
     return {
-      lite: models.openrouter_claude_3_5_haiku,
-      normal: models.openrouter_claude_3_5_haiku,
-      max: models.openrouter_claude_sonnet_4,
-      experimental: models.openrouter_claude_sonnet_4,
-      ask: models.openrouter_claude_3_5_haiku,
+      lite: models.glm4_5_air, // GLM lightweight for quick file operations
+      normal: models.glm4_5, // GLM standard for file operations
+      max: models.glm4_6, // GLM premium for complex file analysis
+      experimental: models.glm4_6, // GLM premium for experimental features
+      ask: models.glm4_5_air, // GLM lightweight for ask mode
     }[costMode]
   }
   if (operation === 'check-new-files') {
     return {
-      lite: models.openrouter_claude_3_5_haiku,
-      normal: models.openrouter_claude_sonnet_4,
-      max: models.openrouter_claude_sonnet_4,
-      experimental: models.openrouter_claude_sonnet_4,
-      ask: models.openrouter_claude_sonnet_4,
+      lite: models.glm4_5_air, // GLM lightweight for file checks
+      normal: models.glm4_5, // GLM standard for file validation
+      max: models.glm4_6, // GLM premium for thorough file analysis
+      experimental: models.glm4_6, // GLM premium for experimental features
+      ask: models.glm4_5, // GLM standard for ask mode
     }[costMode]
   }
   throw new Error(`Unknown operation: ${operation}`)
@@ -211,6 +211,13 @@ export const deepseekModels = {
 } as const
 export type DeepseekModel = (typeof deepseekModels)[keyof typeof deepseekModels]
 
+export const glmModels = {
+  glm4_6: 'GLM-4.6', // Latest model for complex tasks (official uppercase format)
+  glm4_5: 'GLM-4.5', // Standard model
+  glm4_5_air: 'GLM-4.5-air', // Lightweight model for faster responses
+} as const
+export type GLMModel = (typeof glmModels)[keyof typeof glmModels]
+
 // Vertex uses "endpoint IDs" for finetuned models, which are just integers
 export const finetunedVertexModels = {
   ft_filepicker_003: '196166068534771712',
@@ -242,6 +249,7 @@ export const models = {
   // ...claudeModels,
   ...openaiModels,
   ...deepseekModels,
+  ...glmModels,
   ...openrouterModels,
   ...finetunedVertexModels,
 } as const

@@ -47,6 +47,7 @@ export const handleSpawnAgents = ((
       messages?: Message[]
       agentState?: AgentState
       system?: string
+      modelOverride?: string
     }
     logger: Logger
   } & ParamsExcluding<
@@ -67,6 +68,7 @@ export const handleSpawnAgents = ((
       | 'isOnlyChild'
       | 'parentSystemPrompt'
       | 'onResponseChunk'
+      | 'modelOverride'
     >,
 ): { result: Promise<CodebuffToolOutput<ToolName>>; state: {} } => {
   const {
@@ -81,7 +83,7 @@ export const handleSpawnAgents = ((
   const { agents } = toolCall.input
   const validatedState = validateSpawnState(state, 'spawn_agents')
   const { logger } = params
-  const { sendSubagentChunk, system: parentSystemPrompt } = state
+  const { sendSubagentChunk, system: parentSystemPrompt, modelOverride } = state
 
   if (!sendSubagentChunk) {
     throw new Error(
@@ -142,6 +144,7 @@ export const handleSpawnAgents = ((
             userId,
             isOnlyChild: agents.length === 1,
             parentSystemPrompt,
+            modelOverride,
             onResponseChunk: (chunk: string | PrintModeEvent) => {
               if (typeof chunk === 'string') {
                 sendSubagentChunk({

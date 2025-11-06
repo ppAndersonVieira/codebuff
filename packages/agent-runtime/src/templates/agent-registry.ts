@@ -14,6 +14,8 @@ import type { ProjectFileContext } from '@codebuff/common/util/file'
  * 1. localAgentTemplates (dynamic agents + static templates)
  * 2. Database cache
  * 3. Database query
+ * 
+ * If modelOverride is provided, it will replace the template's model field.
  */
 export async function getAgentTemplate(
   params: {
@@ -21,6 +23,7 @@ export async function getAgentTemplate(
     localAgentTemplates: Record<string, AgentTemplate>
     fetchAgentFromDatabase: FetchAgentFromDatabaseFn
     databaseAgentCache: Map<string, AgentTemplate | null>
+    modelOverride?: string
     logger: Logger
   } & ParamsExcluding<FetchAgentFromDatabaseFn, 'parsedAgentId'>,
 ): Promise<AgentTemplate | null> {
@@ -29,11 +32,20 @@ export async function getAgentTemplate(
     localAgentTemplates,
     fetchAgentFromDatabase,
     databaseAgentCache,
+    modelOverride,
     logger,
   } = params
   // 1. Check localAgentTemplates first (dynamic agents + static templates)
   if (localAgentTemplates[agentId]) {
-    return localAgentTemplates[agentId]
+    const template = localAgentTemplates[agentId]
+    if (modelOverride) {
+      logger.debug(
+        { agentId, originalModel: template.model, modelOverride },
+        'Applying model override to agent template',
+      )
+      return { ...template, model: modelOverride }
+    }
+    return template
   }
   // 2. Check database cache
   if (databaseAgentCache.has(agentId)) {
@@ -65,9 +77,18 @@ export async function getAgentTemplate(
     ...params,
     parsedAgentId: parsed,
   })
-  if (dbAgent && parsed.version && parsed.version !== 'latest') {
-    // Cache only specific versions to avoid stale 'latest' results
-    databaseAgentCache.set(dbAgent.id, dbAgent)
+  if (dbAgent) {
+    if (parsed.version && parsed.version !== 'latest') {
+      // Cache only specific versions to avoid stale 'latest' results
+      databaseAgentCache.set(dbAgent.id, dbAgent)
+    }
+    if (modelOverride) {
+      logger.debug(
+        { agentId: dbAgent.id, originalModel: dbAgent.model, modelOverride },
+        'Applying model override to database agent template',
+      )
+      return { ...dbAgent, model: modelOverride }
+    }
   }
   return dbAgent
 }

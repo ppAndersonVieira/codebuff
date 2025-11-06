@@ -75,31 +75,6 @@ base-lite "fix this bug"             # Works right away!
 - Run commands with `bun` instead of `npm` (e.g., `bun install` not `npm install`)
 - Use `bun run` for script execution
 
-## Local Development with Alias
-
-When developing Codebuff locally, you may want to use your local build instead of the globally installed version:
-
-**Quick Setup:**
-
-```bash
-./scripts/setup-local-alias.sh
-```
-
-**Why this is needed:**
-
-- Built-in agents (like "base") are bundled into the binary during compilation
-- Running `bun run src/index.ts` directly loads agents from `.agents/` directory
-- Running the compiled binary from another directory needs the agents to be bundled
-- The alias ensures you're always using the locally built binary with bundled agents
-
-**Rebuilding after changes:**
-
-```bash
-cd npm-app && bun run build
-```
-
-See `SETUP_ALIAS.md` for detailed instructions.
-
 ## Git Workflow Best Practices
 
 ### Interactive Git Commands

@@ -31,6 +31,7 @@ import type {
 export async function mainPrompt(
   params: {
     action: ClientAction<'prompt'>
+    modelOverride?: string
 
     onResponseChunk: (chunk: string | PrintModeEvent) => void
     localAgentTemplates: Record<string, AgentTemplate>
@@ -47,17 +48,19 @@ export async function mainPrompt(
     | 'agentType'
     | 'fingerprintId'
     | 'fileContext'
+    | 'modelOverride'
   > &
     ParamsExcluding<
       typeof checkTerminalCommand,
       'prompt' | 'fingerprintId' | 'userInputId'
     > &
-    ParamsExcluding<typeof getAgentTemplate, 'agentId'>,
+    ParamsExcluding<typeof getAgentTemplate, 'agentId' | 'modelOverride'>,
 ): Promise<{
   sessionState: SessionState
   output: AgentOutput
 }> {
-  const { action, localAgentTemplates, requestToolCall, logger } = params
+  const { action, localAgentTemplates, requestToolCall, modelOverride, logger } =
+    params
 
   const {
     prompt,
@@ -77,7 +80,9 @@ export async function mainPrompt(
   let agentType: AgentTemplateType
 
   if (agentId) {
-    if (!(await getAgentTemplate({ ...params, agentId }))) {
+    if (
+      !(await getAgentTemplate({ ...params, agentId, modelOverride }))
+    ) {
       throw new Error(
         `Invalid agent ID: "${agentId}". Available agents: ${availableAgents.join(', ')}`,
       )
@@ -89,6 +94,7 @@ export async function mainPrompt(
         agentId,
         promptParams,
         prompt: prompt?.slice(0, 50),
+        modelOverride,
       },
       `Using CLI-specified agent: ${agentId}`,
     )
@@ -100,6 +106,7 @@ export async function mainPrompt(
         !(await getAgentTemplate({
           ...params,
           agentId: configBaseAgent,
+          modelOverride,
         }))
       ) {
         throw new Error(
@@ -112,6 +119,7 @@ export async function mainPrompt(
           configBaseAgent,
           promptParams,
           prompt: prompt?.slice(0, 50),
+          modelOverride,
         },
         `Using config-specified base agent: ${configBaseAgent}`,
       )
@@ -134,6 +142,7 @@ export async function mainPrompt(
   let mainAgentTemplate = await getAgentTemplate({
     ...params,
     agentId: agentType,
+    modelOverride,
   })
   if (!mainAgentTemplate) {
     throw new Error(`Agent template not found for type: ${agentType}`)
@@ -232,6 +241,7 @@ export async function mainPrompt(
     agentType,
     fingerprintId,
     fileContext,
+    modelOverride,
   })
 
   logger.debug({ agentState, output }, 'Main prompt finished')

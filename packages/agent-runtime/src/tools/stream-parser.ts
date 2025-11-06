@@ -50,6 +50,7 @@ export async function processStreamWithTools(
     onResponseChunk: (chunk: string | PrintModeEvent) => void
     fullResponse: string
     sendSubagentChunk: SendSubagentChunkFn
+    modelOverride?: string
     logger: Logger
   } & Omit<
     ExecuteToolCallParams<any>,
@@ -82,6 +83,7 @@ export async function processStreamWithTools(
     agentState,
     onResponseChunk,
     sendSubagentChunk,
+    modelOverride,
     logger,
   } = params
   const fullResponseChunks: string[] = [params.fullResponse]
@@ -106,6 +108,7 @@ export async function processStreamWithTools(
     agentContext,
     messages,
     system,
+    modelOverride,
     logger,
   }
 

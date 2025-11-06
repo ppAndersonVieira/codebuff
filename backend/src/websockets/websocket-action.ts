@@ -100,11 +100,11 @@ const onPrompt = async (
     logger: Logger
   } & ParamsExcluding<
     typeof callMainPrompt,
-    'userId' | 'promptId' | 'repoId' | 'repoUrl'
+    'userId' | 'promptId' | 'repoId' | 'repoUrl' | 'modelOverride'
   >,
 ) => {
   const { action, ws, getUserInfoFromApiKey, logger } = params
-  const { fingerprintId, authToken, promptId, prompt, costMode } = action
+  const { fingerprintId, authToken, promptId, prompt, costMode, model } = action
 
   await withLoggerContext(
     { fingerprintId, clientRequestId: promptId, costMode },
@@ -148,6 +148,7 @@ const onPrompt = async (
           promptId,
           repoUrl,
           repoId,
+          modelOverride: model,
         })
         if (result.output.type === 'error') {
           throw new Error(result.output.message)

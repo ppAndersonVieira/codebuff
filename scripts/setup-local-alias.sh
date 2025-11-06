@@ -15,15 +15,9 @@ echo "🔧 Setting up local Codebuff command..."
 # Create ~/bin directory if it doesn't exist
 mkdir -p "$HOME/bin"
 
-# Copy agents to home directory so they're available globally
-echo "📦 Copying agents to ~/.agents/..."
-if [ -d "$PROJECT_ROOT/.agents" ]; then
-    mkdir -p "$HOME/.agents"
-    rsync -a --delete "$PROJECT_ROOT/.agents/" "$HOME/.agents/"
-    echo "✅ Agents copied successfully"
-else
-    echo "⚠️  No .agents directory found in project"
-fi
+# Skip copying agents to ~/.agents/ - they should stay in project
+# The wrapper will use agents from the project's .agents/ directory
+echo "ℹ️  Note: Agents will be loaded from project directory, not copied to ~/.agents/"
 echo ""
 
 # Create wrapper script
@@ -94,9 +88,9 @@ echo "Or simply restart your terminal."
 echo ""
 echo "⚠️  IMPORTANT: Make sure backend is running before using codebuff CLI:"
 echo "  cd $PROJECT_ROOT"
-echo "  make start-local"
+echo "  ./start-local.sh"
 echo ""
-echo "💡 TIP: If you add/modify agents in $PROJECT_ROOT/.agents/,"
-echo "        run this script again to sync them to ~/.agents/"
+echo "💡 TIP: The wrapper uses source code directly, so changes reflect immediately!"
+echo "        No need to rebuild for development."
 echo ""
-echo "Test with: codebuff --version"
+echo "Test with: codebuff --version (should show 0.0.0 when using source)"

@@ -5,6 +5,7 @@ import {
 } from '@codebuff/agent-runtime/live-user-inputs'
 import {
   finetunedVertexModels,
+  glmModels,
   openaiModels,
 } from '@codebuff/common/old-constants'
 import { buildArray } from '@codebuff/common/util/array'
@@ -16,9 +17,10 @@ import { APICallError, generateObject, generateText, streamText } from 'ai'
 
 import { saveMessage } from '../message-cost-tracker'
 import { openRouterLanguageModel } from '../openrouter'
+import { glm } from './glm'
 import { vertexFinetuned } from './vertex-finetuned'
 
-import type { Model, OpenAIModel } from '@codebuff/common/old-constants'
+import type { GLMModel, Model, OpenAIModel } from '@codebuff/common/old-constants'
 import type {
   PromptAiSdkFn,
   PromptAiSdkStreamFn,
@@ -58,6 +60,9 @@ const modelToAiSDKModel = (model: Model): LanguageModel => {
   }
   if (Object.values(openaiModels).includes(model as OpenAIModel)) {
     return openai.languageModel(model)
+  }
+  if (Object.values(glmModels).includes(model as GLMModel)) {
+    return glm(model)
   }
   // All other models go through OpenRouter
   return openRouterLanguageModel(model)

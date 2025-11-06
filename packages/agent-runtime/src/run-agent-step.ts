@@ -69,6 +69,7 @@ export const runAgentStep = async (
     prompt: string | undefined
     spawnParams: Record<string, any> | undefined
     system: string
+    modelOverride?: string
 
     trackEvent: TrackEventFn
   } & ParamsExcluding<
@@ -86,7 +87,7 @@ export const runAgentStep = async (
       typeof getAgentStreamFromTemplate,
       'agentId' | 'template' | 'onCostCalculated' | 'includeCacheControl'
     > &
-    ParamsExcluding<typeof getAgentTemplate, 'agentId'> &
+    ParamsExcluding<typeof getAgentTemplate, 'agentId' | 'modelOverride'> &
     ParamsExcluding<
       typeof getAgentPrompt,
       | 'agentTemplate'
@@ -122,6 +123,7 @@ export const runAgentStep = async (
     prompt,
     spawnParams,
     system,
+    modelOverride,
     logger,
     trackEvent,
   } = params
@@ -185,6 +187,7 @@ export const runAgentStep = async (
   const agentTemplate = await getAgentTemplate({
     ...params,
     agentId: agentType,
+    modelOverride,
   })
   if (!agentTemplate) {
     throw new Error(
@@ -448,6 +451,7 @@ export async function loopAgentSteps(
     localAgentTemplates: Record<string, AgentTemplate>
     clearUserPromptMessagesAfterResponse?: boolean
     parentSystemPrompt?: string
+    modelOverride?: string
 
     userId: string | undefined
     clientSessionId: string
@@ -467,7 +471,7 @@ export async function loopAgentSteps(
     | 'stepNumber'
     | 'system'
   > &
-    ParamsExcluding<typeof getAgentTemplate, 'agentId'> &
+    ParamsExcluding<typeof getAgentTemplate, 'agentId' | 'modelOverride'> &
     ParamsExcluding<
       typeof getAgentPrompt,
       | 'agentTemplate'
@@ -493,6 +497,7 @@ export async function loopAgentSteps(
       | 'system'
       | 'runId'
       | 'textOverride'
+      | 'modelOverride'
     > &
     ParamsExcluding<
       AddAgentStepFn,
@@ -521,6 +526,7 @@ export async function loopAgentSteps(
     clientSessionId,
     clearUserPromptMessagesAfterResponse = true,
     parentSystemPrompt,
+    modelOverride,
     startAgentRun,
     finishAgentRun,
     addAgentStep,
@@ -530,6 +536,7 @@ export async function loopAgentSteps(
   const agentTemplate = await getAgentTemplate({
     ...params,
     agentId: agentType,
+    modelOverride,
   })
   if (!agentTemplate) {
     throw new Error(`Agent template not found for type: ${agentType}`)
@@ -745,6 +752,7 @@ export async function loopAgentSteps(
         prompt: currentPrompt,
         spawnParams: currentParams,
         system,
+        modelOverride,
       })
 
       if (newAgentState.runId) {

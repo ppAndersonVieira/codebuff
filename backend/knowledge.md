@@ -173,6 +173,37 @@ Each middleware can allow continuation, return an action, or throw an error.
 
 Key configuration values are in `common/src/constants.ts`.
 
+## Local LLM Provider Integration
+
+### Custom OpenAI Provider (openai.ts)
+
+The custom OpenAI provider in `backend/src/llm-apis/vercel-ai-sdk/openai.ts` enables integration with local OpenAI-compatible APIs (e.g., GitHub Copilot API clone).
+
+**Key Features:**
+- Model name mapping via `MODEL_MAPPING` constant
+- Custom base URL support (default: `http://localhost:4141`)
+- Request transformation via custom `fetch` function
+
+**Parameter Filtering:**
+The custom `fetch` function filters out parameters that may be incompatible with local providers:
+- Removes `stop` parameter that causes 400 errors with some local providers
+- Wrapped in try-catch to handle JSON parsing failures gracefully
+- Only modifies string request bodies to avoid breaking other request types
+
+**Usage Example:**
+```typescript
+// In MODEL_MAPPING:
+'gpt-5-mini': 'grok-code-fast-1',
+
+// This maps openai/gpt-5-mini -> grok-code-fast-1 for your local provider
+```
+
+**Troubleshooting:**
+If you get 400 "invalid_request_body" errors:
+1. Check if your local provider supports the parameters being sent
+2. Add filtering in the custom `fetch` function (already filters `stop` parameter)
+3. Verify the model name mapping is correct
+
 ## Testing
 
 Run type checks: `bun run --cwd backend typecheck`

@@ -1,4 +1,4 @@
-import { openai } from '@ai-sdk/openai'
+import { openai } from './openai'
 import {
   checkLiveUserInput,
   getLiveUserInputIds,
@@ -20,7 +20,11 @@ import { openRouterLanguageModel } from '../openrouter'
 import { glm } from './glm'
 import { vertexFinetuned } from './vertex-finetuned'
 
-import type { GLMModel, Model, OpenAIModel } from '@codebuff/common/old-constants'
+import type {
+  GLMModel,
+  Model,
+  OpenAIModel,
+} from '@codebuff/common/old-constants'
 import type {
   PromptAiSdkFn,
   PromptAiSdkStreamFn,
@@ -64,8 +68,9 @@ const modelToAiSDKModel = (model: Model): LanguageModel => {
   if (Object.values(glmModels).includes(model as GLMModel)) {
     return glm(model)
   }
-  // All other models go through OpenRouter
-  return openRouterLanguageModel(model)
+  // All other models go through custom OpenAI provider
+  // Model mapping is handled inside openai.chat() via getMappedModel()
+  return openai.chat(model)
 }
 
 // TODO: Add retries & fallbacks: likely by allowing this to instead of "model"

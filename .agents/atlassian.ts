@@ -21,10 +21,10 @@ import type { AgentDefinition } from './types/agent-definition'
 const agent: AgentDefinition = {
   id: 'atlassian-mcp',
   displayName: 'Atlassian MCP Agent',
-  version: '0.0.1',
+  version: '0.0.4',
   publisher: 'codebuff',
 
-  model: 'minimax/minimax-m2:free',
+  model: 'x-ai/grok-code-fast-1',
 
   // Configure the MCP server connection
   mcpServers: {
@@ -87,7 +87,7 @@ const agent: AgentDefinition = {
     'When using Atlassian tools, be specific about project keys, issue IDs, and search criteria.',
 
   instructionsPrompt:
-    'Use the Atlassian MCP tools to complete the user\'s request. ' +
+    "Use the Atlassian MCP tools to complete the user's request. " +
     'Available operations typically include: \n' +
     '- Searching and filtering Jira issues\n' +
     '- Creating new issues with proper fields\n' +

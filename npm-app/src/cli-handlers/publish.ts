@@ -29,6 +29,8 @@ import { pluralize } from '@codebuff/common/util/string'
     console.log(
       red('Agent id is required. Usage: publish <agent-id> [agent-id2] ...'),
     )
+    console.log(cyan('\nOr use "all" to publish all agents:'))
+    console.log(yellow('  publish all\n'))
 
     // Show available agents
     const agentsDir = getAgentsDirectory()
@@ -42,6 +44,50 @@ import { pluralize } from '@codebuff/common/util/string'
       }
     }
     return
+  }
+
+  // Check if user wants to publish all agents
+  if (agentIds.length === 1 && agentIds[0].toLowerCase() === 'all') {
+    const agentsDir = getAgentsDirectory()
+    
+    if (!fs.existsSync(agentsDir)) {
+      console.log(red('No .agents directory found. Create agent templates first.'))
+      return
+    }
+
+    const agentTemplates = await loadLocalAgents({ verbose: false })
+    
+    if (Object.keys(agentTemplates).length === 0) {
+      console.log(red('No valid agent templates found in .agents directory.'))
+      return
+    }
+
+    agentIds = Object.keys(agentTemplates)
+    console.log(cyan(`Found ${agentIds.length} agents to publish:`))
+    Object.values(agentTemplates).forEach((template) => {
+      console.log(`  - ${template.displayName} (${template.id})`)
+    })
+    console.log()
+
+    // Group agents by publisher for "all" command
+    const agentsByPublisher = new Map<string, any[]>()
+    
+    for (const [agentId, template] of Object.entries(agentTemplates)) {
+      const publisher = template.publisher || 'default'
+      if (!agentsByPublisher.has(publisher)) {
+        agentsByPublisher.set(publisher, [])
+      }
+      agentsByPublisher.get(publisher)!.push(template)
+    }
+
+    // Show the grouping
+    if (agentsByPublisher.size > 1) {
+      console.log(cyan('Agents will be published in groups by publisher:'))
+      for (const [publisher, agents] of agentsByPublisher.entries()) {
+        console.log(yellow(`  ${publisher}: ${agents.length} agent(s)`))
+      }
+      console.log()
+    }
   }
 
   try {
@@ -86,56 +132,99 @@ import { pluralize } from '@codebuff/common/util/string'
       console.log(`  - ${template.displayName} (${template.id})`)
     }
 
-    try {
-      const result = await publishAgentTemplates(
-        Object.values(matchingTemplates),
-        user.authToken!,
-      )
+    // Group agents by publisher and publish them in batches
+    const agentsByPublisher = new Map<string, any[]>()
+    
+    for (const template of Object.values(matchingTemplates)) {
+      const publisher = template.publisher || 'default'
+      if (!agentsByPublisher.has(publisher)) {
+        agentsByPublisher.set(publisher, [])
+      }
+      agentsByPublisher.get(publisher)!.push(template)
+    }
 
-      if (result.success) {
-        console.log(green(`✅ Successfully published:`))
-        for (const agent of result.agents) {
-          console.log(
-            cyan(
-              `  - ${agent.displayName} (${result.publisherId}/${agent.id}@${agent.version})`,
-            ),
-          )
-        }
-        return
+    // Publish agents in batches by publisher
+    let totalSuccess = 0
+    let totalFailed = 0
+    
+    for (const [publisher, agents] of agentsByPublisher.entries()) {
+      if (agents.length === 0) continue
+      
+      console.log(cyan(`\nPublishing ${agents.length} agent(s) for publisher: ${publisher}`))
+      
+      for (const template of agents) {
+        console.log(`  - ${template.displayName} (${template.id})`)
       }
 
-      console.log(red(`❌ Failed to publish your agents`))
-      if (result.details) console.log(red(`\n${result.details}`))
-      if (result.hint) console.log(yellow(`\nHint: ${result.hint}`))
+      try {
+        const result = await publishAgentTemplates(
+          agents,
+          user.authToken!,
+        )
 
-      // Show helpful guidance based on error type
-      if (result.error?.includes('Publisher field required')) {
-        console.log()
-        console.log(cyan('Add a "publisher" field to your agent templates:'))
-        console.log(yellow('  "publisher": "<publisher-id>"'))
-        console.log()
-      } else if (
-        result.error?.includes('Publisher not found or not accessible')
-      ) {
-        console.log()
+        if (result.success) {
+          console.log(green(`✅ Successfully published ${result.agents.length}/${agents.length} agent(s):`))
+          for (const agent of result.agents) {
+            console.log(
+              cyan(
+                `  - ${agent.displayName} (${result.publisherId}/${agent.id}@${agent.version})`,
+              ),
+            )
+          }
+          totalSuccess += result.agents.length
+        } else {
+          console.log(red(`❌ Failed to publish ${agents.length} agent(s) for publisher: ${publisher}`))
+          if (result.details) console.log(red(`\n${result.details}`))
+          if (result.hint) console.log(yellow(`\nHint: ${result.hint}`))
+
+          // Show helpful guidance based on error type
+          if (result.error?.includes('Publisher field required')) {
+            console.log()
+            console.log(cyan('Add a "publisher" field to your agent templates:'))
+            console.log(yellow('  "publisher": "<publisher-id>"'))
+            console.log()
+          } else if (
+            result.error?.includes('Publisher not found or not accessible')
+          ) {
+            console.log()
+            console.log(
+              cyan(
+                'Check that the publisher ID is correct and you have access to it.',
+              ),
+            )
+            console.log()
+          }
+
+          console.log(cyan('Visit the website to manage your publishers:'))
+          console.log(yellow(`${websiteUrl}/publishers`))
+          totalFailed += agents.length
+        }
+      } catch (error) {
         console.log(
-          cyan(
-            'Check that the publisher ID is correct and you have access to it.',
+          red(
+            `❌ Error publishing agents for publisher ${publisher}: ${error instanceof Error ? error.message : String(error)}`,
           ),
         )
-        console.log()
+        totalFailed += agents.length
+        // Avoid logger.error here as it can cause sonic boom errors that mask the real error
+        // The error is already displayed to the user via console.log above
       }
+    }
 
-      console.log(cyan('Visit the website to manage your publishers:'))
-      console.log(yellow(`${websiteUrl}/publishers`))
-    } catch (error) {
-      console.log(
-        red(
-          `❌ Error publishing agents: ${error instanceof Error ? error.message : String(error)}`,
-        ),
-      )
-      // Avoid logger.error here as it can cause sonic boom errors that mask the real error
-      // The error is already displayed to the user via console.log above
+    // Show final summary
+    console.log(cyan('\n📊 Publishing Summary:'))
+    
+    for (const [publisher, agents] of agentsByPublisher.entries()) {
+      console.log(yellow(`  ${publisher}: ${agents.length} agent(s) processed`))
+    }
+    
+    if (totalSuccess > 0 || totalFailed > 0) {
+      console.log(cyan('\nFinal Results:'))
+      console.log(green(`  ✅ Successfully published: ${totalSuccess} agent(s)`))
+      if (totalFailed > 0) {
+        console.log(red(`  ❌ Failed to publish: ${totalFailed} agent(s)`))
+      }
+      console.log(cyan(`  📈 Total processed: ${totalSuccess + totalFailed} agent(s)`))
     }
   } catch (error) {
     console.log(

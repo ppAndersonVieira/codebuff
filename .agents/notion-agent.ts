@@ -3,6 +3,7 @@ import type { AgentDefinition } from './types/agent-definition'
 const definition: AgentDefinition = {
   id: 'notion-query-agent',
   displayName: 'Notion Query Agent',
+  publisher: 'codebuff',
   model: 'x-ai/grok-4-fast',
 
   spawnerPrompt:

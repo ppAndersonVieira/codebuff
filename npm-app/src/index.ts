@@ -140,6 +140,7 @@ Examples:
   $ codebuff init-agents                      # Create example agent files in .agents directory
   $ codebuff save-agent my-agent-id           # Add agent ID to spawnable agents list
   $ codebuff publish my-agent                 # Publish agent template to store
+  $ codebuff publish all                   # Publish all agents in .agents directory
   $ codebuff --agent file-picker "find relevant files for authentication"
   $ codebuff --agent reviewer --params '{"focus": "security"}' "review this code"
   $ codebuff --spawn researcher "analyze this code"

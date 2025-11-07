@@ -12,6 +12,7 @@ export type ContentBlock =
       marginTop?: number
       marginBottom?: number
       status?: 'running' | 'complete'
+      textType?: 'reasoning' | 'text'
     }
   | {
       type: 'html'
@@ -27,6 +28,7 @@ export type ContentBlock =
       output?: string
       outputRaw?: unknown
       agentId?: string
+      includeToolCall?: boolean
     }
   | {
       type: 'agent'

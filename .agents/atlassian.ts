@@ -22,6 +22,7 @@ const agent: AgentDefinition = {
   id: 'atlassian-mcp',
   displayName: 'Atlassian MCP Agent',
   version: '0.0.1',
+  publisher: 'codebuff',
 
   model: 'minimax/minimax-m2:free',
 

@@ -135,29 +135,29 @@ export const getModelForMode = (
 ) => {
   if (operation === 'agent') {
     return {
-      lite: models.glm4_5_air, // GLM lightweight for fast operations
-      normal: models.glm4_5, // GLM standard for balanced performance
-      max: models.glm4_6, // GLM premium for complex tasks
-      experimental: models.glm4_6, // GLM premium for experimental features
-      ask: models.glm4_5, // GLM standard for ask mode
+      lite: models.openrouter_gemini2_5_flash,
+      normal: models.openrouter_claude_sonnet_4,
+      max: models.openrouter_claude_sonnet_4,
+      experimental: models.openrouter_gemini2_5_pro_preview,
+      ask: models.openrouter_gemini2_5_pro_preview,
     }[costMode]
   }
   if (operation === 'file-requests') {
     return {
-      lite: models.glm4_5_air, // GLM lightweight for quick file operations
-      normal: models.glm4_5, // GLM standard for file operations
-      max: models.glm4_6, // GLM premium for complex file analysis
-      experimental: models.glm4_6, // GLM premium for experimental features
-      ask: models.glm4_5_air, // GLM lightweight for ask mode
+      lite: models.openrouter_claude_3_5_haiku,
+      normal: models.openrouter_claude_3_5_haiku,
+      max: models.openrouter_claude_sonnet_4,
+      experimental: models.openrouter_claude_sonnet_4,
+      ask: models.openrouter_claude_3_5_haiku,
     }[costMode]
   }
   if (operation === 'check-new-files') {
     return {
-      lite: models.glm4_5_air, // GLM lightweight for file checks
-      normal: models.glm4_5, // GLM standard for file validation
-      max: models.glm4_6, // GLM premium for thorough file analysis
-      experimental: models.glm4_6, // GLM premium for experimental features
-      ask: models.glm4_5, // GLM standard for ask mode
+      lite: models.openrouter_claude_3_5_haiku,
+      normal: models.openrouter_claude_sonnet_4,
+      max: models.openrouter_claude_sonnet_4,
+      experimental: models.openrouter_claude_sonnet_4,
+      ask: models.openrouter_claude_sonnet_4,
     }[costMode]
   }
   throw new Error(`Unknown operation: ${operation}`)

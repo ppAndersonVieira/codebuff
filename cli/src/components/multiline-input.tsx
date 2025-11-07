@@ -12,6 +12,7 @@ import {
 
 import { useOpentuiPaste } from '../hooks/use-opentui-paste'
 import { useTheme } from '../hooks/use-theme'
+import { computeInputLayoutMetrics } from '../utils/text-layout'
 
 import type { PasteEvent, ScrollBoxRenderable } from '@opentui/core'
 
@@ -64,7 +65,18 @@ function findNextWordBoundary(text: string, cursor: number): number {
   return pos
 }
 
-const CURSOR_CHAR = '┃'
+const CURSOR_CHAR = '▍'
+
+type KeyWithPreventDefault =
+  | {
+      preventDefault?: () => void
+    }
+  | null
+  | undefined
+
+function preventKeyDefault(key: KeyWithPreventDefault) {
+  key?.preventDefault?.()
+}
 
 interface MultilineInputProps {
   value: string
@@ -84,6 +96,8 @@ interface MultilineInputProps {
   maxHeight?: number
   width: number
   textAttributes?: number
+  cursorPosition: number
+  setCursorPosition: (position: number) => void
 }
 
 export type MultilineInputHandle = {
@@ -104,12 +118,23 @@ export const MultilineInput = forwardRef<
     width,
     textAttributes,
     onKeyIntercept,
+    cursorPosition,
+    setCursorPosition,
   }: MultilineInputProps,
   forwardedRef,
 ) {
   const theme = useTheme()
   const scrollBoxRef = useRef<ScrollBoxRenderable | null>(null)
-  const [cursorPosition, setCursorPosition] = useState(value.length)
+  const [measuredCols, setMeasuredCols] = useState<number | null>(null)
+  const getEffectiveCols = useCallback(() => {
+    // Prefer measured viewport columns; fallback to a conservative
+    // estimate: outer width minus border(2) minus padding(2) = 4.
+    const fallbackCols = Math.max(1, width - 4)
+    const cols = measuredCols ?? fallbackCols
+    // No extra negative fudge; use the true measured width to avoid
+    // early wrap by a few characters.
+    return Math.max(1, cols)
+  }, [measuredCols, width])
   useImperativeHandle(
     forwardedRef,
     () => ({
@@ -151,16 +176,24 @@ export const MultilineInput = forwardRef<
   useEffect(() => {
     const scrollBox = scrollBoxRef.current
     if (scrollBox && focused) {
-      // Scroll to bottom after layout updates
-      setTimeout(() => {
-        const maxScroll = Math.max(
-          0,
-          scrollBox.scrollHeight - scrollBox.viewport.height,
-        )
-        scrollBox.verticalScrollBar.scrollPosition = maxScroll
-      }, 0)
+      const maxScroll = Math.max(
+        0,
+        scrollBox.scrollHeight - scrollBox.viewport.height,
+      )
+      scrollBox.verticalScrollBar.scrollPosition = maxScroll
     }
   }, [value, cursorPosition, focused])
+
+  // Measure actual viewport width from the scrollbox to avoid
+  // wrap miscalculations from heuristic padding/border math.
+  useEffect(() => {
+    const node = scrollBoxRef.current
+    if (!node) return
+    const vpWidth = Math.max(0, Math.floor(node.viewport.width || 0))
+    // viewport.width already reflects inner content area; don't subtract again
+    const cols = Math.max(1, vpWidth)
+    setMeasuredCols(cols)
+  }, [width])
 
   // Handle all keyboard input with advanced shortcuts
   useKeyboard(
@@ -225,45 +258,11 @@ export const MultilineInput = forwardRef<
           (lowerKeyName === 'j' || isEnterKey)
         const isBackslashEnter = isEnterKey && hasBackslashBeforeCursor
 
-        if (isEnterKey || lowerKeyName === 'j') {
-          const snapshot: Record<string, unknown> = {
-            name: key.name,
-            sequence: key.sequence,
-            raw: (key as any).raw,
-            ctrl: Boolean(key.ctrl),
-            meta: Boolean(key.meta),
-            alt: Boolean(key.alt),
-            option: Boolean(key.option),
-            shift: Boolean(key.shift),
-            isEnterKey,
-            hasEscapePrefix,
-            code: (key as any).code,
-            charCode: key.sequence ? key.sequence.charCodeAt(0) : null,
-          }
-          try {
-            const ownProps = Object.getOwnPropertyNames(key)
-            for (const prop of ownProps) {
-              if (prop in snapshot) continue
-              const value = (key as any)[prop]
-              if (typeof value === 'function') continue
-              snapshot[prop] = value
-            }
-            for (const prop in key) {
-              if (prop in snapshot) continue
-              const value = (key as any)[prop]
-              if (typeof value === 'function') continue
-              snapshot[prop] = value
-            }
-          } catch {
-            // ignore property introspection errors
-          }
-        }
-
         const shouldInsertNewline =
           isShiftEnter || isOptionEnter || isCtrlJ || isBackslashEnter
 
         if (shouldInsertNewline) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
 
           // For backslash+Enter, remove the backslash and insert newline
           if (isBackslashEnter) {
@@ -285,7 +284,7 @@ export const MultilineInput = forwardRef<
         }
 
         if (isPlainEnter) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           onSubmit()
           return
         }
@@ -300,7 +299,7 @@ export const MultilineInput = forwardRef<
 
         // Ctrl+U: Delete to line start (also triggered by Cmd+Delete on macOS)
         if (key.ctrl && lowerKeyName === 'u' && !key.meta && !key.option) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
 
           const originalValue = value
           let newValue = originalValue
@@ -337,7 +336,7 @@ export const MultilineInput = forwardRef<
           key.name === 'backspace' &&
           (isAltLikeModifier || (key.ctrl && lowerKeyName === 'w'))
         ) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           const newValue =
             value.slice(0, wordStart) + value.slice(cursorPosition)
           onChange(newValue)
@@ -345,7 +344,7 @@ export const MultilineInput = forwardRef<
           return
         } // Cmd+Delete: Delete to line start; fallback to single delete if nothing changes
         if (key.name === 'delete' && key.meta && !isAltLikeModifier) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
 
           const originalValue = value
           let newValue = originalValue
@@ -380,7 +379,7 @@ export const MultilineInput = forwardRef<
           return
         } // Alt+Delete: Delete word forward
         if (key.name === 'delete' && isAltLikeModifier) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           const newValue = value.slice(0, cursorPosition) + value.slice(wordEnd)
           onChange(newValue)
           return
@@ -388,7 +387,7 @@ export const MultilineInput = forwardRef<
 
         // Ctrl+K: Delete to line end
         if (key.ctrl && lowerKeyName === 'k' && !key.meta && !key.option) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           const newValue = value.slice(0, cursorPosition) + value.slice(lineEnd)
           onChange(newValue)
           return
@@ -396,7 +395,7 @@ export const MultilineInput = forwardRef<
 
         // Ctrl+H: Delete char backward (Emacs)
         if (key.ctrl && lowerKeyName === 'h' && !key.meta && !key.option) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           if (cursorPosition > 0) {
             const newValue =
               value.slice(0, cursorPosition - 1) + value.slice(cursorPosition)
@@ -408,7 +407,7 @@ export const MultilineInput = forwardRef<
 
         // Ctrl+D: Delete char forward (Emacs)
         if (key.ctrl && lowerKeyName === 'd' && !key.meta && !key.option) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           if (cursorPosition < value.length) {
             const newValue =
               value.slice(0, cursorPosition) + value.slice(cursorPosition + 1)
@@ -419,7 +418,7 @@ export const MultilineInput = forwardRef<
 
         // Basic Backspace (no modifiers)
         if (key.name === 'backspace' && !key.ctrl && !key.meta && !key.alt) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           if (cursorPosition > 0) {
             const newValue =
               value.slice(0, cursorPosition - 1) + value.slice(cursorPosition)
@@ -431,7 +430,7 @@ export const MultilineInput = forwardRef<
 
         // Basic Delete (no modifiers)
         if (key.name === 'delete' && !key.ctrl && !key.meta && !key.alt) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           if (cursorPosition < value.length) {
             const newValue =
               value.slice(0, cursorPosition) + value.slice(cursorPosition + 1)
@@ -447,7 +446,7 @@ export const MultilineInput = forwardRef<
           isAltLikeModifier &&
           (key.name === 'left' || lowerKeyName === 'b')
         ) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           setCursorPosition(wordStart)
           return
         }
@@ -457,7 +456,7 @@ export const MultilineInput = forwardRef<
           isAltLikeModifier &&
           (key.name === 'right' || lowerKeyName === 'f')
         ) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           setCursorPosition(wordEnd)
           return
         }
@@ -468,7 +467,7 @@ export const MultilineInput = forwardRef<
           (key.ctrl && lowerKeyName === 'a' && !key.meta && !key.option) ||
           (key.name === 'home' && !key.ctrl && !key.meta)
         ) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           setCursorPosition(lineStart)
           return
         }
@@ -479,7 +478,7 @@ export const MultilineInput = forwardRef<
           (key.ctrl && lowerKeyName === 'e' && !key.meta && !key.option) ||
           (key.name === 'end' && !key.ctrl && !key.meta)
         ) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           setCursorPosition(lineEnd)
           return
         }
@@ -489,7 +488,7 @@ export const MultilineInput = forwardRef<
           (key.meta && key.name === 'up') ||
           (key.ctrl && key.name === 'home')
         ) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           setCursorPosition(0)
           return
         }
@@ -499,35 +498,35 @@ export const MultilineInput = forwardRef<
           (key.meta && key.name === 'down') ||
           (key.ctrl && key.name === 'end')
         ) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           setCursorPosition(value.length)
           return
         }
 
         // Ctrl+B: Backward char (Emacs)
         if (key.ctrl && lowerKeyName === 'b' && !key.meta && !key.option) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           setCursorPosition(Math.max(0, cursorPosition - 1))
           return
         }
 
         // Ctrl+F: Forward char (Emacs)
         if (key.ctrl && lowerKeyName === 'f' && !key.meta && !key.option) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           setCursorPosition(Math.min(value.length, cursorPosition + 1))
           return
         }
 
         // Left arrow (no modifiers)
         if (key.name === 'left' && !key.ctrl && !key.meta && !key.alt) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           setCursorPosition(Math.max(0, cursorPosition - 1))
           return
         }
 
         // Right arrow (no modifiers)
         if (key.name === 'right' && !key.ctrl && !key.meta && !key.alt) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           setCursorPosition(Math.min(value.length, cursorPosition + 1))
           return
         }
@@ -540,7 +539,7 @@ export const MultilineInput = forwardRef<
           !key.meta &&
           !key.alt
         ) {
-          if ('preventDefault' in key) (key as any).preventDefault()
+          preventKeyDefault(key)
           const newValue =
             value.slice(0, cursorPosition) +
             key.sequence +
@@ -555,44 +554,41 @@ export const MultilineInput = forwardRef<
   )
 
   // Calculate display with cursor
-  const displayValue = value || placeholder
-  const isPlaceholder = !value && placeholder
+  const isPlaceholder = value.length === 0 && placeholder.length > 0
+  const displayValue = isPlaceholder ? placeholder : value
   const showCursor = focused
   const beforeCursor = showCursor ? displayValue.slice(0, cursorPosition) : ''
   const afterCursor = showCursor ? displayValue.slice(cursorPosition) : ''
   const activeChar = afterCursor.charAt(0) || ' '
   const shouldHighlight =
-    showCursor &&
-    !isPlaceholder &&
-    cursorPosition > 0 &&
-    cursorPosition < displayValue.length
+    showCursor && !isPlaceholder && cursorPosition < displayValue.length
 
-  const height = useMemo(() => {
-    const maxCharsPerLine = Math.max(1, width - 4)
-    const contentForHeight = showCursor
-      ? shouldHighlight
-        ? displayValue
-        : `${displayValue.slice(0, cursorPosition)}${CURSOR_CHAR}${displayValue.slice(cursorPosition)}`
-      : displayValue
-    const lines = contentForHeight.split('\n')
-    let totalLineCount = 0
-    for (const line of lines) {
-      const length = line.length
-      if (length === 0) {
-        totalLineCount += 1
-      } else {
-        totalLineCount += Math.ceil(length / maxCharsPerLine)
-      }
-    }
-    return Math.max(1, Math.min(totalLineCount, maxHeight))
-  }, [
-    displayValue,
-    cursorPosition,
-    showCursor,
-    shouldHighlight,
-    width,
-    maxHeight,
-  ])
+  const layoutContent = showCursor
+    ? shouldHighlight
+      ? displayValue
+      : `${displayValue.slice(0, cursorPosition)}${CURSOR_CHAR}${afterCursor}`
+    : displayValue
+
+  const cursorProbe = showCursor
+    ? shouldHighlight
+      ? displayValue.slice(0, cursorPosition + 1)
+      : `${displayValue.slice(0, cursorPosition)}${CURSOR_CHAR}`
+    : displayValue.slice(0, cursorPosition)
+
+  const layoutMetrics = useMemo(
+    () =>
+      computeInputLayoutMetrics({
+        layoutContent,
+        cursorProbe,
+        cols: getEffectiveCols(),
+        maxHeight,
+      }),
+    [layoutContent, cursorProbe, getEffectiveCols, maxHeight],
+  )
+
+  const height = layoutMetrics.heightLines
+
+  const shouldRenderBottomGutter = layoutMetrics.gutterEnabled
 
   const inputColor = isPlaceholder
     ? theme.muted
@@ -638,7 +634,7 @@ export const MultilineInput = forwardRef<
         },
       }}
     >
-      <text style={textStyle}>
+      <text style={{ ...textStyle, wrapMode: 'word' }}>
         {showCursor ? (
           <>
             {beforeCursor}
@@ -662,10 +658,14 @@ export const MultilineInput = forwardRef<
               ? afterCursor.length > 0
                 ? afterCursor.slice(1)
                 : ''
-              : afterCursor || ' '}
+              : afterCursor}
+            {shouldRenderBottomGutter ? '\n' : ''}
           </>
         ) : (
-          displayValue
+          <>
+            {displayValue}
+            {shouldRenderBottomGutter ? '\n' : ''}
+          </>
         )}
       </text>
     </scrollbox>

@@ -7,7 +7,6 @@ import { toOptionalFile } from '@codebuff/common/old-constants'
 import { toolNames } from '@codebuff/common/tools/constants'
 import { clientToolCallSchema } from '@codebuff/common/tools/list'
 import { AgentOutputSchema } from '@codebuff/common/types/session-state'
-import { failure, success } from '@codebuff/common/util/error'
 import { cloneDeep } from 'lodash'
 
 import { getAgentRuntimeImpl } from './impl/agent-runtime'
@@ -45,7 +44,6 @@ import type {
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
 import type { SessionState } from '@codebuff/common/types/session-state'
 import type { Source } from '@codebuff/common/types/source'
-import type { ErrorOr, Failure } from '@codebuff/common/util/error'
 
 export type CodebuffClientOptions = {
   apiKey?: string
@@ -100,13 +98,15 @@ export type RunOptions = {
   signal?: AbortSignal
 }
 
-function checkAborted(signal?: AbortSignal): Failure | null {
+class AbortError extends Error {
+  name = 'AbortError'
+}
+
+function checkAborted(signal?: AbortSignal): AbortError | null {
   if (!signal?.aborted) {
     return null
   }
-  const error = new Error('Run cancelled by user')
-  error.name = 'AbortError'
-  return failure(error)
+  return new AbortError('Run cancelled by user')
 }
 
 type RunReturnType = Awaited<ReturnType<typeof run>>
@@ -140,13 +140,56 @@ export async function run({
   CodebuffClientOptions & {
     apiKey: string
     fingerprintId: string
-  }): Promise<ErrorOr<RunState>> {
-  const aborted = checkAborted(signal)
-  if (aborted) {
-    return aborted
-  }
-
+  }): Promise<RunState> {
   const fs = await (typeof fsSource === 'function' ? fsSource() : fsSource)
+
+  // Init session state
+  let agentId
+  if (typeof agent !== 'string') {
+    agentDefinitions = [...(cloneDeep(agentDefinitions) ?? []), agent]
+    agentId = agent.id
+  } else {
+    agentId = agent
+  }
+  let sessionState: SessionState
+  if (previousRun?.sessionState) {
+    // applyOverridesToSessionState handles deep cloning and applying any provided overrides
+    sessionState = await applyOverridesToSessionState(
+      cwd,
+      previousRun.sessionState,
+      {
+        knowledgeFiles,
+        agentDefinitions,
+        customToolDefinitions,
+        projectFiles,
+        maxAgentSteps,
+      },
+    )
+  } else {
+    // No previous run, so create a fresh session state
+    sessionState = await initialSessionState({
+      cwd,
+      knowledgeFiles,
+      agentDefinitions,
+      customToolDefinitions,
+      projectFiles,
+      maxAgentSteps,
+      fs,
+      logger,
+    })
+  }
+  {
+    const aborted = checkAborted(signal)
+    if (aborted) {
+      return {
+        sessionState,
+        output: {
+          type: 'error',
+          message: aborted.message,
+        },
+      }
+    }
+  }
 
   let resolve: (value: RunReturnType) => any = () => {}
   const promise = new Promise<RunReturnType>((res) => {
@@ -176,7 +219,13 @@ export async function run({
   ): Promise<void> => {
     const aborted = checkAborted(signal)
     if (aborted) {
-      resolve(aborted)
+      resolve({
+        sessionState,
+        output: {
+          type: 'error',
+          message: aborted.message,
+        },
+      })
       return
     }
     const { chunk } = action
@@ -217,7 +266,13 @@ export async function run({
   ) => {
     const aborted = checkAborted(signal)
     if (aborted) {
-      resolve(aborted)
+      resolve({
+        sessionState,
+        output: {
+          type: 'error',
+          message: aborted.message,
+        },
+      })
       return
     }
     const { agentId, agentType, chunk } = action
@@ -356,48 +411,20 @@ export async function run({
     },
   })
 
-  // Init session state
-  let agentId
-  if (typeof agent !== 'string') {
-    agentDefinitions = [...(cloneDeep(agentDefinitions) ?? []), agent]
-    agentId = agent.id
-  } else {
-    agentId = agent
-  }
-  let sessionState: SessionState
-  if (previousRun?.sessionState) {
-    // applyOverridesToSessionState handles deep cloning and applying any provided overrides
-    sessionState = await applyOverridesToSessionState(
-      cwd,
-      previousRun.sessionState,
-      {
-        knowledgeFiles,
-        agentDefinitions,
-        customToolDefinitions,
-        projectFiles,
-        maxAgentSteps,
-      },
-    )
-  } else {
-    // No previous run, so create a fresh session state
-    sessionState = await initialSessionState({
-      cwd,
-      knowledgeFiles,
-      agentDefinitions,
-      customToolDefinitions,
-      projectFiles,
-      maxAgentSteps,
-      fs,
-      logger,
-    })
-  }
-
   const promptId = Math.random().toString(36).substring(2, 15)
 
   // Send input
-  const isAborted = checkAborted(signal)
-  if (isAborted) {
-    return isAborted
+  {
+    const aborted = checkAborted(signal)
+    if (aborted) {
+      return {
+        sessionState,
+        output: {
+          type: 'error',
+          message: aborted.message,
+        },
+      }
+    }
   }
 
   const userInfo = await getUserInfoFromApiKey({
@@ -588,13 +615,13 @@ async function handlePromptResponse({
   if (action.type === 'prompt-error') {
     onError({ message: action.message })
     resolve(
-      failure({
+      {
         sessionState: initialSessionState,
         output: {
           type: 'error',
           message: action.message,
         },
-      }),
+      },
     )
   } else if (action.type === 'prompt-response') {
     // Stop enforcing session state schema! It's a black box we will pass back to the server.
@@ -607,7 +634,13 @@ async function handlePromptResponse({
         'If this issues persists, please contact support@codebuff.com',
       ].join('\n')
       onError({ message })
-      resolve(failure(new Error(message)))
+      resolve({
+        sessionState: initialSessionState,
+        output: {
+          type: 'error',
+          message,
+        },
+      })
       return
     }
     const { sessionState, output } = action
@@ -619,14 +652,18 @@ async function handlePromptResponse({
         message: 'No output from agent',
       },
     }
-    resolve(success(state))
+    resolve(state)
   } else {
     action satisfies never
     onError({
       message: 'Internal error: prompt response type not handled',
     })
-    resolve(
-      failure(new Error('Internal error: prompt response type not handled')),
-    )
+    resolve({
+      sessionState: initialSessionState,
+      output: {
+        type: 'error',
+        message: 'Internal error: prompt response type not handled',
+      },
+    })
   }
 }

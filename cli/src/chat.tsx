@@ -9,7 +9,6 @@ import {
   MultilineInput,
   type MultilineInputHandle,
 } from './components/multiline-input'
-import { Separator } from './components/separator'
 import { StatusIndicator, useHasStatus } from './components/status-indicator'
 import { SuggestionMenu } from './components/suggestion-menu'
 import { SLASH_COMMANDS } from './data/slash-commands'
@@ -37,12 +36,11 @@ import { formatQueuedPreview } from './utils/helpers'
 import { loadLocalAgents } from './utils/local-agent-registry'
 import { buildMessageTree } from './utils/message-tree-utils'
 import { createMarkdownPalette } from './utils/theme-system'
+import { BORDER_CHARS } from './utils/ui-constants'
 
 import type { SendMessageTimerEvent } from './hooks/use-send-message'
-import { logger } from './utils/logger'
 import type { SendMessageFn } from './types/contracts/send-message'
 import type { ScrollBoxRenderable } from '@opentui/core'
-import { BORDER_CHARS } from './utils/ui-constants'
 
 const MAX_VIRTUALIZED_TOP_LEVEL = 60
 const VIRTUAL_OVERSCAN = 12
@@ -85,8 +83,6 @@ export const App = ({
   const { validationErrors: liveValidationErrors, validate: validateAgents } =
     useAgentValidation(validationErrors)
 
-  const [exitWarning, setExitWarning] = useState<string | null>(null)
-  const exitArmedRef = useRef(false)
   const exitWarningTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   )
@@ -94,6 +90,8 @@ export const App = ({
   const {
     inputValue,
     setInputValue,
+    cursorPosition,
+    setCursorPosition,
     inputFocused,
     setInputFocused,
     slashSelectedIndex,
@@ -122,6 +120,8 @@ export const App = ({
     useShallow((store) => ({
       inputValue: store.inputValue,
       setInputValue: store.setInputValue,
+      cursorPosition: store.cursorPosition,
+      setCursorPosition: store.setCursorPosition,
       inputFocused: store.inputFocused,
       setInputFocused: store.setInputFocused,
       slashSelectedIndex: store.slashSelectedIndex,
@@ -200,13 +200,6 @@ export const App = ({
     activeSubagentsRef.current = activeSubagents
   }, [activeSubagents])
 
-  useEffect(() => {
-    if (exitArmedRef.current && inputValue.length > 0) {
-      exitArmedRef.current = false
-      setExitWarning(null)
-    }
-  }, [inputValue])
-
   const abortControllerRef = useRef<AbortController | null>(null)
 
   const { scrollToLatest, scrollboxProps, isAtBottom } = useChatScrollbox(
@@ -232,9 +225,6 @@ export const App = ({
         exitWarningTimeoutRef.current = null
       }
 
-      exitArmedRef.current = false
-      setExitWarning(null)
-
       const flushed = flushAnalytics()
       if (flushed && typeof (flushed as Promise<void>).finally === 'function') {
         ;(flushed as Promise<void>).finally(() => process.exit(0))
@@ -249,24 +239,30 @@ export const App = ({
     }
   }, [])
 
+  const [nextCtrlCWillExit, setNextCtrlCWillExit] = useState(false)
   const handleCtrlC = useCallback(() => {
+    if (inputValue) {
+      setInputValue('')
+      return true
+    }
+
+    if (!nextCtrlCWillExit) {
+      setNextCtrlCWillExit(true)
+      setTimeout(() => {
+        setNextCtrlCWillExit(false)
+      }, 2000)
+      return true
+    }
+
     if (exitWarningTimeoutRef.current) {
       clearTimeout(exitWarningTimeoutRef.current)
       exitWarningTimeoutRef.current = null
     }
 
-    exitArmedRef.current = false
-    setExitWarning(null)
-
-    const flushed = flushAnalytics()
-    if (flushed && typeof (flushed as Promise<void>).finally === 'function') {
-      ;(flushed as Promise<void>).finally(() => process.exit(0))
-    } else {
-      process.exit(0)
-    }
+    flushAnalytics().then(() => process.exit(0))
 
     return true
-  }, [setExitWarning])
+  }, [inputValue, setInputValue, nextCtrlCWillExit, setNextCtrlCWillExit])
 
   const {
     slashContext,
@@ -514,6 +510,7 @@ export const App = ({
   const { saveToHistory, navigateUp, navigateDown } = useInputHistory(
     inputValue,
     setInputValue,
+    setCursorPosition,
   )
 
   const sendMessageRef = useRef<SendMessageFn>()
@@ -712,7 +709,7 @@ export const App = ({
 
   const shouldShowQueuePreview = queuedMessages.length > 0
   const shouldShowStatusLine = Boolean(
-    exitWarning || hasStatus || shouldShowQueuePreview,
+    nextCtrlCWillExit || hasStatus || shouldShowQueuePreview,
   )
 
   const statusIndicatorNode = (
@@ -805,9 +802,9 @@ export const App = ({
           >
             <text style={{ wrapMode: 'none' }}>
               {hasStatus && statusIndicatorNode}
-              {hasStatus && (exitWarning || shouldShowQueuePreview) && '  '}
-              {exitWarning && <span fg={theme.secondary}>{exitWarning}</span>}
-              {exitWarning && shouldShowQueuePreview && '  '}
+              {hasStatus && (nextCtrlCWillExit || shouldShowQueuePreview) && '  '}
+              {nextCtrlCWillExit && <span fg={theme.secondary}>Press Ctrl-C again to exit</span>}
+              {nextCtrlCWillExit && shouldShowQueuePreview && '  '}
               {shouldShowQueuePreview && (
                 <span fg={theme.secondary} bg={theme.inputFocusedBg}>
                   {' '}
@@ -872,6 +869,8 @@ export const App = ({
                 onKeyIntercept={handleSuggestionMenuKey}
                 textAttributes={theme.messageTextAttributes}
                 ref={inputRef}
+                cursorPosition={cursorPosition}
+                setCursorPosition={setCursorPosition}
               />
             </box>
             <box

@@ -21,7 +21,6 @@ import type { AgentDefinition } from './types/agent-definition'
 const agent: AgentDefinition = {
   id: 'atlassian-mcp',
   displayName: 'Atlassian MCP Agent',
-  version: '0.0.4',
   publisher: 'codebuff',
 
   model: 'x-ai/grok-code-fast-1',

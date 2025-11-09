@@ -16,6 +16,8 @@ interface KeyboardHandlersConfig {
   navigateDown: () => void
   toggleAgentMode: () => void
   onCtrlC: () => boolean
+  historyNavUpEnabled: boolean
+  historyNavDownEnabled: boolean
 }
 
 export const useKeyboardHandlers = ({
@@ -31,6 +33,8 @@ export const useKeyboardHandlers = ({
   navigateDown,
   toggleAgentMode,
   onCtrlC,
+  historyNavUpEnabled,
+  historyNavDownEnabled,
 }: KeyboardHandlersConfig) => {
   useKeyboard(
     useCallback(
@@ -141,6 +145,7 @@ export const useKeyboardHandlers = ({
     ),
   )
 
+  // Handle chat history navigation
   useKeyboard(
     useCallback(
       (key) => {
@@ -159,12 +164,14 @@ export const useKeyboardHandlers = ({
         }
 
         if (isUpArrow) {
+          if (!historyNavUpEnabled) return
           navigateUp()
         } else {
+          if (!historyNavDownEnabled) return
           navigateDown()
         }
       },
-      [navigateUp, navigateDown],
+      [historyNavUpEnabled, historyNavDownEnabled, navigateUp, navigateDown],
     ),
   )
 

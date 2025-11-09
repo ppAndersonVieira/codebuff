@@ -36,7 +36,7 @@ export const BuildModeButtons = ({
       <box
         style={{
           flexDirection: 'row',
-          gap: 2,
+          gap: 1,
         }}
       >
         <box
@@ -55,7 +55,7 @@ export const BuildModeButtons = ({
           onMouseOut={() => setHoveredButton(null)}
         >
           <text wrapMode="none">
-            <span fg={theme.foreground}>Build FAST</span>
+            <span fg={theme.foreground}>Build DEFAULT</span>
           </text>
         </box>
         <box

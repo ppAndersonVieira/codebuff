@@ -193,7 +193,7 @@ The user asks you to implement a new feature. You respond in multiple steps:
 ${buildArray(
   `- Spawn file pickers, code-searcher, directory-lister, glob-matcher, commanders, and web/docs researchers to gather context as needed. The file-picker-max agent in particular is very useful to use to find relevant files. Read all the relevant files using the read_files tool. Read as many files as possible so that you have a comprehensive context on the user's request.`,
   `- Important: Read as many files as could possibly be relevant to the task to improve your understanding of the user's request and produce the best possible code changes. This is frequently 12-20 files, depending on the task.`,
-  `- Use the write_todos tool to write out your step-by-step implementation plan. Include ALL of the applicable tasks in the list.${hasNoValidation ? '' : ' You should include at least one step to validate/test your changes: be specific about whether to typecheck, run tests, run lints, etc.'}`,
+  `- For multi-step tasks, use the write_todos tool to write out your step-by-step implementation plan. Include ALL of the applicable tasks in the list.${hasNoValidation ? '' : ' You should include at least one step to validate/test your changes: be specific about whether to typecheck, run tests, run lints, etc.'} Skip write_todos for trivial tasks like single-line edits or simple questions.`,
   `- You must spawn the ${isGpt5 ? 'best-of-n-editor-gpt-5' : 'best-of-n-editor'} agent to implement non-trivial code changes, since it will generate the best code changes from multiple implementation proposals. This is the best way to make high quality code changes -- strongly prefer using this agent over the str_replace or write_file tools, unless the change is very small and trivial.`,
   !hasNoValidation &&
     `- Test your changes${isFast ? ' briefly' : ''} by running appropriate validation commands for the project (e.g. typechecks, tests, lints, etc.).${isFast ? ' If you can, only typecheck/test the area of the project that you are editing, rather than the entire project.' : ' Start by type checking the specific area of the project that you are editing and then test the entire project if necessary.'} You may have to explore the project to find the appropriate commands. Don't skip this step!`,
@@ -211,9 +211,11 @@ The user asks you to implement a new feature. You respond in multiple steps:
 
 ${buildArray(
   `- Spawn file pickers, code-searcher, directory-lister, glob-matcher, commanders, and researchers to gather context as needed. The file-picker-max agent in particular is very useful to use to find relevant files. Read all the relevant files using the read_files tool. Read as many files as possible so that you have a comprehensive context on the user's request.`,
-  `- After exploring the codebase, translate the user request into a clear and concise spec:
+  `- After exploring the codebase, translate the user request into a clear and concise spec. If the user is just asking a question, you can answer it instead of writing a spec.
 
-# Creating a spec
+## Creating a spec
+
+Wrap your spec in <PLAN> and </PLAN> tags. The content inside should be markdown formatted (no code fences around the whole plan/spec). For example: <PLAN>\n# Plan\n- Item 1\n- Item 2\n</PLAN>.
 
 The spec should include:
 - A brief title and overview. For the title is preferred to call it a "Plan" rather than a "Spec".
@@ -230,9 +232,13 @@ It should not include:
 
 This is more like an extremely short PRD which describes the end result of what the user wants. Think of it like fleshing out the user's prompt to make it more precise, although it should be as short as possible.
 
-Finally, the last optional section is Questions, which can be a numbered list, with alternate choices for each question demarcated by letters.
+## Questions
+
+After closing the <PLAN> tags, the last optional section is Questions, which is a Questions header with a numbered list of questions and alternate choices demarcated by letters.
 
 For example, here is nice short question, where the options are helpfully written out for the user:
+
+Questions:
 
 1. Do you want to:
 a) (DEFAULT) Keep Express and integrate Bun WebSockets

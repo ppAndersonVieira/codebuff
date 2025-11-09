@@ -1,12 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-
-import type { ContentBlock } from './types/chat'
 
 import { routeUserPrompt } from './commands/router'
 import { AgentModeToggle } from './components/agent-mode-toggle'
-import { BuildModeButtons } from './components/build-mode-buttons'
 import { LoginModal } from './components/login-modal'
+import { MessageRenderer } from './components/message-renderer'
 import {
   MultilineInput,
   type MultilineInputHandle,
@@ -14,7 +12,6 @@ import {
 import { StatusIndicator, useHasStatus } from './components/status-indicator'
 import { SuggestionMenu } from './components/suggestion-menu'
 import { SLASH_COMMANDS } from './data/slash-commands'
-import { useAgentInitialization } from './hooks/use-agent-initialization'
 import { useAgentValidation } from './hooks/use-agent-validation'
 import { useAuthState } from './hooks/use-auth-state'
 import { useChatInput } from './hooks/use-chat-input'
@@ -22,14 +19,12 @@ import { useClipboard } from './hooks/use-clipboard'
 import { useElapsedTime } from './hooks/use-elapsed-time'
 import { useInputHistory } from './hooks/use-input-history'
 import { useKeyboardHandlers } from './hooks/use-keyboard-handlers'
-import { useLogo } from './hooks/use-logo'
 import { useMessageQueue } from './hooks/use-message-queue'
-import { useMessageRenderer } from './hooks/use-message-renderer'
 import { useChatScrollbox } from './hooks/use-scroll-management'
 import { useSendMessage } from './hooks/use-send-message'
 import { useSuggestionEngine } from './hooks/use-suggestion-engine'
 import { useTerminalDimensions } from './hooks/use-terminal-dimensions'
-import { useTheme, useResolvedThemeName } from './hooks/use-theme'
+import { useTheme } from './hooks/use-theme'
 import { useValidationBanner } from './hooks/use-validation-banner'
 import { useChatStore } from './state/chat-store'
 import { flushAnalytics } from './utils/analytics'
@@ -41,19 +36,21 @@ import { createMarkdownPalette } from './utils/theme-system'
 import { BORDER_CHARS } from './utils/ui-constants'
 
 import type { SendMessageTimerEvent } from './hooks/use-send-message'
+import type { ContentBlock } from './types/chat'
 import type { SendMessageFn } from './types/contracts/send-message'
-import type { ScrollBoxRenderable } from '@opentui/core'
+import type { KeyEvent, ScrollBoxRenderable } from '@opentui/core'
 
 const MAX_VIRTUALIZED_TOP_LEVEL = 60
 const VIRTUAL_OVERSCAN = 12
 
 const DEFAULT_AGENT_IDS = {
-  FAST: 'base2-fast',
+  DEFAULT: 'base2',
   MAX: 'base2-max',
   PLAN: 'base2-plan',
 } as const
 
-export const App = ({
+export const Chat = ({
+  headerContent,
   initialPrompt,
   agentId,
   requireAuth,
@@ -61,6 +58,7 @@ export const App = ({
   loadedAgentsData,
   validationErrors,
 }: {
+  headerContent: React.ReactNode
   initialPrompt: string | null
   agentId?: string
   requireAuth: boolean | null
@@ -74,16 +72,12 @@ export const App = ({
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const inputRef = useRef<MultilineInputHandle | null>(null)
 
-  const { terminalWidth, separatorWidth, contentMaxWidth } =
-    useTerminalDimensions()
+  const { terminalWidth, separatorWidth } = useTerminalDimensions()
 
   const theme = useTheme()
-  const resolvedThemeName = useResolvedThemeName()
   const markdownPalette = useMemo(() => createMarkdownPalette(theme), [theme])
-  const { textBlock: logoBlock } = useLogo({ availableWidth: contentMaxWidth })
 
-  const { validationErrors: liveValidationErrors, validate: validateAgents } =
-    useAgentValidation(validationErrors)
+  const { validate: validateAgents } = useAgentValidation(validationErrors)
 
   const exitWarningTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -96,9 +90,9 @@ export const App = ({
 
   const {
     inputValue,
-    setInputValue,
     cursorPosition,
-    setCursorPosition,
+    lastEditDueToNav,
+    setInputValue,
     inputFocused,
     setInputFocused,
     slashSelectedIndex,
@@ -122,13 +116,15 @@ export const App = ({
     toggleAgentMode,
     hasReceivedPlanResponse,
     setHasReceivedPlanResponse,
+    lastMessageMode,
+    setLastMessageMode,
     resetChatStore,
   } = useChatStore(
     useShallow((store) => ({
       inputValue: store.inputValue,
-      setInputValue: store.setInputValue,
       cursorPosition: store.cursorPosition,
-      setCursorPosition: store.setCursorPosition,
+      lastEditDueToNav: store.lastEditDueToNav,
+      setInputValue: store.setInputValue,
       inputFocused: store.inputFocused,
       setInputFocused: store.setInputFocused,
       slashSelectedIndex: store.slashSelectedIndex,
@@ -152,6 +148,8 @@ export const App = ({
       toggleAgentMode: store.toggleAgentMode,
       hasReceivedPlanResponse: store.hasReceivedPlanResponse,
       setHasReceivedPlanResponse: store.setHasReceivedPlanResponse,
+      lastMessageMode: store.lastMessageMode,
+      setLastMessageMode: store.setLastMessageMode,
       resetChatStore: store.reset,
     })),
   )
@@ -194,19 +192,6 @@ export const App = ({
     resetChatStore,
   })
 
-  useAgentInitialization({
-    loadedAgentsData,
-    validationErrors,
-    logoBlock,
-    theme,
-    separatorWidth,
-    agentId,
-    resolvedThemeName,
-    messages,
-    setMessages,
-    setCollapsedAgents,
-  })
-
   const showAgentDisplayName = !!agentId
   const agentDisplayName = useMemo(() => {
     if (!loadedAgentsData) return null
@@ -221,6 +206,9 @@ export const App = ({
   const { clipboardMessage } = useClipboard()
   const mainAgentTimer = useElapsedTime()
   const activeSubagentsRef = useRef<Set<string>>(activeSubagents)
+
+  // Extract just the startTime for passing to components
+  const timerStartTime = mainAgentTimer.startTime
 
   useEffect(() => {
     isChainInProgressRef.current = isChainInProgress
@@ -273,7 +261,7 @@ export const App = ({
 
   const handleCtrlC = useCallback(() => {
     if (inputValue) {
-      setInputValue('')
+      setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
       return true
     }
 
@@ -343,20 +331,12 @@ export const App = ({
   }, [agentMatches.length, agentSelectedIndex])
 
   const handleSlashMenuKey = useCallback(
-    (
-      key: any,
-      helpers: {
-        value: string
-        cursorPosition: number
-        setValue: (newValue: string) => number
-        setCursorPosition: (position: number) => void
-      },
-    ): boolean => {
+    (key: KeyEvent): boolean => {
       if (!slashContext.active || slashMatches.length === 0) {
         return false
       }
 
-      const hasModifier = Boolean(key.ctrl || key.meta || key.alt || key.option)
+      const hasModifier = Boolean(key.ctrl || key.meta || key.option)
 
       function selectCurrent(): boolean {
         const selected = slashMatches[slashSelectedIndex] ?? slashMatches[0]
@@ -367,30 +347,37 @@ export const App = ({
         if (startIndex < 0) {
           return false
         }
-        const before = helpers.value.slice(0, startIndex)
-        const after = helpers.value.slice(
+        const before = inputValue.slice(0, startIndex)
+        const after = inputValue.slice(
           startIndex + 1 + slashContext.query.length,
-          helpers.value.length,
+          inputValue.length,
         )
         const replacement = `/${selected.id} `
         const newValue = before + replacement + after
-        helpers.setValue(newValue)
-        helpers.setCursorPosition(before.length + replacement.length)
+        setInputValue({
+          text: newValue,
+          cursorPosition: before.length + replacement.length,
+          lastEditDueToNav: false,
+        })
         setSlashSelectedIndex(0)
         return true
       }
 
       if (key.name === 'down' && !hasModifier) {
         // Move down (no wrap)
-        setSlashSelectedIndex((prev) =>
-          Math.min(prev + 1, slashMatches.length - 1),
-        )
+        if (slashSelectedIndex === slashMatches.length - 1) {
+          return false
+        }
+        setSlashSelectedIndex((prev) => prev + 1)
         return true
       }
 
       if (key.name === 'up' && !hasModifier) {
         // Move up (no wrap)
-        setSlashSelectedIndex((prev) => Math.max(prev - 1, 0))
+        if (slashSelectedIndex === 0) {
+          return false
+        }
+        setSlashSelectedIndex((prev) => prev - 1)
         return true
       }
 
@@ -425,24 +412,18 @@ export const App = ({
       slashContext.query,
       slashMatches,
       slashSelectedIndex,
+      inputValue,
+      setInputValue,
     ],
   )
 
   const handleAgentMenuKey = useCallback(
-    (
-      key: any,
-      helpers: {
-        value: string
-        cursorPosition: number
-        setValue: (newValue: string) => number
-        setCursorPosition: (position: number) => void
-      },
-    ): boolean => {
+    (key: KeyEvent): boolean => {
       if (!mentionContext.active || agentMatches.length === 0) {
         return false
       }
 
-      const hasModifier = Boolean(key.ctrl || key.meta || key.alt || key.option)
+      const hasModifier = Boolean(key.ctrl || key.meta || key.option)
 
       function selectCurrent(): boolean {
         const selected = agentMatches[agentSelectedIndex] ?? agentMatches[0]
@@ -454,30 +435,37 @@ export const App = ({
           return false
         }
 
-        const before = helpers.value.slice(0, startIndex)
-        const after = helpers.value.slice(
+        const before = inputValue.slice(0, startIndex)
+        const after = inputValue.slice(
           startIndex + 1 + mentionContext.query.length,
-          helpers.value.length,
+          inputValue.length,
         )
         const replacement = `@${selected.displayName} `
         const newValue = before + replacement + after
-        helpers.setValue(newValue)
-        helpers.setCursorPosition(before.length + replacement.length)
+        setInputValue({
+          text: newValue,
+          cursorPosition: before.length + replacement.length,
+          lastEditDueToNav: false,
+        })
         setAgentSelectedIndex(0)
         return true
       }
 
       if (key.name === 'down' && !hasModifier) {
         // Move down (no wrap)
-        setAgentSelectedIndex((prev) =>
-          Math.min(prev + 1, agentMatches.length - 1),
-        )
+        if (agentSelectedIndex === agentMatches.length - 1) {
+          return false
+        }
+        setAgentSelectedIndex((prev) => prev + 1)
         return true
       }
 
       if (key.name === 'up' && !hasModifier) {
         // Move up (no wrap)
-        setAgentSelectedIndex((prev) => Math.max(prev - 1, 0))
+        if (agentSelectedIndex === 0) {
+          return false
+        }
+        setAgentSelectedIndex((prev) => prev - 1)
         return true
       }
 
@@ -512,24 +500,18 @@ export const App = ({
       mentionContext.query,
       agentMatches,
       agentSelectedIndex,
+      inputValue,
+      setInputValue,
     ],
   )
 
   const handleSuggestionMenuKey = useCallback(
-    (
-      key: any,
-      helpers: {
-        value: string
-        cursorPosition: number
-        setValue: (newValue: string) => number
-        setCursorPosition: (position: number) => void
-      },
-    ): boolean => {
-      if (handleSlashMenuKey(key, helpers)) {
+    (key: KeyEvent): boolean => {
+      if (handleSlashMenuKey(key)) {
         return true
       }
 
-      if (handleAgentMenuKey(key, helpers)) {
+      if (handleAgentMenuKey(key)) {
         return true
       }
 
@@ -541,7 +523,6 @@ export const App = ({
   const { saveToHistory, navigateUp, navigateDown } = useInputHistory(
     inputValue,
     setInputValue,
-    setCursorPosition,
   )
 
   const sendMessageRef = useRef<SendMessageFn>()
@@ -615,6 +596,8 @@ export const App = ({
     availableWidth: separatorWidth,
     onTimerEvent: handleTimerEvent,
     setHasReceivedPlanResponse,
+    lastMessageMode,
+    setLastMessageMode,
   })
 
   sendMessageRef.current = sendMessage
@@ -634,7 +617,7 @@ export const App = ({
   const hasStatus = useHasStatus({
     isActive: isStatusActive,
     clipboardMessage,
-    timer: mainAgentTimer,
+    timerStartTime,
     nextCtrlCWillExit,
   })
 
@@ -677,6 +660,21 @@ export const App = ({
     ],
   )
 
+  const historyNavUpEnabled =
+    lastEditDueToNav ||
+    (cursorPosition === 0 &&
+      ((slashContext.active && slashSelectedIndex === 0) ||
+        (mentionContext.active && agentSelectedIndex === 0) ||
+        (!slashContext.active && !mentionContext.active)))
+  const historyNavDownEnabled =
+    lastEditDueToNav ||
+    (cursorPosition === inputValue.length &&
+      ((slashContext.active &&
+        slashSelectedIndex === slashMatches.length - 1) ||
+        (mentionContext.active &&
+          agentSelectedIndex === agentMatches.length - 1) ||
+        (!slashContext.active && !mentionContext.active)))
+
   useKeyboardHandlers({
     isStreaming,
     isWaitingForResponse,
@@ -690,6 +688,8 @@ export const App = ({
     navigateDown,
     toggleAgentMode,
     onCtrlC: handleCtrlC,
+    historyNavUpEnabled,
+    historyNavDownEnabled,
   })
 
   const { tree: messageTree, topLevelMessages } = useMemo(
@@ -714,23 +714,6 @@ export const App = ({
     topLevelMessages.length - virtualTopLevelMessages.length,
   )
 
-  const messageItems = useMessageRenderer({
-    messages,
-    messageTree,
-    topLevelMessages: virtualTopLevelMessages,
-    availableWidth: separatorWidth,
-    theme,
-    markdownPalette,
-    collapsedAgents,
-    streamingAgents,
-    isWaitingForResponse,
-    timer: mainAgentTimer,
-    setCollapsedAgents,
-    setFocusedAgentId,
-    userOpenedAgents,
-    setUserOpenedAgents,
-  })
-
   const virtualizationNotice =
     shouldVirtualize && hiddenTopLevelCount > 0 ? (
       <text
@@ -751,13 +734,14 @@ export const App = ({
     <StatusIndicator
       clipboardMessage={clipboardMessage}
       isActive={isStatusActive}
-      timer={mainAgentTimer}
+      isWaitingForResponse={isWaitingForResponse}
+      timerStartTime={timerStartTime}
       nextCtrlCWillExit={nextCtrlCWillExit}
     />
   )
 
   const validationBanner = useValidationBanner({
-    liveValidationErrors,
+    liveValidationErrors: validationErrors,
     loadedAgentsData,
     theme,
   })
@@ -815,8 +799,26 @@ export const App = ({
             },
           }}
         >
+          {headerContent}
           {virtualizationNotice}
-          {messageItems}
+          <MessageRenderer
+            messages={messages}
+            messageTree={messageTree}
+            topLevelMessages={virtualTopLevelMessages}
+            availableWidth={separatorWidth}
+            theme={theme}
+            markdownPalette={markdownPalette}
+            collapsedAgents={collapsedAgents}
+            streamingAgents={streamingAgents}
+            isWaitingForResponse={isWaitingForResponse}
+            timerStartTime={timerStartTime}
+            setCollapsedAgents={setCollapsedAgents}
+            setFocusedAgentId={setFocusedAgentId}
+            userOpenedAgents={userOpenedAgents}
+            setUserOpenedAgents={setUserOpenedAgents}
+            onBuildFast={handleBuildFast}
+            onBuildMax={handleBuildMax}
+          />
         </scrollbox>
       </box>
 
@@ -858,13 +860,6 @@ export const App = ({
             customBorderChars: BORDER_CHARS,
           }}
         >
-          {agentMode === 'PLAN' && hasReceivedPlanResponse && (
-            <BuildModeButtons
-              theme={theme}
-              onBuildFast={handleBuildFast}
-              onBuildMax={handleBuildMax}
-            />
-          )}
           {slashContext.active && slashSuggestionItems.length > 0 ? (
             <SuggestionMenu
               items={slashSuggestionItems}
@@ -903,7 +898,6 @@ export const App = ({
                 textAttributes={theme.messageTextAttributes}
                 ref={inputRef}
                 cursorPosition={cursorPosition}
-                setCursorPosition={setCursorPosition}
               />
             </box>
             <box

@@ -15,9 +15,9 @@ import type { ChatMessage, ContentBlock, ToolContentBlock } from '../types/chat'
 import type { SendMessageFn } from '../types/contracts/send-message'
 import type { ParamsOf } from '../types/function-params'
 import type { SetElement } from '../types/utils'
+import type { AgentMode } from '../utils/constants'
 import type { AgentDefinition, ToolName } from '@codebuff/sdk'
 import type { SetStateAction } from 'react'
-
 const hiddenToolNames = new Set<ToolName | 'spawn_agent_inline'>([
   'spawn_agent_inline',
   'end_turn',
@@ -49,6 +49,23 @@ const updateBlocksRecursively = (
   })
 }
 
+const scrubPlanTags = (s: string) =>
+  s.replace(/<PLAN>[\s\S]*?<\/cb_plan>/g, '').replace(/<PLAN>[\s\S]*$/g, '')
+
+const scrubPlanTagsInBlocks = (blocks: ContentBlock[]): ContentBlock[] => {
+  return blocks
+    .map((b) => {
+      if (b.type === 'text') {
+        const newContent = scrubPlanTags(b.content)
+        return {
+          ...b,
+          content: newContent,
+        }
+      }
+      return b
+    })
+    .filter((b) => b.type !== 'text' || b.content.trim() !== '')
+}
 
 export type SendMessageTimerEvent =
   | {
@@ -172,6 +189,8 @@ interface UseSendMessageOptions {
   availableWidth?: number
   onTimerEvent?: (event: SendMessageTimerEvent) => void
   setHasReceivedPlanResponse: (value: boolean) => void
+  lastMessageMode: AgentMode | null
+  setLastMessageMode: (mode: AgentMode | null) => void
 }
 
 export const useSendMessage = ({
@@ -201,6 +220,8 @@ export const useSendMessage = ({
   availableWidth = 80,
   onTimerEvent = () => {},
   setHasReceivedPlanResponse,
+  lastMessageMode,
+  setLastMessageMode,
 }: UseSendMessageOptions): {
   sendMessage: SendMessageFn
   clearMessages: () => void
@@ -212,6 +233,8 @@ export const useSendMessage = ({
   const rootStreamBufferRef = useRef('')
   const agentStreamAccumulatorsRef = useRef<Map<string, string>>(new Map())
   const rootStreamSeenRef = useRef(false)
+  const planExtractedRef = useRef(false)
+  const autoCollapsedThinkingIdsRef = useRef<Set<string>>(new Set())
 
   const updateChainInProgress = useCallback(
     (value: boolean) => {
@@ -351,6 +374,11 @@ export const useSendMessage = ({
       // This is computed efficiently in the Zustand store
       const previousToggleIds = allToggleIds
 
+      // Check if mode changed and insert divider if needed
+      // Also show divider on first message (when lastMessageMode is null)
+      const shouldInsertDivider =
+        lastMessageMode === null || lastMessageMode !== agentMode
+
       // Add user message to UI first
       const userMessage: ChatMessage = {
         id: `user-${Date.now()}`,
@@ -360,7 +388,27 @@ export const useSendMessage = ({
       }
 
       applyMessageUpdate((prev) => {
-        let newMessages = [...prev, userMessage]
+        let newMessages = [...prev]
+
+        // Insert mode divider if mode changed
+        if (shouldInsertDivider) {
+          const dividerMessage: ChatMessage = {
+            id: `divider-${Date.now()}`,
+            variant: 'ai',
+            content: '',
+            blocks: [
+              {
+                type: 'mode-divider',
+                mode: agentMode,
+              },
+            ],
+            timestamp: formatTimestamp(),
+          }
+          newMessages.push(dividerMessage)
+        }
+
+        newMessages.push(userMessage)
+
         if (postUserMessage) {
           newMessages = postUserMessage(newMessages)
         }
@@ -369,6 +417,10 @@ export const useSendMessage = ({
         }
         return newMessages
       })
+
+      // Update last message mode
+      setLastMessageMode(agentMode)
+
       await yieldToEventLoop()
 
       // Auto-collapse previous message toggles to minimize clutter.
@@ -461,6 +513,7 @@ export const useSendMessage = ({
 
       rootStreamBufferRef.current = ''
       rootStreamSeenRef.current = false
+      planExtractedRef.current = false
       agentStreamAccumulatorsRef.current = new Map<string, string>()
       timerController.start(aiMessageId)
 
@@ -630,6 +683,43 @@ export const useSendMessage = ({
             }
           }),
         )
+
+        // Detect and extract <PLAN>...</PLAN> once available
+        if (
+          agentMode === 'PLAN' &&
+          delta.type === 'text' &&
+          !planExtractedRef.current &&
+          rootStreamBufferRef.current.includes('</PLAN>')
+        ) {
+          const buffer = rootStreamBufferRef.current
+          const openIdx = buffer.indexOf('<PLAN>')
+          const closeIdx = buffer.indexOf('</PLAN>')
+          if (openIdx !== -1 && closeIdx !== -1 && closeIdx > openIdx) {
+            const rawPlan = buffer
+              .slice(openIdx + '<PLAN>'.length, closeIdx)
+              .trim()
+            planExtractedRef.current = true
+            setHasReceivedPlanResponse(true)
+
+            applyMessageUpdate((prev) =>
+              prev.map((msg) => {
+                if (msg.id !== aiMessageId) return msg
+                const cleanedBlocks = scrubPlanTagsInBlocks(msg.blocks || [])
+                const newBlocks = [
+                  ...cleanedBlocks,
+                  {
+                    type: 'plan' as const,
+                    content: rawPlan,
+                  },
+                ]
+                return {
+                  ...msg,
+                  blocks: newBlocks,
+                }
+              }),
+            )
+          }
+        }
       }
 
       setIsWaitingForResponse(true)
@@ -694,8 +784,8 @@ export const useSendMessage = ({
             : undefined
 
         const fallbackAgent =
-          agentMode === 'FAST'
-            ? 'base2-fast'
+          agentMode === 'DEFAULT'
+            ? 'base2'
             : agentMode === 'MAX'
               ? 'base2-max'
               : 'base2-plan'
@@ -729,6 +819,16 @@ export const useSendMessage = ({
                 rootStreamBufferRef.current =
                   (rootStreamBufferRef.current ?? '') + eventObj.text
               }
+
+              // Auto-collapse thinking blocks by default (only once per thinking block)
+              if (eventObj.type === 'reasoning') {
+                const thinkingId = `${aiMessageId}-thinking-0`
+                if (!autoCollapsedThinkingIdsRef.current.has(thinkingId)) {
+                  autoCollapsedThinkingIdsRef.current.add(thinkingId)
+                  setCollapsedAgents((prev) => new Set(prev).add(thinkingId))
+                }
+              }
+
               rootStreamSeenRef.current = true
               appendRootChunk(eventObj)
             } else if (event.type === 'subagent_chunk') {
@@ -792,6 +892,15 @@ export const useSendMessage = ({
                   event.agentId,
                   previous + text,
                 )
+
+                // Auto-collapse thinking blocks for subagents on first content
+                if (previous.length === 0) {
+                  const thinkingId = `${aiMessageId}-agent-${event.agentId}-thinking-0`
+                  if (!autoCollapsedThinkingIdsRef.current.has(thinkingId)) {
+                    autoCollapsedThinkingIdsRef.current.add(thinkingId)
+                    setCollapsedAgents((prev) => new Set(prev).add(thinkingId))
+                  }
+                }
 
                 updateAgentContent(event.agentId, {
                   type: 'text',
@@ -991,7 +1100,10 @@ export const useSendMessage = ({
                       const next = new Set(prev)
                       next.delete(tempId)
                       // Only collapse if parent is NOT main agent (i.e., it's a nested agent)
-                      if (event.parentAgentId && event.parentAgentId !== MAIN_AGENT_ID) {
+                      if (
+                        event.parentAgentId &&
+                        event.parentAgentId !== MAIN_AGENT_ID
+                      ) {
                         next.add(event.agentId)
                       }
                       return next
@@ -1091,8 +1203,13 @@ export const useSendMessage = ({
 
                   setStreamingAgents((prev) => new Set(prev).add(event.agentId))
                   // Only collapse if parent is NOT main agent (i.e., it's a nested agent)
-                  if (event.parentAgentId && event.parentAgentId !== MAIN_AGENT_ID) {
-                    setCollapsedAgents((prev) => new Set(prev).add(event.agentId))
+                  if (
+                    event.parentAgentId &&
+                    event.parentAgentId !== MAIN_AGENT_ID
+                  ) {
+                    setCollapsedAgents((prev) =>
+                      new Set(prev).add(event.agentId),
+                    )
                   }
                 }
               }
@@ -1392,9 +1509,14 @@ export const useSendMessage = ({
           },
         })
 
-        if (runState.output.type === 'error') {
+        if (!runState.output || runState.output.type === 'error') {
           logger.warn(
-            { errorMessage: runState.output.message },
+            {
+              errorMessage:
+                runState.output?.type === 'error'
+                  ? runState.output.message
+                  : 'No output from agent run',
+            },
             'Agent run failed',
           )
           return
@@ -1488,6 +1610,8 @@ export const useSendMessage = ({
       scrollToLatest,
       availableWidth,
       setHasReceivedPlanResponse,
+      lastMessageMode,
+      setLastMessageMode,
     ],
   )
 

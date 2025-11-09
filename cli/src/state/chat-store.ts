@@ -2,8 +2,16 @@ import { enableMapSet } from 'immer'
 import { create } from 'zustand'
 import { immer } from 'zustand/middleware/immer'
 
+import { clamp } from '../utils/math'
+
 import type { ChatMessage } from '../types/chat'
 import type { AgentMode } from '../utils/constants'
+
+export type InputValue = {
+  text: string
+  cursorPosition: number
+  lastEditDueToNav: boolean
+}
 
 export type ChatStoreState = {
   messages: ChatMessage[]
@@ -12,6 +20,7 @@ export type ChatStoreState = {
   focusedAgentId: string | null
   inputValue: string
   cursorPosition: number
+  lastEditDueToNav: boolean
   inputFocused: boolean
   activeSubagents: Set<string>
   isChainInProgress: boolean
@@ -19,6 +28,7 @@ export type ChatStoreState = {
   agentSelectedIndex: number
   agentMode: AgentMode
   hasReceivedPlanResponse: boolean
+  lastMessageMode: AgentMode | null
 }
 
 type ChatStoreActions = {
@@ -34,8 +44,9 @@ type ChatStoreActions = {
   setFocusedAgentId: (
     value: string | null | ((prev: string | null) => string | null),
   ) => void
-  setInputValue: (value: string | ((prev: string) => string)) => void
-  setCursorPosition: (value: number | ((prev: number) => number)) => void
+  setInputValue: (
+    value: InputValue | ((prev: InputValue) => InputValue),
+  ) => void
   setInputFocused: (focused: boolean) => void
   setActiveSubagents: (
     value: Set<string> | ((prev: Set<string>) => Set<string>),
@@ -46,6 +57,7 @@ type ChatStoreActions = {
   setAgentMode: (mode: AgentMode) => void
   toggleAgentMode: () => void
   setHasReceivedPlanResponse: (value: boolean) => void
+  setLastMessageMode: (mode: AgentMode | null) => void
   reset: () => void
 }
 
@@ -60,13 +72,15 @@ const initialState: ChatStoreState = {
   focusedAgentId: null,
   inputValue: '',
   cursorPosition: 0,
+  lastEditDueToNav: false,
   inputFocused: true,
   activeSubagents: new Set<string>(),
   isChainInProgress: false,
   slashSelectedIndex: 0,
   agentSelectedIndex: 0,
-  agentMode: 'FAST',
+  agentMode: 'DEFAULT',
   hasReceivedPlanResponse: false,
+  lastMessageMode: null,
 }
 
 export const useChatStore = create<ChatStore>()(
@@ -99,14 +113,17 @@ export const useChatStore = create<ChatStore>()(
 
     setInputValue: (value) =>
       set((state) => {
-        state.inputValue =
-          typeof value === 'function' ? value(state.inputValue) : value
-      }),
-
-    setCursorPosition: (value) =>
-      set((state) => {
-        state.cursorPosition =
-          typeof value === 'function' ? value(state.cursorPosition) : value
+        const { text, cursorPosition, lastEditDueToNav } =
+          typeof value === 'function'
+            ? value({
+                text: state.inputValue,
+                cursorPosition: state.cursorPosition,
+                lastEditDueToNav: state.lastEditDueToNav,
+              })
+            : value
+        state.inputValue = text
+        state.cursorPosition = clamp(cursorPosition, 0, text.length)
+        state.lastEditDueToNav = lastEditDueToNav
       }),
 
     setInputFocused: (focused) =>
@@ -144,18 +161,23 @@ export const useChatStore = create<ChatStore>()(
 
     toggleAgentMode: () =>
       set((state) => {
-        if (state.agentMode === 'FAST') {
+        if (state.agentMode === 'DEFAULT') {
           state.agentMode = 'MAX'
         } else if (state.agentMode === 'MAX') {
           state.agentMode = 'PLAN'
         } else {
-          state.agentMode = 'FAST'
+          state.agentMode = 'DEFAULT'
         }
       }),
 
     setHasReceivedPlanResponse: (value) =>
       set((state) => {
         state.hasReceivedPlanResponse = value
+      }),
+
+    setLastMessageMode: (mode) =>
+      set((state) => {
+        state.lastMessageMode = mode
       }),
 
     reset: () =>
@@ -166,6 +188,7 @@ export const useChatStore = create<ChatStore>()(
         state.focusedAgentId = initialState.focusedAgentId
         state.inputValue = initialState.inputValue
         state.cursorPosition = initialState.cursorPosition
+        state.lastEditDueToNav = initialState.lastEditDueToNav
         state.inputFocused = initialState.inputFocused
         state.activeSubagents = new Set(initialState.activeSubagents)
         state.isChainInProgress = initialState.isChainInProgress
@@ -173,6 +196,7 @@ export const useChatStore = create<ChatStore>()(
         state.agentSelectedIndex = initialState.agentSelectedIndex
         state.agentMode = initialState.agentMode
         state.hasReceivedPlanResponse = initialState.hasReceivedPlanResponse
+        state.lastMessageMode = initialState.lastMessageMode
       }),
   })),
 )

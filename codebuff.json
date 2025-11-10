@@ -89,5 +89,6 @@
       "filePattern": "sdk/**/*.ts"
     }
   ],
-  "maxAgentSteps": 100
+  "maxAgentSteps": 100,
+  "baseAgent": "base2"
 }

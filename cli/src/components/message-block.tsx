@@ -18,7 +18,8 @@ import { BORDER_CHARS } from '../utils/ui-constants'
 import { BuildModeButtons } from './build-mode-buttons'
 import { Thinking } from './thinking'
 
-import type { ContentBlock } from '../types/chat'
+import type { ContentBlock, TextContentBlock, HtmlContentBlock, AgentContentBlock } from '../types/chat'
+import { isTextBlock, isToolBlock, isAgentBlock, isHtmlBlock } from '../types/chat'
 import type { ThemeColor } from '../types/theme-system'
 import { useWhyDidYouUpdateById } from '../hooks/use-why-did-you-update'
 
@@ -28,12 +29,42 @@ const trimTrailingNewlines = (value: string): string =>
 const sanitizePreview = (value: string): string =>
   value.replace(/[#*_`~\[\]()]/g, '').trim()
 
-const isReasoningTextBlock = (b: any): boolean =>
-  b?.type === 'text' &&
-  (b.textType === 'reasoning' ||
-    b.textType === 'reasoning_chunk' ||
-    (typeof b.color === 'string' &&
-      (b.color.toLowerCase() === 'grey' || b.color.toLowerCase() === 'gray')))
+const isReasoningTextBlock = (
+  b: ContentBlock | null | undefined
+): b is TextContentBlock => {
+  if (!b || b.type !== 'text') return false
+
+  return (
+    b.textType === 'reasoning' ||
+    (b.color !== undefined &&
+      typeof b.color === 'string' &&
+      (b.color.toLowerCase() === 'grey' || b.color.toLowerCase() === 'gray'))
+  )
+}
+
+const isRenderableTimelineBlock = (
+  block: ContentBlock | null | undefined,
+): boolean => {
+  if (!block) {
+    return false
+  }
+
+  if (block.type === 'tool') {
+    return block.toolName !== 'end_turn'
+  }
+
+  switch (block.type) {
+    case 'text':
+    case 'html':
+    case 'agent':
+    case 'agent-list':
+    case 'plan':
+    case 'mode-divider':
+      return true
+    default:
+      return false
+  }
+}
 
 interface MessageBlockProps {
   messageId: string
@@ -233,8 +264,10 @@ const ToolBranch = memo(
     const commandPreview =
       toolBlock.toolName === 'run_terminal_command' &&
       toolBlock.input &&
-      typeof (toolBlock.input as any).command === 'string'
-        ? `$ ${(toolBlock.input as any).command.trim()}`
+      typeof toolBlock.input === 'object' &&
+      'command' in toolBlock.input &&
+      typeof toolBlock.input.command === 'string'
+        ? `$ ${toolBlock.input.command.trim()}`
         : null
 
     const toolRenderConfig =
@@ -462,15 +495,15 @@ const AgentBody = memo(
 
     for (let nestedIdx = 0; nestedIdx < nestedBlocks.length; ) {
       const nestedBlock = nestedBlocks[nestedIdx]
-      // Handle reasoning text blocks in agents
+
+      // Handle reasoning text blocks first
       if (isReasoningTextBlock(nestedBlock)) {
         const start = nestedIdx
         const reasoningBlocks: Extract<ContentBlock, { type: 'text' }>[] = []
-        while (
-          nestedIdx < nestedBlocks.length &&
-          isReasoningTextBlock(nestedBlocks[nestedIdx] as any)
-        ) {
-          reasoningBlocks.push(nestedBlocks[nestedIdx] as any)
+        while (nestedIdx < nestedBlocks.length) {
+          const block = nestedBlocks[nestedIdx]
+          if (!isReasoningTextBlock(block)) break
+          reasoningBlocks.push(block)
           nestedIdx++
         }
 
@@ -488,25 +521,21 @@ const AgentBody = memo(
         )
         continue
       }
-      switch (nestedBlock.type) {
+
+      switch ((nestedBlock as ContentBlock).type) {
         case 'text': {
-          const nestedStatus =
-            typeof (nestedBlock as any).status === 'string'
-              ? (nestedBlock as any).status
-              : undefined
+          const textBlock = nestedBlock as unknown as TextContentBlock
+          const nestedStatus = textBlock.status
           const isNestedStreamingText =
             parentIsStreaming || nestedStatus === 'running'
           const filteredNestedContent = isNestedStreamingText
-            ? trimTrailingNewlines(nestedBlock.content)
-            : nestedBlock.content.trim()
+            ? trimTrailingNewlines(textBlock.content)
+            : textBlock.content.trim()
           const renderKey = `${keyPrefix}-text-${nestedIdx}`
           const markdownOptionsForLevel = getAgentMarkdownOptions(indentLevel)
-          const marginTop = nestedBlock.marginTop ?? 0
-          const marginBottom = nestedBlock.marginBottom ?? 0
-          const explicitColor =
-            typeof (nestedBlock as any).color === 'string'
-              ? ((nestedBlock as any).color as string)
-              : undefined
+          const marginTop = textBlock.marginTop ?? 0
+          const marginBottom = textBlock.marginBottom ?? 0
+          const explicitColor = textBlock.color
           const nestedTextColor = explicitColor ?? theme.foreground
           nodes.push(
             <text
@@ -532,8 +561,9 @@ const AgentBody = memo(
         }
 
         case 'html': {
-          const marginTop = nestedBlock.marginTop ?? 0
-          const marginBottom = nestedBlock.marginBottom ?? 0
+          const htmlBlock = nestedBlock as HtmlContentBlock
+          const marginTop = htmlBlock.marginTop ?? 0
+          const marginBottom = htmlBlock.marginBottom ?? 0
           nodes.push(
             <box
               key={`${keyPrefix}-html-${nestedIdx}`}
@@ -544,7 +574,7 @@ const AgentBody = memo(
                 marginBottom,
               }}
             >
-              {nestedBlock.render({
+              {htmlBlock.render({
                 textColor: theme.foreground,
                 theme,
               })}
@@ -557,11 +587,10 @@ const AgentBody = memo(
         case 'tool': {
           const start = nestedIdx
           const toolGroup: Extract<ContentBlock, { type: 'tool' }>[] = []
-          while (
-            nestedIdx < nestedBlocks.length &&
-            nestedBlocks[nestedIdx].type === 'tool'
-          ) {
-            toolGroup.push(nestedBlocks[nestedIdx] as any)
+          while (nestedIdx < nestedBlocks.length) {
+            const block = nestedBlocks[nestedIdx]
+            if (!isToolBlock(block)) break
+            toolGroup.push(block)
             nestedIdx++
           }
 
@@ -583,25 +612,12 @@ const AgentBody = memo(
             Boolean,
           ) as React.ReactNode[]
           if (nonNullGroupNodes.length > 0) {
-            const isRenderableBlock = (b: ContentBlock): boolean => {
-              if (b.type === 'tool') {
-                return (b as any).toolName !== 'end_turn'
-              }
-              switch (b.type) {
-                case 'text':
-                case 'html':
-                case 'agent':
-                case 'agent-list':
-                  return true
-                default:
-                  return false
-              }
-            }
-
-            // Check for any subsequent renderable blocks without allocating a slice
+            const hasRenderableBefore =
+              start > 0 &&
+              isRenderableTimelineBlock(nestedBlocks[start - 1])
             let hasRenderableAfter = false
             for (let i = nestedIdx; i < nestedBlocks.length; i++) {
-              if (isRenderableBlock(nestedBlocks[i] as any)) {
+              if (isRenderableTimelineBlock(nestedBlocks[i])) {
                 hasRenderableAfter = true
                 break
               }
@@ -612,10 +628,7 @@ const AgentBody = memo(
                 style={{
                   flexDirection: 'column',
                   gap: 0,
-                  // Avoid double spacing with the agent header, which already
-                  // adds bottom padding. Only add top margin if this group is
-                  // not the first rendered child.
-                  marginTop: nodes.length === 0 ? 0 : 1,
+                  marginTop: hasRenderableBefore ? 1 : 0,
                   marginBottom: hasRenderableAfter ? 1 : 0,
                 }}
               >
@@ -627,12 +640,11 @@ const AgentBody = memo(
         }
 
         case 'agent': {
+          const agentBlock = nestedBlock as AgentContentBlock
           nodes.push(
             <AgentBranchWrapper
               key={`${keyPrefix}-agent-${nestedIdx}`}
-              agentBlock={
-                nestedBlock as Extract<ContentBlock, { type: 'agent' }>
-              }
+              agentBlock={agentBlock}
               indentLevel={indentLevel}
               keyPrefix={`${keyPrefix}-agent-${nestedIdx}`}
               availableWidth={availableWidth}
@@ -687,8 +699,8 @@ const AgentBranchWrapper = memo(
 
     const allTextContent =
       agentBlock.blocks
-        ?.filter((nested) => nested.type === 'text')
-        .map((nested) => (nested as any).content)
+        ?.filter(isTextBlock)
+        .map((nested) => nested.content)
         .join('') || ''
 
     const lines = allTextContent.split('\n').filter((line) => line.trim())
@@ -838,24 +850,22 @@ const SingleBlock = memo(
     switch (block.type) {
       case 'text': {
         // Skip raw rendering for reasoning; grouped above into <Thinking>
-        if (isReasoningTextBlock(block as any)) {
+        if (isReasoningTextBlock(block)) {
           return null
         }
+        const textBlock = block as TextContentBlock
         const isStreamingText = isLoading || !isComplete
         const filteredContent = isStreamingText
-          ? trimTrailingNewlines(block.content)
-          : block.content.trim()
+          ? trimTrailingNewlines(textBlock.content)
+          : textBlock.content.trim()
         const renderKey = `${messageId}-text-${idx}`
         const prevBlock = idx > 0 && blocks ? blocks[idx - 1] : null
         const marginTop =
           prevBlock && (prevBlock.type === 'tool' || prevBlock.type === 'agent')
             ? 0
-            : block.marginTop ?? 0
-        const marginBottom = block.marginBottom ?? 0
-        const explicitColor =
-          typeof (block as any).color === 'string'
-            ? ((block as any).color as string)
-            : undefined
+            : textBlock.marginTop ?? 0
+        const marginBottom = textBlock.marginBottom ?? 0
+        const explicitColor = textBlock.color
         const blockTextColor = explicitColor ?? textColor
         return (
           <text
@@ -920,7 +930,7 @@ const SingleBlock = memo(
         return (
           <AgentBranchWrapper
             key={`${messageId}-agent-${block.agentId}`}
-            agentBlock={block as Extract<ContentBlock, { type: 'agent' }>}
+            agentBlock={block}
             indentLevel={0}
             keyPrefix={`${messageId}-agent-${block.agentId}`}
             availableWidth={availableWidth}
@@ -988,14 +998,13 @@ const BlocksRenderer = memo(
     for (let i = 0; i < sourceBlocks.length; ) {
       const block = sourceBlocks[i]
       // Handle reasoning text blocks
-      if (isReasoningTextBlock(block as any)) {
+      if (isReasoningTextBlock(block)) {
         const start = i
         const reasoningBlocks: Extract<ContentBlock, { type: 'text' }>[] = []
-        while (
-          i < sourceBlocks.length &&
-          isReasoningTextBlock(sourceBlocks[i] as any)
-        ) {
-          reasoningBlocks.push(sourceBlocks[i] as any)
+        while (i < sourceBlocks.length) {
+          const currentBlock = sourceBlocks[i]
+          if (!isReasoningTextBlock(currentBlock)) break
+          reasoningBlocks.push(currentBlock)
           i++
         }
 
@@ -1016,8 +1025,10 @@ const BlocksRenderer = memo(
       if (block.type === 'tool') {
         const start = i
         const group: Extract<ContentBlock, { type: 'tool' }>[] = []
-        while (i < sourceBlocks.length && sourceBlocks[i].type === 'tool') {
-          group.push(sourceBlocks[i] as any)
+        while (i < sourceBlocks.length) {
+          const currentBlock = sourceBlocks[i]
+          if (!isToolBlock(currentBlock)) break
+          group.push(currentBlock)
           i++
         }
 
@@ -1039,21 +1050,13 @@ const BlocksRenderer = memo(
           Boolean,
         ) as React.ReactNode[]
         if (nonNullGroupNodes.length > 0) {
+          const hasRenderableBefore =
+            start > 0 &&
+            isRenderableTimelineBlock(sourceBlocks[start - 1])
           // Check for any subsequent renderable blocks without allocating a slice
           let hasRenderableAfter = false
           for (let j = i; j < sourceBlocks.length; j++) {
-            const b = sourceBlocks[j] as any
-            if (b.type === 'tool') {
-              if ((b as any).toolName !== 'end_turn') {
-                hasRenderableAfter = true
-                break
-              }
-            } else if (
-              b.type === 'text' ||
-              b.type === 'html' ||
-              b.type === 'agent' ||
-              b.type === 'agent-list'
-            ) {
+            if (isRenderableTimelineBlock(sourceBlocks[j])) {
               hasRenderableAfter = true
               break
             }
@@ -1064,7 +1067,7 @@ const BlocksRenderer = memo(
               style={{
                 flexDirection: 'column',
                 gap: 0,
-                marginTop: 1,
+                marginTop: hasRenderableBefore ? 1 : 0,
                 marginBottom: hasRenderableAfter ? 1 : 0,
               }}
             >
@@ -1188,7 +1191,7 @@ export const MessageBlock = memo((props: MessageBlockProps): ReactNode => {
                 wrapMode: 'none',
                 marginTop: 0,
                 marginBottom: 0,
-                alignSelf: 'flex-start',
+                alignSelf: 'flex-end',
               }}
             >
               <ElapsedTimer
@@ -1205,7 +1208,7 @@ export const MessageBlock = memo((props: MessageBlockProps): ReactNode => {
                 fg: theme.secondary,
                 marginTop: 0,
                 marginBottom: 0,
-                alignSelf: 'flex-start',
+                alignSelf: 'flex-end',
               }}
             >
               {completionTime}

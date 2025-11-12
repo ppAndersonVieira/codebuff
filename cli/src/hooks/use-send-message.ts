@@ -83,7 +83,7 @@ const scrubPlanTagsInBlocks = (blocks: ContentBlock[]): ContentBlock[] => {
 /**
  * Auto-collapse thinking blocks to reduce UI clutter.
  * Tracks which thinking blocks have been collapsed to avoid duplicate collapses.
- * 
+ *
  * @param messageId - ID of the message containing the thinking block
  * @param agentId - Optional agent ID for nested agent thinking blocks
  * @param autoCollapsedThinkingIdsRef - Ref tracking which thinking IDs have been auto-collapsed
@@ -228,6 +228,7 @@ interface UseSendMessageOptions {
   setHasReceivedPlanResponse: (value: boolean) => void
   lastMessageMode: AgentMode | null
   setLastMessageMode: (mode: AgentMode | null) => void
+  addSessionCredits: (credits: number) => void
 }
 
 export const useSendMessage = ({
@@ -258,6 +259,7 @@ export const useSendMessage = ({
   setHasReceivedPlanResponse,
   lastMessageMode,
   setLastMessageMode,
+  addSessionCredits,
 }: UseSendMessageOptions): {
   sendMessage: SendMessageFn
   clearMessages: () => void
@@ -966,12 +968,12 @@ export const useSendMessage = ({
               return
             }
 
-            if (event.type === 'finish' && event.totalCost !== undefined) {
+            if (
+              event.type === 'finish' &&
+              typeof event.totalCost === 'number'
+            ) {
               actualCredits = event.totalCost
-            }
-
-            if ('totalCost' in event && event.totalCost !== undefined) {
-              actualCredits = event.totalCost
+              addSessionCredits(event.totalCost)
             }
 
             if (event.type === 'subagent_start') {
@@ -1439,6 +1441,12 @@ export const useSendMessage = ({
                             if (typeof result.value === 'string') {
                               content = result.value
                             } else if (
+                              has(result.value, 'errorMessage') &&
+                              result.value.errorMessage
+                            ) {
+                              // Handle error messages from failed agent spawns
+                              content = String(result.value.errorMessage)
+                            } else if (
                               has(result.value, 'value') &&
                               result.value.value &&
                               typeof result.value.value === 'string'
@@ -1467,10 +1475,16 @@ export const useSendMessage = ({
                               type: 'text',
                               content,
                             }
+                            // Determine status based on whether there's an error
+                            const hasError =
+                              has(result.value, 'errorMessage') &&
+                              result.value.errorMessage
                             return {
                               ...block,
                               blocks: [resultTextBlock],
-                              status: 'complete' as const,
+                              status: hasError
+                                ? ('failed' as const)
+                                : ('complete' as const),
                             }
                           }
                         }
@@ -1650,6 +1664,7 @@ export const useSendMessage = ({
       setHasReceivedPlanResponse,
       lastMessageMode,
       setLastMessageMode,
+      addSessionCredits,
     ],
   )
 

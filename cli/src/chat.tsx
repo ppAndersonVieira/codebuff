@@ -44,10 +44,10 @@ import { computeInputLayoutMetrics } from './utils/text-layout'
 import { createMarkdownPalette } from './utils/theme-system'
 import { BORDER_CHARS } from './utils/ui-constants'
 
-import type { SendMessageTimerEvent } from './hooks/use-send-message'
 import type { ContentBlock } from './types/chat'
 import type { SendMessageFn } from './types/contracts/send-message'
 import type { ScrollBoxRenderable } from '@opentui/core'
+import type { FileTreeNode } from '@codebuff/common/util/file'
 
 const DEFAULT_AGENT_IDS = {
   DEFAULT: 'base2',
@@ -63,6 +63,7 @@ export const Chat = ({
   hasInvalidCredentials,
   loadedAgentsData,
   validationErrors,
+  fileTree,
 }: {
   headerContent: React.ReactNode
   initialPrompt: string | null
@@ -74,6 +75,7 @@ export const Chat = ({
     agentsDir: string
   } | null
   validationErrors: Array<{ id: string; message: string }>
+  fileTree: FileTreeNode[]
 }) => {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const inputRef = useRef<MultilineInputHandle | null>(null)
@@ -119,6 +121,7 @@ export const Chat = ({
     setHasReceivedPlanResponse,
     lastMessageMode,
     setLastMessageMode,
+    addSessionCredits,
     resetChatStore,
   } = useChatStore(
     useShallow((store) => ({
@@ -151,6 +154,7 @@ export const Chat = ({
       setHasReceivedPlanResponse: store.setHasReceivedPlanResponse,
       lastMessageMode: store.lastMessageMode,
       setLastMessageMode: store.setLastMessageMode,
+      addSessionCredits: store.addSessionCredits,
       resetChatStore: store.reset,
     })),
   )
@@ -291,12 +295,15 @@ export const Chat = ({
     mentionContext,
     slashMatches,
     agentMatches,
+    fileMatches,
     slashSuggestionItems,
     agentSuggestionItems,
+    fileSuggestionItems,
   } = useSuggestionEngine({
     inputValue,
     slashCommands: SLASH_COMMANDS,
     localAgents,
+    fileTree,
   })
 
   // Reset suggestion menu indexes when context changes
@@ -326,19 +333,21 @@ export const Chat = ({
   }, [mentionContext.active, mentionContext.query, setAgentSelectedIndex])
 
   useEffect(() => {
-    if (agentMatches.length > 0 && agentSelectedIndex >= agentMatches.length) {
-      setAgentSelectedIndex(agentMatches.length - 1)
+    const totalMatches = agentMatches.length + fileMatches.length
+    if (totalMatches > 0 && agentSelectedIndex >= totalMatches) {
+      setAgentSelectedIndex(totalMatches - 1)
     }
-    if (agentMatches.length === 0 && agentSelectedIndex !== 0) {
+    if (totalMatches === 0 && agentSelectedIndex !== 0) {
       setAgentSelectedIndex(0)
     }
-  }, [agentMatches.length, agentSelectedIndex, setAgentSelectedIndex])
+  }, [agentMatches.length, fileMatches.length, agentSelectedIndex, setAgentSelectedIndex])
 
   const { handleSuggestionMenuKey } = useSuggestionMenuHandlers({
     slashContext,
     mentionContext,
     slashMatches,
     agentMatches,
+    fileMatches,
     slashSelectedIndex,
     agentSelectedIndex,
     inputValue,
@@ -403,6 +412,7 @@ export const Chat = ({
     setHasReceivedPlanResponse,
     lastMessageMode,
     setLastMessageMode,
+    addSessionCredits,
   })
 
   sendMessageRef.current = sendMessage
@@ -456,6 +466,7 @@ export const Chat = ({
     ],
   )
 
+  const totalMentionMatches = agentMatches.length + fileMatches.length
   const historyNavUpEnabled =
     lastEditDueToNav ||
     (cursorPosition === 0 &&
@@ -468,7 +479,7 @@ export const Chat = ({
       ((slashContext.active &&
         slashSelectedIndex === slashMatches.length - 1) ||
         (mentionContext.active &&
-          agentSelectedIndex === agentMatches.length - 1) ||
+          agentSelectedIndex === totalMentionMatches - 1) ||
         (!slashContext.active && !mentionContext.active)))
 
   useKeyboardHandlers({
@@ -523,7 +534,7 @@ export const Chat = ({
   const hasMentionSuggestions =
     !slashContext.active &&
     mentionContext.active &&
-    agentSuggestionItems.length > 0
+    (agentSuggestionItems.length > 0 || fileSuggestionItems.length > 0)
   const hasSuggestionMenu = hasSlashSuggestions || hasMentionSuggestions
   const showAgentStatusLine = showAgentDisplayName && loadedAgentsData
 
@@ -751,7 +762,7 @@ export const Chat = ({
           ) : null}
           {hasMentionSuggestions ? (
             <SuggestionMenu
-              items={agentSuggestionItems}
+              items={[...agentSuggestionItems, ...fileSuggestionItems]}
               selectedIndex={agentSelectedIndex}
               maxVisible={10}
               prefix="@"

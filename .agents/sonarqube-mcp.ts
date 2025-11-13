@@ -147,7 +147,7 @@ const agent: AgentDefinition = {
 
     // Check if the prompt contains a SonarCloud URL
     const sonarCloudUrlRegex = /https:\/\/sonarcloud\.io\/[^?]*\?id=([^&]+)(?:&pullRequest=(\d+))?/
-    const match = prompt.match(sonarCloudUrlRegex)
+    const match = prompt?.match(sonarCloudUrlRegex)
 
     if (match) {
       const projectId = match[1]
@@ -161,7 +161,7 @@ const agent: AgentDefinition = {
         : `Analyze the project '${projectId}'.`
 
       // Add context to help the agent use the correct parameters
-      agentState.messages.push({
+      agentState.messageHistory.push({
         role: 'assistant',
         content: `I've detected a SonarCloud URL. ${analysisContext} I'll query the SonarQube API with project key '${projectId}'${pullRequestNumber ? ` and pull request '${pullRequestNumber}'` : ''}.`,
       })

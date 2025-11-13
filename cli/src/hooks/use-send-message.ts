@@ -13,6 +13,7 @@ import { formatTimestamp } from '../utils/helpers'
 import { loadAgentDefinitions } from '../utils/load-agent-definitions'
 import { getLoadedAgentsData } from '../utils/local-agent-registry'
 import { logger } from '../utils/logger'
+import { getUserMessage } from '../utils/message-history'
 
 import type { ElapsedTimeTracker } from './use-elapsed-time'
 import type { StreamStatus } from './use-message-queue'
@@ -82,31 +83,6 @@ const scrubPlanTagsInBlocks = (blocks: ContentBlock[]): ContentBlock[] => {
       return b
     })
     .filter((b) => b.type !== 'text' || b.content.trim() !== '')
-}
-
-/**
- * Auto-collapse thinking blocks to reduce UI clutter.
- * Tracks which thinking blocks have been collapsed to avoid duplicate collapses.
- *
- * @param messageId - ID of the message containing the thinking block
- * @param agentId - Optional agent ID for nested agent thinking blocks
- * @param autoCollapsedThinkingIdsRef - Ref tracking which thinking IDs have been auto-collapsed
- * @param setCollapsedAgents - State setter for collapsed agents
- */
-const autoCollapseThinkingBlock = (
-  messageId: string,
-  agentId: string | undefined,
-  autoCollapsedThinkingIdsRef: React.MutableRefObject<Set<string>>,
-  setCollapsedAgents: React.Dispatch<React.SetStateAction<Set<string>>>,
-) => {
-  const thinkingId = agentId
-    ? `${messageId}-agent-${agentId}-thinking-0`
-    : `${messageId}-thinking-0`
-
-  if (!autoCollapsedThinkingIdsRef.current.has(thinkingId)) {
-    autoCollapsedThinkingIdsRef.current.add(thinkingId)
-    setCollapsedAgents((prev) => new Set(prev).add(thinkingId))
-  }
 }
 
 export type SendMessageTimerEvent =
@@ -404,7 +380,6 @@ export const useSendMessage = ({
   const sendMessage = useCallback<SendMessageFn>(
     async (params: ParamsOf<SendMessageFn>) => {
       const { content, agentMode, postUserMessage } = params
-      const timestamp = formatTimestamp()
 
       if (agentMode !== 'PLAN') {
         setHasReceivedPlanResponse(false)
@@ -424,14 +399,6 @@ export const useSendMessage = ({
       // Also show divider on first message (when lastMessageMode is null)
       const shouldInsertDivider =
         lastMessageMode === null || lastMessageMode !== agentMode
-
-      // Add user message to UI first
-      const userMessage: ChatMessage = {
-        id: `user-${Date.now()}`,
-        variant: 'user',
-        content,
-        timestamp,
-      }
 
       applyMessageUpdate((prev) => {
         let newMessages = [...prev]
@@ -453,7 +420,8 @@ export const useSendMessage = ({
           newMessages.push(dividerMessage)
         }
 
-        newMessages.push(userMessage)
+        // Add user message to UI first
+        newMessages.push(getUserMessage(content))
 
         if (postUserMessage) {
           newMessages = postUserMessage(newMessages)
@@ -689,16 +657,6 @@ export const useSendMessage = ({
       ) => {
         if (!delta.text) {
           return
-        }
-
-        // Auto-collapse thinking blocks on first reasoning content
-        if (delta.type === 'reasoning') {
-          autoCollapseThinkingBlock(
-            aiMessageId,
-            undefined,
-            autoCollapsedThinkingIdsRef,
-            setCollapsedAgents,
-          )
         }
 
         queueMessageUpdate((prev) =>
@@ -946,16 +904,6 @@ export const useSendMessage = ({
                   event.agentId,
                   previous + text,
                 )
-
-                // Auto-collapse thinking blocks for subagents on first content
-                if (previous.length === 0) {
-                  autoCollapseThinkingBlock(
-                    aiMessageId,
-                    event.agentId,
-                    autoCollapsedThinkingIdsRef,
-                    setCollapsedAgents,
-                  )
-                }
 
                 updateAgentContent(event.agentId, {
                   type: 'text',
@@ -1580,6 +1528,8 @@ export const useSendMessage = ({
           },
         })
 
+        previousRunStateRef.current = runState
+
         if (!runState.output || runState.output.type === 'error') {
           logger.warn(
             {
@@ -1625,8 +1575,6 @@ export const useSendMessage = ({
             }
           }),
         )
-
-        previousRunStateRef.current = runState
       } catch (error) {
         logger.error(
           { error: getErrorObject(error) },

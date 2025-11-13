@@ -82,6 +82,7 @@ export const runAgentStep = async (
     | 'agentTemplate'
     | 'agentContext'
     | 'fullResponse'
+    | 'onCostCalculated'
   > &
     ParamsExcluding<
       typeof getAgentStreamFromTemplate,
@@ -248,27 +249,19 @@ export const runAgentStep = async (
 
   const { model } = agentTemplate
 
+  let stepCreditsUsed = 0
+
+  const onCostCalculated = async (credits: number) => {
+    stepCreditsUsed += credits
+    agentState.creditsUsed += credits
+    agentState.directCreditsUsed += credits
+  }
+
   const { getStream } = getAgentStreamFromTemplate({
     ...params,
     agentId: agentState.parentId ? agentState.agentId : undefined,
     template: agentTemplate,
-    onCostCalculated: async (credits: number) => {
-      try {
-        agentState.creditsUsed += credits
-        agentState.directCreditsUsed += credits
-        // Transactional cost attribution: ensure costs are actually deducted
-        // This is already handled by the saveMessage function which calls updateUserCycleUsage
-        // If that fails, the promise rejection will bubble up and halt agent execution
-      } catch (error) {
-        logger.error(
-          { agentId: agentState.agentId, credits, error },
-          'Failed to add cost to agent state',
-        )
-        throw new Error(
-          `Cost tracking failed for agent ${agentState.agentId}: ${error}`,
-        )
-      }
-    },
+    onCostCalculated,
     includeCacheControl: supportsCacheControl(agentTemplate.model),
   })
 
@@ -318,6 +311,7 @@ export const runAgentStep = async (
     agentTemplate,
     agentContext,
     fullResponse,
+    onCostCalculated,
   })
   toolResults.push(...newToolResults)
 
@@ -426,6 +420,7 @@ export const runAgentStep = async (
       toolResults,
       agentContext: newAgentContext,
       fullResponseChunks,
+      stepCreditsUsed,
     },
     `End agent ${agentType} step ${iterationNum} (${userInputId}${prompt ? ` - Prompt: ${prompt.slice(0, 20)}` : ''})`,
   )
@@ -469,6 +464,7 @@ export async function loopAgentSteps(
     | 'stepsComplete'
     | 'stepNumber'
     | 'system'
+    | 'onCostCalculated'
   > &
     ParamsExcluding<typeof getAgentTemplate, 'agentId' | 'modelOverride'> &
     ParamsExcluding<
@@ -683,6 +679,10 @@ export async function loopAgentSteps(
           system,
           stepsComplete: shouldEndTurn,
           stepNumber: totalSteps,
+          onCostCalculated: async (credits: number) => {
+            agentState.creditsUsed += credits
+            agentState.directCreditsUsed += credits
+          },
         })
         const {
           agentState: programmaticAgentState,

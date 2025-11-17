@@ -446,6 +446,7 @@ export async function loopAgentSteps(
     clearUserPromptMessagesAfterResponse?: boolean
     parentSystemPrompt?: string
     modelOverride?: string
+    signal: AbortSignal
 
     userId: string | undefined
     clientSessionId: string
@@ -522,6 +523,7 @@ export async function loopAgentSteps(
     clearUserPromptMessagesAfterResponse = true,
     parentSystemPrompt,
     modelOverride,
+    signal,
     startAgentRun,
     finishAgentRun,
     addAgentStep,
@@ -535,6 +537,16 @@ export async function loopAgentSteps(
   })
   if (!agentTemplate) {
     throw new Error(`Agent template not found for type: ${agentType}`)
+  }
+
+  if (signal.aborted) {
+    return {
+      agentState,
+      output: {
+        type: 'error',
+        message: 'Run cancelled by user',
+      }
+    }
   }
 
   const runId = await startAgentRun({

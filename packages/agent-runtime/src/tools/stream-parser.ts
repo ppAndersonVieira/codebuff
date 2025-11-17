@@ -12,7 +12,6 @@ import type { AgentTemplate } from '../templates/types'
 import type { ToolName } from '@codebuff/common/tools/constants'
 import type { CodebuffToolCall } from '@codebuff/common/tools/list'
 import type { SendSubagentChunkFn } from '@codebuff/common/types/contracts/client'
-import type { StreamChunk } from '@codebuff/common/types/contracts/llm'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type {
@@ -33,11 +32,8 @@ export type ToolCallError = {
 
 export async function processStreamWithTools(
   params: {
-    stream: AsyncGenerator<StreamChunk>
-    agentStepId: string
     clientSessionId: string
     fingerprintId: string
-    userInputId: string
     userId: string | undefined
     repoId: string | undefined
     ancestorRunIds: string[]
@@ -49,6 +45,7 @@ export async function processStreamWithTools(
     system: string
     agentState: AgentState
     agentContext: Record<string, Subgoal>
+    signal: AbortSignal
     onResponseChunk: (chunk: string | PrintModeEvent) => void
     fullResponse: string
     sendSubagentChunk: SendSubagentChunkFn
@@ -72,10 +69,7 @@ export async function processStreamWithTools(
     >,
 ) {
   const {
-    stream,
-    agentStepId,
     fingerprintId,
-    userInputId,
     userId,
     ancestorRunIds,
     runId,
@@ -86,6 +80,7 @@ export async function processStreamWithTools(
     agentContext,
     system,
     agentState,
+    signal,
     onResponseChunk,
     sendSubagentChunk,
     modelOverride,
@@ -122,6 +117,9 @@ export async function processStreamWithTools(
     return {
       onTagStart: () => {},
       onTagEnd: async (_: string, input: Record<string, string>) => {
+        if (signal.aborted) {
+          return
+        }
         // delegated to reusable helper
         previousToolCallFinished = executeToolCall({
           ...params,
@@ -143,6 +141,9 @@ export async function processStreamWithTools(
     return {
       onTagStart: () => {},
       onTagEnd: async (_: string, input: Record<string, string>) => {
+        if (signal.aborted) {
+          return
+        }
         // delegated to reusable helper
         previousToolCallFinished = executeCustomToolCall({
           ...params,
@@ -188,6 +189,9 @@ export async function processStreamWithTools(
 
   let messageId: string | null = null
   while (true) {
+    if (signal.aborted) {
+      break
+    }
     const { value: chunk, done } = await streamWithTags.next()
     if (done) {
       messageId = chunk
@@ -225,8 +229,10 @@ export async function processStreamWithTools(
     }),
   ])
 
-  resolveStreamDonePromise()
-  await previousToolCallFinished
+  if (!signal.aborted) {
+    resolveStreamDonePromise()
+    await previousToolCallFinished
+  }
   return {
     toolCalls,
     toolResults,

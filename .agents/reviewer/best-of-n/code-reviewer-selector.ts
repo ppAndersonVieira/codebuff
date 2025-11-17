@@ -1,8 +1,8 @@
+import { publisher } from '../../constants'
 import {
   PLACEHOLDER,
   type SecretAgentDefinition,
-} from '../types/secret-agent-definition'
-import { publisher } from '../constants'
+} from '../../types/secret-agent-definition'
 
 export const createCodeReviewerSelector = (options: {
   model: 'sonnet' | 'gpt-5'
@@ -13,7 +13,7 @@ export const createCodeReviewerSelector = (options: {
 
   return {
     publisher,
-    model: isSonnet ? 'anthropic/claude-sonnet-4.5' : 'openai/gpt-5',
+    model: isSonnet ? 'anthropic/claude-sonnet-4.5' : 'openai/gpt-5.1',
     ...(isGpt5 && {
       reasoningOptions: {
         effort: 'high',
@@ -56,12 +56,8 @@ export const createCodeReviewerSelector = (options: {
           type: 'string',
           description: 'The id of the chosen review',
         },
-        reasoning: {
-          type: 'string',
-          description: 'Reasoning for selecting this review',
-        },
       },
-      required: ['reviewId', 'reasoning'],
+      required: ['reviewId'],
     },
 
     instructionsPrompt: `As part of the best-of-n code reviewer workflow, you are the review selector agent.

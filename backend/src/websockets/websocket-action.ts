@@ -100,7 +100,7 @@ const onPrompt = async (
     logger: Logger
   } & ParamsExcluding<
     typeof callMainPrompt,
-    'userId' | 'promptId' | 'repoId' | 'repoUrl' | 'modelOverride'
+    'userId' | 'promptId' | 'repoId' | 'repoUrl' | 'modelOverride' | 'signal'
   >,
 ) => {
   const { action, ws, getUserInfoFromApiKey, logger } = params
@@ -149,6 +149,7 @@ const onPrompt = async (
           repoUrl,
           repoId,
           modelOverride: model,
+          signal: new AbortController().signal,
         })
         if (result.output.type === 'error') {
           throw new Error(result.output.message)

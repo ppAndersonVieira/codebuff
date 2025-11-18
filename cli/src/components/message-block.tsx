@@ -1,13 +1,21 @@
 import { TextAttributes } from '@opentui/core'
+import { pluralize } from '@codebuff/common/util/string'
 import React, { memo, useCallback, type ReactNode } from 'react'
 
 import { AgentBranchItem } from './agent-branch-item'
 import { ElapsedTimer } from './elapsed-timer'
+import { FeedbackIconButton } from './feedback-icon-button'
 import { useTheme } from '../hooks/use-theme'
 import { useWhyDidYouUpdateById } from '../hooks/use-why-did-you-update'
 import { isTextBlock, isToolBlock } from '../types/chat'
 import { logger } from '../utils/logger'
 import { type MarkdownPalette } from '../utils/markdown-renderer'
+import {
+  useFeedbackStore,
+  selectIsFeedbackOpenForMessage,
+  selectHasSubmittedFeedback,
+  selectMessageFeedbackCategory,
+} from '../state/feedback-store'
 
 import type {
   ContentBlock,
@@ -39,11 +47,12 @@ interface MessageBlockProps {
   markdownOptions: { codeBlockWidth: number; palette: MarkdownPalette }
   availableWidth: number
   markdownPalette: MarkdownPalette
-  collapsedAgents: Set<string>
   streamingAgents: Set<string>
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
+  onFeedback?: (messageId: string) => void
+  onCloseFeedback?: () => void
 }
 
 export const MessageBlock = memo((props: MessageBlockProps): ReactNode => {
@@ -64,14 +73,12 @@ export const MessageBlock = memo((props: MessageBlockProps): ReactNode => {
     markdownOptions,
     availableWidth,
     markdownPalette,
-    collapsedAgents,
-    autoCollapsedAgents,
     streamingAgents,
     onToggleCollapsed,
     onBuildFast,
     onBuildMax,
-    setCollapsedAgents,
-    addAutoCollapsedAgent,
+    onFeedback,
+    onCloseFeedback,
   } = props
   useWhyDidYouUpdateById('MessageBlock', messageId, props, {
     logLevel: 'debug',
@@ -79,7 +86,147 @@ export const MessageBlock = memo((props: MessageBlockProps): ReactNode => {
   })
 
   const theme = useTheme()
+  const isFeedbackOpen = useFeedbackStore(selectIsFeedbackOpenForMessage(messageId))
+  const hasSubmittedFeedback = useFeedbackStore(selectHasSubmittedFeedback(messageId))
+  const selectedFeedbackCategory = useFeedbackStore(selectMessageFeedbackCategory(messageId))
+
   const resolvedTextColor = textColor ?? theme.foreground
+  const shouldShowLoadingTimer = isAi && isLoading && !isComplete
+  const shouldShowCompletionFooter = isAi && isComplete
+  const canRequestFeedback =
+    shouldShowCompletionFooter && !hasSubmittedFeedback
+  const isGoodOrBadSelection =
+    selectedFeedbackCategory === 'good_result' ||
+    selectedFeedbackCategory === 'bad_result'
+  const shouldShowSubmittedFeedbackState =
+    shouldShowCompletionFooter && hasSubmittedFeedback && isGoodOrBadSelection
+  const shouldRenderFeedbackButton =
+    Boolean(onFeedback) && (canRequestFeedback || shouldShowSubmittedFeedbackState)
+
+  const handleFeedbackOpen = useCallback(() => {
+    if (!canRequestFeedback || !onFeedback) return
+    onFeedback(messageId)
+  }, [canRequestFeedback, onFeedback, messageId])
+
+  const handleFeedbackClose = useCallback(() => {
+    if (!canRequestFeedback) return
+    onCloseFeedback?.()
+  }, [canRequestFeedback, onCloseFeedback])
+
+  const renderLoadingTimer = () => {
+    if (!shouldShowLoadingTimer) {
+      return null
+    }
+    return (
+      <text
+        attributes={TextAttributes.DIM}
+        style={{
+          wrapMode: 'none',
+          marginTop: 0,
+          marginBottom: 0,
+          alignSelf: 'flex-end',
+        }}
+      >
+        <ElapsedTimer
+          startTime={timerStartTime}
+          attributes={TextAttributes.DIM}
+        />
+      </text>
+    )
+  }
+
+  const renderCompletionFooter = () => {
+    if (!shouldShowCompletionFooter) {
+      return null
+    }
+
+    const footerItems: { key: string; node: React.ReactNode }[] = []
+    if (completionTime) {
+      footerItems.push({
+        key: 'time',
+        node: (
+          <text
+            attributes={TextAttributes.DIM}
+            style={{
+              wrapMode: 'none',
+              fg: theme.secondary,
+              marginTop: 0,
+              marginBottom: 0,
+            }}
+          >
+            {completionTime}
+          </text>
+        ),
+      })
+    }
+    if (typeof credits === 'number' && credits > 0) {
+      footerItems.push({
+        key: 'credits',
+        node: (
+          <text
+            attributes={TextAttributes.DIM}
+            style={{
+              wrapMode: 'none',
+              fg: theme.secondary,
+              marginTop: 0,
+              marginBottom: 0,
+            }}
+          >
+            {pluralize(credits, 'credit')}
+          </text>
+        ),
+      })
+    }
+    if (shouldRenderFeedbackButton) {
+      footerItems.push({
+        key: 'feedback',
+        node: (
+          <FeedbackIconButton
+            onClick={handleFeedbackOpen}
+            onClose={handleFeedbackClose}
+            isOpen={canRequestFeedback ? isFeedbackOpen : false}
+            messageId={messageId}
+            selectedCategory={selectedFeedbackCategory}
+            hasSubmittedFeedback={hasSubmittedFeedback}
+          />
+        ),
+      })
+    }
+
+    if (footerItems.length === 0) {
+      return null
+    }
+
+    return (
+      <box
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          alignSelf: 'flex-end',
+          gap: 1,
+        }}
+      >
+        {footerItems.map((item, idx) => (
+          <React.Fragment key={item.key}>
+            {idx > 0 && (
+              <text
+                attributes={TextAttributes.DIM}
+                style={{
+                  wrapMode: 'none',
+                  fg: theme.muted,
+                  marginTop: 0,
+                  marginBottom: 0,
+                }}
+              >
+                •
+              </text>
+            )}
+            {item.node}
+          </React.Fragment>
+        ))}
+      </box>
+    )
+  }
 
   return (
     <>
@@ -108,14 +255,10 @@ export const MessageBlock = memo((props: MessageBlockProps): ReactNode => {
             textColor={resolvedTextColor}
             availableWidth={availableWidth}
             markdownPalette={markdownPalette}
-            collapsedAgents={collapsedAgents}
-            autoCollapsedAgents={autoCollapsedAgents}
             streamingAgents={streamingAgents}
             onToggleCollapsed={onToggleCollapsed}
             onBuildFast={onBuildFast}
             onBuildMax={onBuildMax}
-            setCollapsedAgents={setCollapsedAgents}
-            addAutoCollapsedAgent={addAutoCollapsedAgent}
           />
         </box>
       ) : (
@@ -132,37 +275,8 @@ export const MessageBlock = memo((props: MessageBlockProps): ReactNode => {
       )}
       {isAi && (
         <>
-          {isLoading && !isComplete && (
-            <text
-              attributes={TextAttributes.DIM}
-              style={{
-                wrapMode: 'none',
-                marginTop: 0,
-                marginBottom: 0,
-                alignSelf: 'flex-end',
-              }}
-            >
-              <ElapsedTimer
-                startTime={timerStartTime}
-                attributes={TextAttributes.DIM}
-              />
-            </text>
-          )}
-          {isComplete && (
-            <text
-              attributes={TextAttributes.DIM}
-              style={{
-                wrapMode: 'none',
-                fg: theme.secondary,
-                marginTop: 0,
-                marginBottom: 0,
-                alignSelf: 'flex-end',
-              }}
-            >
-              {completionTime}
-              {credits && ` • ${credits} credits`}
-            </text>
-          )}
+          {renderLoadingTimer()}
+          {renderCompletionFooter()}
         </>
       )}
     </>
@@ -212,33 +326,6 @@ const isRenderableTimelineBlock = (
   }
 }
 
-interface MessageBlockProps {
-  messageId: string
-  blocks?: ContentBlock[]
-  content: string
-  isUser: boolean
-  isAi: boolean
-  isLoading: boolean
-  timestamp: string
-  isComplete?: boolean
-  completionTime?: string
-  credits?: number
-  timerStartTime: number | null
-  textColor?: ThemeColor
-  timestampColor: string
-  markdownOptions: { codeBlockWidth: number; palette: MarkdownPalette }
-  availableWidth: number
-  markdownPalette: MarkdownPalette
-  collapsedAgents: Set<string>
-  autoCollapsedAgents: Set<string>
-  streamingAgents: Set<string>
-  onToggleCollapsed: (id: string) => void
-  onBuildFast: () => void
-  onBuildMax: () => void
-  setCollapsedAgents: (value: (prev: Set<string>) => Set<string>) => void
-  addAutoCollapsedAgent: (value: string) => void
-}
-
 interface AgentBodyProps {
   agentBlock: Extract<ContentBlock, { type: 'agent' }>
   indentLevel: number
@@ -246,14 +333,10 @@ interface AgentBodyProps {
   parentIsStreaming: boolean
   availableWidth: number
   markdownPalette: MarkdownPalette
-  collapsedAgents: Set<string>
-  autoCollapsedAgents: Set<string>
   streamingAgents: Set<string>
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
-  setCollapsedAgents: (value: (prev: Set<string>) => Set<string>) => void
-  addAutoCollapsedAgent: (value: string) => void
 }
 
 const AgentBody = memo(
@@ -264,14 +347,10 @@ const AgentBody = memo(
     parentIsStreaming,
     availableWidth,
     markdownPalette,
-    collapsedAgents,
-    autoCollapsedAgents,
     streamingAgents,
     onToggleCollapsed,
     onBuildFast,
     onBuildMax,
-    setCollapsedAgents,
-    addAutoCollapsedAgent,
   }: AgentBodyProps): ReactNode[] => {
     const theme = useTheme()
     const nestedBlocks = agentBlock.blocks ?? []
@@ -313,10 +392,6 @@ const AgentBody = memo(
             keyPrefix={keyPrefix}
             startIndex={start}
             indentLevel={indentLevel}
-            collapsedAgents={collapsedAgents}
-            setCollapsedAgents={setCollapsedAgents}
-            autoCollapsedAgents={autoCollapsedAgents}
-            addAutoCollapsedAgent={addAutoCollapsedAgent}
             onToggleCollapsed={onToggleCollapsed}
             availableWidth={availableWidth}
           />,
@@ -403,7 +478,6 @@ const AgentBody = memo(
               indentLevel={indentLevel}
               keyPrefix={`${keyPrefix}-tool-${toolBlock.toolCallId}`}
               availableWidth={availableWidth}
-              collapsedAgents={collapsedAgents}
               streamingAgents={streamingAgents}
               onToggleCollapsed={onToggleCollapsed}
               markdownPalette={markdownPalette}
@@ -450,14 +524,10 @@ const AgentBody = memo(
               keyPrefix={`${keyPrefix}-agent-${nestedIdx}`}
               availableWidth={availableWidth}
               markdownPalette={markdownPalette}
-              collapsedAgents={collapsedAgents}
-              autoCollapsedAgents={autoCollapsedAgents}
               streamingAgents={streamingAgents}
               onToggleCollapsed={onToggleCollapsed}
               onBuildFast={onBuildFast}
               onBuildMax={onBuildMax}
-              setCollapsedAgents={setCollapsedAgents}
-              addAutoCollapsedAgent={addAutoCollapsedAgent}
             />,
           )
           nestedIdx++
@@ -476,14 +546,10 @@ interface AgentBranchWrapperProps {
   keyPrefix: string
   availableWidth: number
   markdownPalette: MarkdownPalette
-  collapsedAgents: Set<string>
-  autoCollapsedAgents: Set<string>
   streamingAgents: Set<string>
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
-  setCollapsedAgents: (value: (prev: Set<string>) => Set<string>) => void
-  addAutoCollapsedAgent: (value: string) => void
 }
 
 const AgentBranchWrapper = memo(
@@ -493,17 +559,13 @@ const AgentBranchWrapper = memo(
     keyPrefix,
     availableWidth,
     markdownPalette,
-    collapsedAgents,
-    autoCollapsedAgents,
     streamingAgents,
     onToggleCollapsed,
     onBuildFast,
     onBuildMax,
-    setCollapsedAgents,
-    addAutoCollapsedAgent,
   }: AgentBranchWrapperProps) => {
     const theme = useTheme()
-    const isCollapsed = collapsedAgents.has(agentBlock.agentId)
+    const isCollapsed = agentBlock.isCollapsed ?? false
     const isStreaming =
       agentBlock.status === 'running' || streamingAgents.has(agentBlock.agentId)
 
@@ -547,6 +609,15 @@ const AgentBranchWrapper = memo(
       onToggleCollapsed(agentBlock.agentId)
     }, [onToggleCollapsed, agentBlock.agentId])
 
+    // Create a status message for editor-best-of-n and thinker-best-of-n agents
+    const nParameterMessage =
+      agentBlock.params?.n !== undefined &&
+      (agentBlock.agentType.includes('editor-best-of-n')
+        ? `Generating ${agentBlock.params.n} implementations...`
+        : agentBlock.agentType.includes('thinker-best-of-n')
+          ? `Generating ${agentBlock.params.n} deep thoughts...`
+          : undefined)
+
     return (
       <box key={keyPrefix} style={{ flexDirection: 'column', gap: 0 }}>
         <AgentBranchItem
@@ -562,6 +633,18 @@ const AgentBranchWrapper = memo(
           statusIndicator={statusIndicator}
           onToggle={onToggle}
         >
+          {nParameterMessage && (
+            <text
+              style={{
+                wrapMode: 'word',
+                fg: theme.muted,
+                marginBottom: 1,
+              }}
+              attributes={TextAttributes.ITALIC}
+            >
+              {nParameterMessage}
+            </text>
+          )}
           <AgentBody
             agentBlock={agentBlock}
             indentLevel={indentLevel + 1}
@@ -569,14 +652,10 @@ const AgentBranchWrapper = memo(
             parentIsStreaming={isStreaming}
             availableWidth={availableWidth}
             markdownPalette={markdownPalette}
-            collapsedAgents={collapsedAgents}
-            autoCollapsedAgents={autoCollapsedAgents}
             streamingAgents={streamingAgents}
             onToggleCollapsed={onToggleCollapsed}
             onBuildFast={onBuildFast}
             onBuildMax={onBuildMax}
-            setCollapsedAgents={setCollapsedAgents}
-            addAutoCollapsedAgent={addAutoCollapsedAgent}
           />
         </AgentBranchItem>
       </box>
@@ -639,14 +718,10 @@ interface SingleBlockProps {
   textColor: string
   availableWidth: number
   markdownPalette: MarkdownPalette
-  collapsedAgents: Set<string>
-  autoCollapsedAgents: Set<string>
   streamingAgents: Set<string>
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
-  setCollapsedAgents: (value: (prev: Set<string>) => Set<string>) => void
-  addAutoCollapsedAgent: (value: string) => void
 }
 
 const SingleBlock = memo(
@@ -661,14 +736,10 @@ const SingleBlock = memo(
     textColor,
     availableWidth,
     markdownPalette,
-    collapsedAgents,
-    autoCollapsedAgents,
     streamingAgents,
     onToggleCollapsed,
     onBuildFast,
     onBuildMax,
-    setCollapsedAgents,
-    addAutoCollapsedAgent,
   }: SingleBlockProps): ReactNode => {
     const theme = useTheme()
     const codeBlockWidth = Math.max(10, availableWidth - 8)
@@ -761,14 +832,10 @@ const SingleBlock = memo(
             keyPrefix={`${messageId}-agent-${block.agentId}`}
             availableWidth={availableWidth}
             markdownPalette={markdownPalette}
-            collapsedAgents={collapsedAgents}
-            autoCollapsedAgents={autoCollapsedAgents}
             streamingAgents={streamingAgents}
             onToggleCollapsed={onToggleCollapsed}
             onBuildFast={onBuildFast}
             onBuildMax={onBuildMax}
-            setCollapsedAgents={setCollapsedAgents}
-            addAutoCollapsedAgent={addAutoCollapsedAgent}
           />
         )
       }
@@ -779,7 +846,6 @@ const SingleBlock = memo(
             key={`${messageId}-agent-list-${block.id}`}
             agentListBlock={block}
             keyPrefix={`${messageId}-agent-list-${block.id}`}
-            collapsedAgents={collapsedAgents}
             onToggleCollapsed={onToggleCollapsed}
           />
         )
@@ -800,14 +866,10 @@ interface BlocksRendererProps {
   textColor: string
   availableWidth: number
   markdownPalette: MarkdownPalette
-  collapsedAgents: Set<string>
-  autoCollapsedAgents: Set<string>
   streamingAgents: Set<string>
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
-  setCollapsedAgents: (value: (prev: Set<string>) => Set<string>) => void
-  addAutoCollapsedAgent: (value: string) => void
 }
 
 const BlocksRenderer = memo(
@@ -820,14 +882,10 @@ const BlocksRenderer = memo(
     textColor,
     availableWidth,
     markdownPalette,
-    collapsedAgents,
-    autoCollapsedAgents,
     streamingAgents,
     onToggleCollapsed,
     onBuildFast,
     onBuildMax,
-    setCollapsedAgents,
-    addAutoCollapsedAgent,
   }: BlocksRendererProps) => {
     const nodes: React.ReactNode[] = []
     for (let i = 0; i < sourceBlocks.length; ) {
@@ -850,10 +908,6 @@ const BlocksRenderer = memo(
             keyPrefix={messageId}
             startIndex={start}
             indentLevel={0}
-            collapsedAgents={collapsedAgents}
-            setCollapsedAgents={setCollapsedAgents}
-            autoCollapsedAgents={autoCollapsedAgents}
-            addAutoCollapsedAgent={addAutoCollapsedAgent}
             onToggleCollapsed={onToggleCollapsed}
             availableWidth={availableWidth}
           />,
@@ -877,7 +931,6 @@ const BlocksRenderer = memo(
             indentLevel={0}
             keyPrefix={`${messageId}-tool-${toolBlock.toolCallId}`}
             availableWidth={availableWidth}
-            collapsedAgents={collapsedAgents}
             streamingAgents={streamingAgents}
             onToggleCollapsed={onToggleCollapsed}
             markdownPalette={markdownPalette}
@@ -928,14 +981,10 @@ const BlocksRenderer = memo(
           textColor={textColor}
           availableWidth={availableWidth}
           markdownPalette={markdownPalette}
-          collapsedAgents={collapsedAgents}
-          autoCollapsedAgents={autoCollapsedAgents}
           streamingAgents={streamingAgents}
           onToggleCollapsed={onToggleCollapsed}
           onBuildFast={onBuildFast}
           onBuildMax={onBuildMax}
-          setCollapsedAgents={setCollapsedAgents}
-          addAutoCollapsedAgent={addAutoCollapsedAgent}
         />,
       )
       i++

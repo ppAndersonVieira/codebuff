@@ -11,7 +11,8 @@ const MODEL_MAPPING: Record<string, string> = {
   'gpt-5-mini': 'grok-code-fast-1',
   'gemini-2.5-flash': 'grok-code-fast-1',
   'grok-4-fast': 'grok-code-fast-1',
-  'gemini-2.0-flash-001' : 'grok-code-fast-1'
+  'gemini-2.0-flash-001' : 'grok-code-fast-1',
+  'gpt-5' : 'gpt-5.1-codex'
 }
 
 /**

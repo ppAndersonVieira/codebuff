@@ -14,6 +14,11 @@ import { loadAgentDefinitions } from '../utils/load-agent-definitions'
 import { getLoadedAgentsData } from '../utils/local-agent-registry'
 import { logger } from '../utils/logger'
 import { getUserMessage } from '../utils/message-history'
+import {
+  loadMostRecentChatState,
+  saveChatState,
+} from '../utils/run-state-storage'
+import { setCurrentChatId } from '../project-files'
 
 import type { ElapsedTimeTracker } from './use-elapsed-time'
 import type { StreamStatus } from './use-message-queue'
@@ -22,7 +27,7 @@ import type { SendMessageFn } from '../types/contracts/send-message'
 import type { ParamsOf } from '../types/function-params'
 import type { SetElement } from '../types/utils'
 import type { AgentMode } from '../utils/constants'
-import type { AgentDefinition, ToolName } from '@codebuff/sdk'
+import type { AgentDefinition, RunState, ToolName } from '@codebuff/sdk'
 import type { SetStateAction } from 'react'
 const hiddenToolNames = new Set<ToolName | 'spawn_agent_inline'>([
   'spawn_agent_inline',
@@ -41,8 +46,10 @@ const updateBlocksRecursively = (
   targetAgentId: string,
   updateFn: (block: ContentBlock) => ContentBlock,
 ): ContentBlock[] => {
-  return blocks.map((block) => {
+  let foundTarget = false
+  const result = blocks.map((block) => {
     if (block.type === 'agent' && block.agentId === targetAgentId) {
+      foundTarget = true
       return updateFn(block)
     }
     if (block.type === 'agent' && block.blocks) {
@@ -51,20 +58,20 @@ const updateBlocksRecursively = (
         targetAgentId,
         updateFn,
       )
-      // Avoid creating a new block if nested blocks haven't changed
-      if (
-        block.blocks === updatedBlocks ||
-        isEqual(block.blocks, updatedBlocks)
-      ) {
-        return block
-      }
-      return {
-        ...block,
-        blocks: updatedBlocks,
+      // Only create new block if nested blocks actually changed
+      if (updatedBlocks !== block.blocks) {
+        foundTarget = true
+        return {
+          ...block,
+          blocks: updatedBlocks,
+        }
       }
     }
     return block
   })
+
+  // Return original array reference if nothing changed
+  return foundTarget ? result : blocks
 }
 
 const scrubPlanTags = (s: string) =>
@@ -185,8 +192,6 @@ interface UseSendMessageOptions {
   setInputFocused: (focused: boolean) => void
   inputRef: React.MutableRefObject<any>
   setStreamingAgents: React.Dispatch<React.SetStateAction<Set<string>>>
-  setCollapsedAgents: React.Dispatch<React.SetStateAction<Set<string>>>
-  userOpenedAgents: Set<string>
   activeSubagentsRef: React.MutableRefObject<Set<string>>
   isChainInProgressRef: React.MutableRefObject<boolean>
   setActiveSubagents: React.Dispatch<React.SetStateAction<Set<string>>>
@@ -209,8 +214,11 @@ interface UseSendMessageOptions {
   lastMessageMode: AgentMode | null
   setLastMessageMode: (mode: AgentMode | null) => void
   addSessionCredits: (credits: number) => void
+  setRunState: (runState: RunState | null) => void
   isQueuePausedRef?: React.MutableRefObject<boolean>
   resumeQueue?: () => void
+  continueChat: boolean
+  continueChatId?: string
 }
 
 export const useSendMessage = ({
@@ -221,8 +229,6 @@ export const useSendMessage = ({
   setInputFocused,
   inputRef,
   setStreamingAgents,
-  setCollapsedAgents,
-  userOpenedAgents,
   activeSubagentsRef,
   isChainInProgressRef,
   setActiveSubagents,
@@ -242,13 +248,46 @@ export const useSendMessage = ({
   lastMessageMode,
   setLastMessageMode,
   addSessionCredits,
+  setRunState,
   isQueuePausedRef,
   resumeQueue,
+  continueChat,
+  continueChatId,
 }: UseSendMessageOptions): {
   sendMessage: SendMessageFn
   clearMessages: () => void
 } => {
-  const previousRunStateRef = useRef<any>(null)
+  const previousRunStateRef = useRef<RunState | null>(null)
+
+  // Load previous chat state on mount if continueChat is true
+  useEffect(() => {
+    if (continueChat && !previousRunStateRef.current) {
+      const loadedState = loadMostRecentChatState(continueChatId ?? undefined)
+      if (loadedState) {
+        previousRunStateRef.current = loadedState.runState
+        setRunState(loadedState.runState)
+        setMessages(loadedState.messages)
+
+        // Ensure subsequent saves use this conversation id
+        if (loadedState.chatId) {
+          setCurrentChatId(loadedState.chatId)
+        }
+
+        logger.info(
+          {
+            messageCount: loadedState.messages.length,
+            chatId: loadedState.chatId,
+          },
+          'Loaded previous chat state for continuation',
+        )
+      } else {
+        logger.info(
+          { chatId: continueChatId ?? null },
+          'No previous chat state found to continue from',
+        )
+      }
+    }
+  }, [continueChat, continueChatId, setMessages, setRunState])
   const spawnAgentsMapRef = useRef<
     Map<string, { index: number; agentType: string }>
   >(new Map())
@@ -256,7 +295,6 @@ export const useSendMessage = ({
   const agentStreamAccumulatorsRef = useRef<Map<string, string>>(new Map())
   const rootStreamSeenRef = useRef(false)
   const planExtractedRef = useRef(false)
-  const autoCollapsedThinkingIdsRef = useRef<Set<string>>(new Set())
 
   const updateChainInProgress = useCallback(
     (value: boolean) => {
@@ -437,19 +475,6 @@ export const useSendMessage = ({
 
       await yieldToEventLoop()
 
-      // Auto-collapse previous message toggles to minimize clutter.
-      // Respects user intent by keeping toggles open that the user manually expanded.
-      setCollapsedAgents((prev) => {
-        const next = new Set(prev)
-        // Add all previous toggle IDs to collapsed, except those the user manually opened
-        for (const id of previousToggleIds) {
-          if (!userOpenedAgents.has(id)) {
-            next.add(id)
-          }
-        }
-        return next
-      })
-
       // Scroll to bottom after user message appears
       setTimeout(() => scrollToLatest(), 0)
 
@@ -524,6 +549,84 @@ export const useSendMessage = ({
         blocks: [],
         timestamp: formatTimestamp(),
       }
+
+      // Auto-collapse previous message toggles to minimize clutter.
+      // Respects user intent by keeping toggles open that the user manually expanded.
+      applyMessageUpdate((prev) => {
+        return prev.map((message) => {
+          // Don't collapse the message we just added
+          if (message.id === aiMessageId) {
+            return message
+          }
+
+          // Handle agent variant messages
+          if (message.variant === 'agent') {
+            const userOpened = message.metadata?.userOpened ?? false
+            return userOpened
+              ? message
+              : {
+                  ...message,
+                  metadata: {
+                    ...message.metadata,
+                    isCollapsed: true,
+                  },
+                }
+          }
+
+          // Handle blocks within messages
+          if (!message.blocks) return message
+
+          const autoCollapseBlocksRecursively = (
+            blocks: ContentBlock[],
+          ): ContentBlock[] => {
+            return blocks.map((block) => {
+              // Handle thinking blocks (grouped text blocks)
+              if (block.type === 'text' && block.thinkingId) {
+                return block.userOpened
+                  ? block
+                  : { ...block, isCollapsed: true }
+              }
+
+              // Handle agent blocks
+              if (block.type === 'agent') {
+                const updatedBlock = block.userOpened
+                  ? block
+                  : { ...block, isCollapsed: true }
+
+                // Recursively update nested blocks
+                if (updatedBlock.blocks) {
+                  return {
+                    ...updatedBlock,
+                    blocks: autoCollapseBlocksRecursively(updatedBlock.blocks),
+                  }
+                }
+                return updatedBlock
+              }
+
+              // Handle tool blocks
+              if (block.type === 'tool') {
+                return block.userOpened
+                  ? block
+                  : { ...block, isCollapsed: true }
+              }
+
+              // Handle agent-list blocks
+              if (block.type === 'agent-list') {
+                return block.userOpened
+                  ? block
+                  : { ...block, isCollapsed: true }
+              }
+
+              return block
+            })
+          }
+
+          return {
+            ...message,
+            blocks: autoCollapseBlocksRecursively(message.blocks),
+          }
+        })
+      })
 
       rootStreamBufferRef.current = ''
       rootStreamSeenRef.current = false
@@ -691,7 +794,10 @@ export const useSendMessage = ({
                   type: 'text',
                   content: delta.text,
                   textType: delta.type,
-                  ...(delta.type === 'reasoning' && { color: 'grey' }),
+                  ...(delta.type === 'reasoning' && {
+                    color: 'grey',
+                    isCollapsed: true,
+                  }),
                 },
               ],
             }
@@ -805,7 +911,7 @@ export const useSendMessage = ({
           logger,
           agent: selectedAgentDefinition ?? agentId ?? fallbackAgent,
           prompt: content,
-          previousRun: previousRunStateRef.current,
+          previousRun: previousRunStateRef.current ?? undefined,
           signal: abortController.signal,
           agentDefinitions: agentDefinitions,
           maxAgentSteps: 40,
@@ -955,6 +1061,8 @@ export const useSendMessage = ({
                     parentAgentId: event.parentAgentId || 'ROOT',
                     hasParentAgentId: !!event.parentAgentId,
                     eventKeys: Object.keys(event),
+                    params: event.params,
+                    prompt: event.prompt,
                   },
                   'CLI: subagent_start event received',
                 )
@@ -1000,6 +1108,11 @@ export const useSendMessage = ({
                                 blockToMove = {
                                   ...block,
                                   agentId: event.agentId,
+                                  ...(event.params && { params: event.params }),
+                                  ...(event.prompt &&
+                                    block.initialPrompt === '' && {
+                                      initialPrompt: event.prompt,
+                                    }),
                                 }
                                 // Don't add to result - we're extracting it
                               } else if (
@@ -1092,21 +1205,6 @@ export const useSendMessage = ({
                       next.add(event.agentId)
                       return next
                     })
-                    setCollapsedAgents((prev) => {
-                      const next = new Set(prev)
-                      next.delete(tempId)
-                      // Collapse if:
-                      // 1. Parent is NOT main agent (nested agent), OR
-                      // 2. Agent type is in the collapsed-by-default list
-                      if (
-                        (event.parentAgentId &&
-                          event.parentAgentId !== MAIN_AGENT_ID) ||
-                        shouldCollapseByDefault(event.agentType)
-                      ) {
-                        next.add(event.agentId)
-                      }
-                      return next
-                    })
 
                     spawnAgentsMapRef.current.delete(tempId)
                     foundExistingBlock = true
@@ -1140,7 +1238,11 @@ export const useSendMessage = ({
                         content: '',
                         status: 'running' as const,
                         blocks: [] as ContentBlock[],
-                        initialPrompt: '',
+                        initialPrompt: event.prompt || '',
+                        ...(event.params && { params: event.params }),
+                        ...(shouldCollapseByDefault(event.agentType || '') && {
+                          isCollapsed: true,
+                        }),
                       }
 
                       // If parentAgentId exists, nest inside parent agent
@@ -1201,18 +1303,6 @@ export const useSendMessage = ({
                   )
 
                   setStreamingAgents((prev) => new Set(prev).add(event.agentId))
-                  // Collapse if:
-                  // 1. Parent is NOT main agent (nested agent), OR
-                  // 2. Agent type is in the collapsed-by-default list
-                  if (
-                    (event.parentAgentId &&
-                      event.parentAgentId !== MAIN_AGENT_ID) ||
-                    shouldCollapseByDefault(event.agentType)
-                  ) {
-                    setCollapsedAgents((prev) =>
-                      new Set(prev).add(event.agentId),
-                    )
-                  }
                 }
               }
             } else if (event.type === 'subagent_finish') {
@@ -1281,6 +1371,9 @@ export const useSendMessage = ({
                         status: 'running' as const,
                         blocks: [] as ContentBlock[],
                         initialPrompt: agent.prompt || '',
+                        ...(shouldCollapseByDefault(agent.agent_type || '') && {
+                          isCollapsed: true,
+                        }),
                       }),
                     )
 
@@ -1379,7 +1472,6 @@ export const useSendMessage = ({
               }
 
               setStreamingAgents((prev) => new Set(prev).add(toolCallId))
-              setCollapsedAgents((prev) => new Set(prev).add(toolCallId))
             } else if (event.type === 'tool_result' && event.toolCallId) {
               const { toolCallId } = event
 
@@ -1529,6 +1621,13 @@ export const useSendMessage = ({
         })
 
         previousRunStateRef.current = runState
+        setRunState(runState)
+
+        // Save both runState and current messages
+        applyMessageUpdate((currentMessages) => {
+          saveChatState(runState, currentMessages)
+          return currentMessages
+        })
 
         if (!runState.output || runState.output.type === 'error') {
           logger.warn(
@@ -1572,6 +1671,10 @@ export const useSendMessage = ({
               ...(actualCredits !== undefined && {
                 credits: actualCredits,
               }),
+              metadata: {
+                ...(msg.metadata ?? {}),
+                runState,
+              },
             }
           }),
         )
@@ -1618,9 +1721,7 @@ export const useSendMessage = ({
       setInputFocused,
       inputRef,
       setStreamingAgents,
-      setCollapsedAgents,
       allToggleIds,
-      userOpenedAgents,
       activeSubagentsRef,
       isChainInProgressRef,
       setStreamStatus,

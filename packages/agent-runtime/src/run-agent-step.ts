@@ -69,11 +69,8 @@ export const runAgentStep = async (
     prompt: string | undefined
     spawnParams: Record<string, any> | undefined
     system: string
-<<<<<<< HEAD
     modelOverride?: string
-=======
     n?: number
->>>>>>> d3ebaa706ee2bb4c3fa437c7bee0dbcf45aff272
 
     trackEvent: TrackEventFn
   } & ParamsExcluding<
@@ -803,11 +800,8 @@ export async function loopAgentSteps(
         prompt: currentPrompt,
         spawnParams: currentParams,
         system,
-<<<<<<< HEAD
         modelOverride,
-=======
         n,
->>>>>>> d3ebaa706ee2bb4c3fa437c7bee0dbcf45aff272
       })
 
       if (newAgentState.runId) {

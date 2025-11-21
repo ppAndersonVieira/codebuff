@@ -8,11 +8,12 @@ import { env } from '@codebuff/internal/env'
  */
 const MODEL_MAPPING: Record<string, string> = {
   // Add custom model mappings here as needed
-  'gpt-5-mini': 'grok-code-fast-1',
-  'gemini-2.5-flash': 'grok-code-fast-1',
+  'gpt-5-mini': 'gpt-5.1-codex-mini',
+  'gemini-2.5-flash': 'gpt-5.1-codex-mini',
   'grok-4-fast': 'grok-code-fast-1',
-  'gemini-2.0-flash-001' : 'grok-code-fast-1',
-  'gpt-5' : 'gpt-5.1-codex'
+  'gemini-2.0-flash-001' : 'gpt-5.1-codex-mini',
+  'gpt-5' : 'gpt-5.1-codex',
+  //'claude-sonnet-4.5' : 'gemini-3-pro-preview',
 }
 
 /**

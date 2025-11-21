@@ -1,7 +1,7 @@
 import { buildArray } from '@codebuff/common/util/array'
 
-import { publisher } from '../../constants'
-import { type SecretAgentDefinition } from '../../types/secret-agent-definition'
+import { publisher } from '../.agents/constants'
+import { type SecretAgentDefinition } from '../.agents/types/secret-agent-definition'
 
 import type { ToolCall } from 'types/agent-definition'
 import type { UserMessage } from 'types/util-types'
@@ -92,8 +92,8 @@ You may not need to spawn the task-researcher2 if the user's request is trivial 
         const spawnAgentsToolResults = agentState.messageHistory
           .filter((message) => message.role === 'tool')
           .slice(-1)
-          .filter((message) => message.content.toolName === 'spawn_agents')
-          .map((message) => message.content.output)
+          .filter((message) => message.toolName === 'spawn_agents')
+          .map((message) => message.content)
           .flat()
           .filter((result) => result.type === 'json')
           .map((result) => result.value)[0] as {

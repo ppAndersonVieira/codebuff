@@ -1,12 +1,17 @@
+import {
+  MAX_RETRIES_PER_MESSAGE,
+  RETRY_BACKOFF_BASE_DELAY_MS,
+  RETRY_BACKOFF_MAX_DELAY_MS,
+} from '@codebuff/sdk'
+import { useQueryClient } from '@tanstack/react-query'
 import { has, isEqual } from 'lodash'
 import { useCallback, useEffect, useRef } from 'react'
 
+import { usageQueryKeys } from '../hooks/use-usage-query'
+import { setCurrentChatId } from '../project-files'
+import { useChatStore } from '../state/chat-store'
 import { getCodebuffClient, formatToolOutput } from '../utils/codebuff-client'
-import {
-  MAIN_AGENT_ID,
-  shouldHideAgent,
-  shouldCollapseByDefault,
-} from '../utils/constants'
+import { shouldHideAgent, shouldCollapseByDefault } from '../utils/constants'
 import { createValidationErrorBlocks } from '../utils/create-validation-error-blocks'
 import { getErrorObject } from '../utils/error'
 import { formatTimestamp } from '../utils/helpers'
@@ -18,7 +23,6 @@ import {
   loadMostRecentChatState,
   saveChatState,
 } from '../utils/run-state-storage'
-import { setCurrentChatId } from '../project-files'
 
 import type { ElapsedTimeTracker } from './use-elapsed-time'
 import type { StreamStatus } from './use-message-queue'
@@ -257,6 +261,8 @@ export const useSendMessage = ({
   sendMessage: SendMessageFn
   clearMessages: () => void
 } => {
+  const queryClient = useQueryClient()
+  const setIsRetrying = useChatStore.getState().setIsRetrying
   const previousRunStateRef = useRef<RunState | null>(null)
 
   // Load previous chat state on mount if continueChat is true
@@ -288,6 +294,13 @@ export const useSendMessage = ({
       }
     }
   }, [continueChat, continueChatId, setMessages, setRunState])
+
+  useEffect(() => {
+    return () => {
+      setIsRetrying(false)
+    }
+  }, [setIsRetrying])
+
   const spawnAgentsMapRef = useRef<
     Map<string, { index: number; agentType: string }>
   >(new Map())
@@ -428,6 +441,7 @@ export const useSendMessage = ({
         onTimerEvent,
         agentId,
       })
+      setIsRetrying(false)
 
       // Use memoized toggle IDs from the store selector
       // This is computed efficiently in the Zustand store
@@ -855,6 +869,7 @@ export const useSendMessage = ({
         setStreamStatus('idle')
         setCanProcessQueue(!isQueuePausedRef?.current)
         updateChainInProgress(false)
+        setIsRetrying(false)
         timerController.stop('aborted')
 
         applyMessageUpdate((prev) =>
@@ -907,422 +922,770 @@ export const useSendMessage = ({
             : agentMode === 'MAX'
               ? 'base2-max'
               : 'base2-plan'
-        const runState = await client.run({
-          logger,
-          agent: selectedAgentDefinition ?? agentId ?? fallbackAgent,
-          prompt: content,
-          previousRun: previousRunStateRef.current ?? undefined,
-          signal: abortController.signal,
-          agentDefinitions: agentDefinitions,
-          maxAgentSteps: 40,
 
-          handleStreamChunk: (event) => {
-            if (
-              typeof event === 'string' ||
-              (event.type === 'reasoning_chunk' &&
-                event.ancestorRunIds.length === 0)
-            ) {
-              const eventObj:
-                | { type: 'text'; text: string }
-                | { type: 'reasoning'; text: string } =
-                typeof event === 'string'
-                  ? { type: 'text', text: event }
-                  : { type: 'reasoning', text: event.chunk }
-              if (!hasReceivedContent) {
-                hasReceivedContent = true
-                setStreamStatus('streaming')
-              }
-
-              if (!eventObj.text) {
-                return
-              }
-
-              if (eventObj.type === 'text') {
-                rootStreamBufferRef.current =
-                  (rootStreamBufferRef.current ?? '') + eventObj.text
-              }
-
-              rootStreamSeenRef.current = true
-              appendRootChunk(eventObj)
-            } else if (
-              event.type === 'subagent_chunk' ||
-              event.type === 'reasoning_chunk'
-            ) {
-              const { agentId, chunk } = event
-
-              const previous =
-                agentStreamAccumulatorsRef.current.get(agentId) ?? ''
-              if (!chunk) {
-                return
-              }
-              agentStreamAccumulatorsRef.current.set(agentId, previous + chunk)
-
-              // TODO: Add reasoning chunks to a separate component
-              updateAgentContent(agentId, {
-                type: 'text',
-                content: chunk,
-              })
-              return
-            } else {
-              event satisfies never
-              throw new Error('Unhandled event type')
-            }
-          },
-
-          handleEvent: (event) => {
-            logger.info(
-              {
-                type: event.type,
-                hasAgentId: has(event, 'agentId') && event.agentId,
-                event,
-              },
-              `SDK ${JSON.stringify(event.type)} Event received (raw)`,
-            )
-
-            if (event.type === 'text') {
-              const text = event.text
-
-              if (typeof text !== 'string' || !text) return
-
-              // Track if main agent (no agentId) started streaming
-              if (!hasReceivedContent && !event.agentId) {
-                hasReceivedContent = true
-                setStreamStatus('streaming')
-              } else if (!hasReceivedContent) {
-                hasReceivedContent = true
-                setStreamStatus('streaming')
-              }
-
-              if (event.agentId) {
-                logger.info(
-                  {
-                    agentId: event.agentId,
-                    textPreview: text.slice(0, 100),
-                  },
-                  'setMessages: text event with agentId',
+        let runState: RunState
+        try {
+          runState = await client.run({
+            logger,
+            agent: selectedAgentDefinition ?? agentId ?? fallbackAgent,
+            prompt: content,
+            previousRun: previousRunStateRef.current ?? undefined,
+            abortController,
+            retry: {
+              maxRetries: MAX_RETRIES_PER_MESSAGE,
+              backoffBaseMs: RETRY_BACKOFF_BASE_DELAY_MS,
+              backoffMaxMs: RETRY_BACKOFF_MAX_DELAY_MS,
+              onRetry: async ({ attempt, delayMs, errorCode }) => {
+                logger.warn(
+                  { sdkAttempt: attempt, delayMs, errorCode },
+                  '🔄 SDK retrying after error',
                 )
+                setIsRetrying(true)
+                setStreamStatus('waiting')
+              },
+              onRetryExhausted: async ({ totalAttempts, errorCode }) => {
+                logger.warn(
+                  { totalAttempts, errorCode },
+                  '❌ SDK exhausted all retries',
+                )
+              },
+            },
+            agentDefinitions: agentDefinitions,
+            maxAgentSteps: 40,
+
+            handleStreamChunk: (event) => {
+              if (
+                typeof event === 'string' ||
+                (event.type === 'reasoning_chunk' &&
+                  event.ancestorRunIds.length === 0)
+              ) {
+                const eventObj:
+                  | { type: 'text'; text: string }
+                  | { type: 'reasoning'; text: string } =
+                  typeof event === 'string'
+                    ? { type: 'text', text: event }
+                    : { type: 'reasoning', text: event.chunk }
+                if (!hasReceivedContent) {
+                  hasReceivedContent = true
+                  setStreamStatus('streaming')
+                  setIsRetrying(false) // Clear retry state once we start receiving content
+                }
+
+                if (!eventObj.text) {
+                  return
+                }
+
+                if (eventObj.type === 'text') {
+                  rootStreamBufferRef.current =
+                    (rootStreamBufferRef.current ?? '') + eventObj.text
+                }
+
+                rootStreamSeenRef.current = true
+                appendRootChunk(eventObj)
+              } else if (
+                event.type === 'subagent_chunk' ||
+                event.type === 'reasoning_chunk'
+              ) {
+                const { agentId, chunk } = event
+
                 const previous =
-                  agentStreamAccumulatorsRef.current.get(event.agentId) ?? ''
-                if (!text) {
+                  agentStreamAccumulatorsRef.current.get(agentId) ?? ''
+                if (!chunk) {
                   return
                 }
                 agentStreamAccumulatorsRef.current.set(
-                  event.agentId,
-                  previous + text,
+                  agentId,
+                  previous + chunk,
                 )
 
-                updateAgentContent(event.agentId, {
+                // TODO: Add reasoning chunks to a separate component
+                updateAgentContent(agentId, {
                   type: 'text',
-                  content: text,
+                  content: chunk,
                 })
+                return
               } else {
-                if (rootStreamSeenRef.current) {
-                  // Skip redundant root text events when stream chunks already handled
-                  return
-                }
-                const previous = rootStreamBufferRef.current ?? ''
-                if (!text) {
-                  return
-                }
-                logger.info(
-                  {
-                    textPreview: text.slice(0, 100),
-                    previousLength: previous.length,
-                    appendedLength: text.length,
-                  },
-                  'setMessages: text event without agentId',
-                )
-                rootStreamBufferRef.current = previous + text
-
-                appendRootChunk({ type: 'text', text })
+                event satisfies never
+                throw new Error('Unhandled event type')
               }
-              return
-            }
+            },
 
-            if (
-              event.type === 'finish' &&
-              typeof event.totalCost === 'number'
-            ) {
-              actualCredits = event.totalCost
-              addSessionCredits(event.totalCost)
-            }
+            handleEvent: (event) => {
+              logger.info(
+                {
+                  type: event.type,
+                  hasAgentId: has(event, 'agentId') && event.agentId,
+                  event,
+                },
+                `SDK ${JSON.stringify(event.type)} Event received (raw)`,
+              )
 
-            if (event.type === 'subagent_start') {
-              // Skip rendering hidden agents
-              if (shouldHideAgent(event.agentType)) {
+              if (event.type === 'text') {
+                const text = event.text
+
+                if (typeof text !== 'string' || !text) return
+
+                // Track if main agent (no agentId) started streaming
+                if (!hasReceivedContent && !event.agentId) {
+                  hasReceivedContent = true
+                  setStreamStatus('streaming')
+                } else if (!hasReceivedContent) {
+                  hasReceivedContent = true
+                  setStreamStatus('streaming')
+                }
+
+                if (event.agentId) {
+                  logger.info(
+                    {
+                      agentId: event.agentId,
+                      textPreview: text.slice(0, 100),
+                    },
+                    'setMessages: text event with agentId',
+                  )
+                  const previous =
+                    agentStreamAccumulatorsRef.current.get(event.agentId) ?? ''
+                  if (!text) {
+                    return
+                  }
+                  agentStreamAccumulatorsRef.current.set(
+                    event.agentId,
+                    previous + text,
+                  )
+
+                  updateAgentContent(event.agentId, {
+                    type: 'text',
+                    content: text,
+                  })
+                } else {
+                  if (rootStreamSeenRef.current) {
+                    // Skip redundant root text events when stream chunks already handled
+                    return
+                  }
+                  const previous = rootStreamBufferRef.current ?? ''
+                  if (!text) {
+                    return
+                  }
+                  logger.info(
+                    {
+                      textPreview: text.slice(0, 100),
+                      previousLength: previous.length,
+                      appendedLength: text.length,
+                    },
+                    'setMessages: text event without agentId',
+                  )
+                  rootStreamBufferRef.current = previous + text
+
+                  appendRootChunk({ type: 'text', text })
+                }
                 return
               }
 
-              if (event.agentId) {
-                logger.info(
-                  {
-                    agentId: event.agentId,
-                    agentType: event.agentType,
-                    parentAgentId: event.parentAgentId || 'ROOT',
-                    hasParentAgentId: !!event.parentAgentId,
-                    eventKeys: Object.keys(event),
-                    params: event.params,
-                    prompt: event.prompt,
-                  },
-                  'CLI: subagent_start event received',
-                )
-                addActiveSubagent(event.agentId)
+              if (
+                event.type === 'finish' &&
+                typeof event.totalCost === 'number'
+              ) {
+                actualCredits = event.totalCost
+                addSessionCredits(event.totalCost)
+              }
 
-                let foundExistingBlock = false
-                for (const [
-                  tempId,
-                  info,
-                ] of spawnAgentsMapRef.current.entries()) {
-                  const eventType = event.agentType || ''
-                  const storedType = info.agentType || ''
-                  // Match if exact match, or if eventType ends with storedType (e.g., 'codebuff/file-picker@0.0.2' matches 'file-picker')
-                  const isMatch =
-                    eventType === storedType ||
-                    (eventType.includes('/') &&
-                      eventType.split('/')[1]?.split('@')[0] === storedType)
-                  if (isMatch) {
-                    logger.info(
-                      {
-                        tempId,
-                        realAgentId: event.agentId,
-                        agentType: eventType,
-                        hasParentAgentId: !!event.parentAgentId,
-                        parentAgentId: event.parentAgentId || 'none',
-                      },
-                      'setMessages: matching spawn_agents block found',
-                    )
-                    applyMessageUpdate((prev) =>
-                      prev.map((msg) => {
-                        if (msg.id === aiMessageId && msg.blocks) {
-                          // Find and extract the block with tempId
-                          let blockToMove: ContentBlock | null = null
-                          const extractBlock = (
-                            blocks: ContentBlock[],
-                          ): ContentBlock[] => {
-                            const result: ContentBlock[] = []
-                            for (const block of blocks) {
-                              if (
-                                block.type === 'agent' &&
-                                block.agentId === tempId
-                              ) {
-                                blockToMove = {
+              if (event.type === 'subagent_start') {
+                // Skip rendering hidden agents
+                if (shouldHideAgent(event.agentType)) {
+                  return
+                }
+
+                if (event.agentId) {
+                  logger.info(
+                    {
+                      agentId: event.agentId,
+                      agentType: event.agentType,
+                      parentAgentId: event.parentAgentId || 'ROOT',
+                      hasParentAgentId: !!event.parentAgentId,
+                      eventKeys: Object.keys(event),
+                      params: event.params,
+                      prompt: event.prompt,
+                    },
+                    'CLI: subagent_start event received',
+                  )
+                  addActiveSubagent(event.agentId)
+
+                  let foundExistingBlock = false
+                  for (const [
+                    tempId,
+                    info,
+                  ] of spawnAgentsMapRef.current.entries()) {
+                    const eventType = event.agentType || ''
+                    const storedType = info.agentType || ''
+                    
+                    // Extract base names without version or scope
+                    // e.g., 'codebuff/file-picker@0.0.2' -> 'file-picker'
+                    //       'file-picker' -> 'file-picker'
+                    const getBaseName = (type: string) => {
+                      if (type.includes('/')) {
+                        // Handle scoped names like 'codebuff/file-picker@0.0.2'
+                        return type.split('/')[1]?.split('@')[0] || type
+                      }
+                      // Handle simple names, possibly with version
+                      return type.split('@')[0]
+                    }
+                    
+                    const eventBaseName = getBaseName(eventType)
+                    const storedBaseName = getBaseName(storedType)
+                    
+                    // Match if base names are the same
+                    const isMatch = eventBaseName === storedBaseName
+                    if (isMatch) {
+                      logger.info(
+                        {
+                          tempId,
+                          realAgentId: event.agentId,
+                          agentType: eventType,
+                          hasParentAgentId: !!event.parentAgentId,
+                          parentAgentId: event.parentAgentId || 'none',
+                        },
+                        'setMessages: matching spawn_agents block found',
+                      )
+                      applyMessageUpdate((prev) =>
+                        prev.map((msg) => {
+                          if (msg.id === aiMessageId && msg.blocks) {
+                            // Find and extract the block with tempId
+                            let blockToMove: ContentBlock | null = null
+                            const extractBlock = (
+                              blocks: ContentBlock[],
+                            ): ContentBlock[] => {
+                              const result: ContentBlock[] = []
+                              for (const block of blocks) {
+                                if (
+                                  block.type === 'agent' &&
+                                  block.agentId === tempId
+                                ) {
+                                  blockToMove = {
+                                    ...block,
+                                    agentId: event.agentId,
+                                    ...(event.params && {
+                                      params: event.params,
+                                    }),
+                                    ...(event.prompt &&
+                                      block.initialPrompt === '' && {
+                                        initialPrompt: event.prompt,
+                                      }),
+                                  }
+                                  // Don't add to result - we're extracting it
+                                } else if (
+                                  block.type === 'agent' &&
+                                  block.blocks
+                                ) {
+                                  // Recursively process nested blocks
+                                  result.push({
+                                    ...block,
+                                    blocks: extractBlock(block.blocks),
+                                  })
+                                } else {
+                                  result.push(block)
+                                }
+                              }
+                              return result
+                            }
+
+                            let blocks = extractBlock(msg.blocks)
+
+                            if (!blockToMove) {
+                              // Fallback: just rename if we couldn't find it
+                              blocks = updateBlocksRecursively(
+                                msg.blocks,
+                                tempId,
+                                (block) => ({
                                   ...block,
                                   agentId: event.agentId,
-                                  ...(event.params && { params: event.params }),
-                                  ...(event.prompt &&
-                                    block.initialPrompt === '' && {
-                                      initialPrompt: event.prompt,
-                                    }),
-                                }
-                                // Don't add to result - we're extracting it
-                              } else if (
-                                block.type === 'agent' &&
-                                block.blocks
-                              ) {
-                                // Recursively process nested blocks
-                                result.push({
-                                  ...block,
-                                  blocks: extractBlock(block.blocks),
-                                })
-                              } else {
-                                result.push(block)
-                              }
+                                }),
+                              )
+                              return { ...msg, blocks }
                             }
-                            return result
-                          }
 
-                          let blocks = extractBlock(msg.blocks)
-
-                          if (!blockToMove) {
-                            // Fallback: just rename if we couldn't find it
-                            blocks = updateBlocksRecursively(
-                              msg.blocks,
-                              tempId,
-                              (block) => ({ ...block, agentId: event.agentId }),
-                            )
-                            return { ...msg, blocks }
-                          }
-
-                          // If parentAgentId exists, nest under parent
-                          if (event.parentAgentId) {
-                            logger.info(
-                              {
-                                tempId,
-                                realAgentId: event.agentId,
-                                parentAgentId: event.parentAgentId,
-                              },
-                              'setMessages: moving spawn_agents block to nest under parent',
-                            )
-
-                            // Try to find parent and nest
-                            let parentFound = false
-                            const updatedBlocks = updateBlocksRecursively(
-                              blocks,
-                              event.parentAgentId,
-                              (parentBlock) => {
-                                if (parentBlock.type !== 'agent') {
-                                  return parentBlock
-                                }
-                                parentFound = true
-                                return {
-                                  ...parentBlock,
-                                  blocks: [
-                                    ...(parentBlock.blocks || []),
-                                    blockToMove!,
-                                  ],
-                                }
-                              },
-                            )
-
-                            // If parent found, use updated blocks; otherwise add to top level
-                            if (parentFound) {
-                              blocks = updatedBlocks
-                            } else {
+                            // If parentAgentId exists, nest under parent
+                            if (event.parentAgentId) {
                               logger.info(
                                 {
                                   tempId,
                                   realAgentId: event.agentId,
                                   parentAgentId: event.parentAgentId,
                                 },
-                                'setMessages: spawn_agents parent not found, adding to top level',
+                                'setMessages: moving spawn_agents block to nest under parent',
                               )
+
+                              // Try to find parent and nest
+                              let parentFound = false
+                              const updatedBlocks = updateBlocksRecursively(
+                                blocks,
+                                event.parentAgentId,
+                                (parentBlock) => {
+                                  if (parentBlock.type !== 'agent') {
+                                    return parentBlock
+                                  }
+                                  parentFound = true
+                                  return {
+                                    ...parentBlock,
+                                    blocks: [
+                                      ...(parentBlock.blocks || []),
+                                      blockToMove!,
+                                    ],
+                                  }
+                                },
+                              )
+
+                              // If parent found, use updated blocks; otherwise add to top level
+                              if (parentFound) {
+                                blocks = updatedBlocks
+                              } else {
+                                logger.info(
+                                  {
+                                    tempId,
+                                    realAgentId: event.agentId,
+                                    parentAgentId: event.parentAgentId,
+                                  },
+                                  'setMessages: spawn_agents parent not found, adding to top level',
+                                )
+                                blocks = [...blocks, blockToMove]
+                              }
+                            } else {
+                              // No parent - add back at top level with new ID
                               blocks = [...blocks, blockToMove]
                             }
-                          } else {
-                            // No parent - add back at top level with new ID
-                            blocks = [...blocks, blockToMove]
-                          }
 
-                          return { ...msg, blocks }
+                            return { ...msg, blocks }
+                          }
+                          return msg
+                        }),
+                      )
+
+                      setStreamingAgents((prev) => {
+                        const next = new Set(prev)
+                        next.delete(tempId)
+                        next.add(event.agentId)
+                        return next
+                      })
+
+                      spawnAgentsMapRef.current.delete(tempId)
+                      foundExistingBlock = true
+                      break
+                    }
+                  }
+
+                  if (!foundExistingBlock) {
+                    logger.info(
+                      {
+                        agentId: event.agentId,
+                        agentType: event.agentType,
+                        parentAgentId: event.parentAgentId || 'ROOT',
+                      },
+                      'setMessages: creating new agent block (no spawn_agents match)',
+                    )
+                    applyMessageUpdate((prev) =>
+                      prev.map((msg) => {
+                        if (msg.id !== aiMessageId) {
+                          return msg
                         }
-                        return msg
+
+                        const blocks: ContentBlock[] = msg.blocks
+                          ? [...msg.blocks]
+                          : []
+                        const newAgentBlock: ContentBlock = {
+                          type: 'agent',
+                          agentId: event.agentId,
+                          agentName: event.agentType || 'Agent',
+                          agentType: event.agentType || 'unknown',
+                          content: '',
+                          status: 'running' as const,
+                          blocks: [] as ContentBlock[],
+                          initialPrompt: event.prompt || '',
+                          ...(event.params && { params: event.params }),
+                          ...(shouldCollapseByDefault(
+                            event.agentType || '',
+                          ) && {
+                            isCollapsed: true,
+                          }),
+                        }
+
+                        // If parentAgentId exists, nest inside parent agent
+                        if (event.parentAgentId) {
+                          logger.info(
+                            {
+                              childId: event.agentId,
+                              parentId: event.parentAgentId,
+                            },
+                            'Nesting agent inside parent',
+                          )
+
+                          // Try to find and update parent
+                          let parentFound = false
+                          const updatedBlocks = updateBlocksRecursively(
+                            blocks,
+                            event.parentAgentId,
+                            (parentBlock) => {
+                              if (parentBlock.type !== 'agent') {
+                                return parentBlock
+                              }
+                              parentFound = true
+                              return {
+                                ...parentBlock,
+                                blocks: [
+                                  ...(parentBlock.blocks || []),
+                                  newAgentBlock,
+                                ],
+                              }
+                            },
+                          )
+
+                          // If parent was found, use updated blocks; otherwise add to top level
+                          if (parentFound) {
+                            return { ...msg, blocks: updatedBlocks }
+                          } else {
+                            logger.info(
+                              {
+                                childId: event.agentId,
+                                parentId: event.parentAgentId,
+                              },
+                              'Parent agent not found, adding to top level',
+                            )
+                            // Parent doesn't exist - add at top level as fallback
+                            return {
+                              ...msg,
+                              blocks: [...blocks, newAgentBlock],
+                            }
+                          }
+                        }
+
+                        // No parent - add to top level
+                        return {
+                          ...msg,
+                          blocks: [...blocks, newAgentBlock],
+                        }
                       }),
                     )
 
-                    setStreamingAgents((prev) => {
-                      const next = new Set(prev)
-                      next.delete(tempId)
-                      next.add(event.agentId)
-                      return next
-                    })
-
-                    spawnAgentsMapRef.current.delete(tempId)
-                    foundExistingBlock = true
-                    break
+                    setStreamingAgents((prev) =>
+                      new Set(prev).add(event.agentId),
+                    )
                   }
                 }
+              } else if (event.type === 'subagent_finish') {
+                if (event.agentId) {
+                  if (shouldHideAgent(event.agentType)) {
+                    return
+                  }
+                  agentStreamAccumulatorsRef.current.delete(event.agentId)
+                  removeActiveSubagent(event.agentId)
 
-                if (!foundExistingBlock) {
-                  logger.info(
-                    {
-                      agentId: event.agentId,
-                      agentType: event.agentType,
-                      parentAgentId: event.parentAgentId || 'ROOT',
-                    },
-                    'setMessages: creating new agent block (no spawn_agents match)',
+                  applyMessageUpdate((prev) =>
+                    prev.map((msg) => {
+                      if (msg.id === aiMessageId && msg.blocks) {
+                        // Use recursive update to handle nested agents
+                        const blocks = updateBlocksRecursively(
+                          msg.blocks,
+                          event.agentId,
+                          (block) => ({
+                            ...block,
+                            status: 'complete' as const,
+                          }),
+                        )
+                        return { ...msg, blocks }
+                      }
+                      return msg
+                    }),
                   )
+
+                  setStreamingAgents((prev) => {
+                    const next = new Set(prev)
+                    next.delete(event.agentId)
+                    return next
+                  })
+                }
+              }
+
+              if (event.type === 'tool_call' && event.toolCallId) {
+                const {
+                  toolCallId,
+                  toolName,
+                  input,
+                  agentId,
+                  includeToolCall,
+                } = event
+
+                if (toolName === 'spawn_agents' && input?.agents) {
+                  const agents = Array.isArray(input.agents) ? input.agents : []
+
+                  agents.forEach((agent: any, index: number) => {
+                    const tempAgentId = `${toolCallId}-${index}`
+                    spawnAgentsMapRef.current.set(tempAgentId, {
+                      index,
+                      agentType: agent.agent_type || 'unknown',
+                    })
+                  })
+
                   applyMessageUpdate((prev) =>
                     prev.map((msg) => {
                       if (msg.id !== aiMessageId) {
                         return msg
                       }
 
-                      const blocks: ContentBlock[] = msg.blocks
+                      const existingBlocks: ContentBlock[] = msg.blocks
                         ? [...msg.blocks]
                         : []
-                      const newAgentBlock: ContentBlock = {
-                        type: 'agent',
-                        agentId: event.agentId,
-                        agentName: event.agentType || 'Agent',
-                        agentType: event.agentType || 'unknown',
-                        content: '',
-                        status: 'running' as const,
-                        blocks: [] as ContentBlock[],
-                        initialPrompt: event.prompt || '',
-                        ...(event.params && { params: event.params }),
-                        ...(shouldCollapseByDefault(event.agentType || '') && {
-                          isCollapsed: true,
-                        }),
-                      }
 
-                      // If parentAgentId exists, nest inside parent agent
-                      if (event.parentAgentId) {
-                        logger.info(
-                          {
-                            childId: event.agentId,
-                            parentId: event.parentAgentId,
-                          },
-                          'Nesting agent inside parent',
+                      const newAgentBlocks: ContentBlock[] = agents
+                        .filter(
+                          (agent: any) =>
+                            !shouldHideAgent(agent.agent_type || ''),
                         )
+                        .map((agent: any, index: number) => ({
+                          type: 'agent',
+                          agentId: `${toolCallId}-${index}`,
+                          agentName: agent.agent_type || 'Agent',
+                          agentType: agent.agent_type || 'unknown',
+                          content: '',
+                          status: 'running' as const,
+                          blocks: [] as ContentBlock[],
+                          initialPrompt: agent.prompt || '',
+                          ...(shouldCollapseByDefault(
+                            agent.agent_type || '',
+                          ) && {
+                            isCollapsed: true,
+                          }),
+                        }))
 
-                        // Try to find and update parent
-                        let parentFound = false
-                        const updatedBlocks = updateBlocksRecursively(
-                          blocks,
-                          event.parentAgentId,
-                          (parentBlock) => {
-                            if (parentBlock.type !== 'agent') {
-                              return parentBlock
-                            }
-                            parentFound = true
-                            return {
-                              ...parentBlock,
-                              blocks: [
-                                ...(parentBlock.blocks || []),
-                                newAgentBlock,
-                              ],
-                            }
-                          },
-                        )
-
-                        // If parent was found, use updated blocks; otherwise add to top level
-                        if (parentFound) {
-                          return { ...msg, blocks: updatedBlocks }
-                        } else {
-                          logger.info(
-                            {
-                              childId: event.agentId,
-                              parentId: event.parentAgentId,
-                            },
-                            'Parent agent not found, adding to top level',
-                          )
-                          // Parent doesn't exist - add at top level as fallback
-                          return {
-                            ...msg,
-                            blocks: [...blocks, newAgentBlock],
-                          }
-                        }
-                      }
-
-                      // No parent - add to top level
                       return {
                         ...msg,
-                        blocks: [...blocks, newAgentBlock],
+                        blocks: [...existingBlocks, ...newAgentBlocks],
                       }
                     }),
                   )
 
-                  setStreamingAgents((prev) => new Set(prev).add(event.agentId))
-                }
-              }
-            } else if (event.type === 'subagent_finish') {
-              if (event.agentId) {
-                if (shouldHideAgent(event.agentType)) {
+                  agents.forEach((_: any, index: number) => {
+                    const agentId = `${toolCallId}-${index}`
+                    setStreamingAgents((prev) => new Set(prev).add(agentId))
+                  })
+
                   return
                 }
-                agentStreamAccumulatorsRef.current.delete(event.agentId)
-                removeActiveSubagent(event.agentId)
+
+                function isHiddenToolName(
+                  toolName: string,
+                ): toolName is SetElement<typeof hiddenToolNames> {
+                  return hiddenToolNames.has(
+                    toolName as SetElement<typeof hiddenToolNames>,
+                  )
+                }
+                if (isHiddenToolName(toolName)) {
+                  return
+                }
+
+                // If this tool call belongs to a subagent, add it to that agent's blocks
+                if (agentId) {
+                  applyMessageUpdate((prev) =>
+                    prev.map((msg) => {
+                      if (msg.id !== aiMessageId || !msg.blocks) {
+                        return msg
+                      }
+
+                      // Use recursive update to handle nested agents
+                      const updatedBlocks = updateBlocksRecursively(
+                        msg.blocks,
+                        agentId,
+                        (block) => {
+                          if (block.type !== 'agent') {
+                            return block
+                          }
+                          const agentBlocks: ContentBlock[] = block.blocks
+                            ? [...block.blocks]
+                            : []
+                          const newToolBlock: ToolContentBlock = {
+                            type: 'tool',
+                            toolCallId,
+                            toolName: toolName as ToolName,
+                            input,
+                            agentId,
+                            ...(includeToolCall !== undefined && {
+                              includeToolCall,
+                            }),
+                          }
+
+                          return {
+                            ...block,
+                            blocks: [...agentBlocks, newToolBlock],
+                          }
+                        },
+                      )
+
+                      return { ...msg, blocks: updatedBlocks }
+                    }),
+                  )
+                } else {
+                  // Top-level tool call (or agent block doesn't exist yet)
+                  applyMessageUpdate((prev) =>
+                    prev.map((msg) => {
+                      if (msg.id !== aiMessageId) {
+                        return msg
+                      }
+
+                      const existingBlocks: ContentBlock[] = msg.blocks
+                        ? [...msg.blocks]
+                        : []
+                      const newToolBlock: ContentBlock = {
+                        type: 'tool',
+                        toolCallId,
+                        toolName: toolName as ToolName,
+                        input,
+                        agentId,
+                        ...(includeToolCall !== undefined && {
+                          includeToolCall,
+                        }),
+                      }
+
+                      return {
+                        ...msg,
+                        blocks: [...existingBlocks, newToolBlock],
+                      }
+                    }),
+                  )
+                }
+
+                setStreamingAgents((prev) => new Set(prev).add(toolCallId))
+              } else if (event.type === 'tool_result' && event.toolCallId) {
+                const { toolCallId } = event
+
+                // Check if this is a spawn_agents result
+                // The structure is: output[0].value = [{ agentName, agentType, value }]
+                const firstOutputValue = has(event.output?.[0], 'value')
+                  ? event.output?.[0]?.value
+                  : undefined
+                const isSpawnAgentsResult =
+                  Array.isArray(firstOutputValue) &&
+                  firstOutputValue.some(
+                    (v: any) => v?.agentName || v?.agentType,
+                  )
+
+                if (isSpawnAgentsResult && Array.isArray(firstOutputValue)) {
+                  applyMessageUpdate((prev) =>
+                    prev.map((msg) => {
+                      if (msg.id === aiMessageId && msg.blocks) {
+                        const blocks = msg.blocks.map((block) => {
+                          if (
+                            block.type === 'agent' &&
+                            block.agentId.startsWith(toolCallId)
+                          ) {
+                            const agentIndex = parseInt(
+                              block.agentId.split('-').pop() || '0',
+                              10,
+                            )
+                            const result = firstOutputValue[agentIndex]
+
+                            if (has(result, 'value') && result.value) {
+                              let content: string
+                              if (typeof result.value === 'string') {
+                                content = result.value
+                              } else if (
+                                has(result.value, 'errorMessage') &&
+                                result.value.errorMessage
+                              ) {
+                                // Handle error messages from failed agent spawns
+                                content = String(result.value.errorMessage)
+                              } else if (
+                                has(result.value, 'value') &&
+                                result.value.value &&
+                                typeof result.value.value === 'string'
+                              ) {
+                                // Handle nested value structure like { type: "lastMessage", value: "..." }
+                                content = result.value.value
+                              } else if (
+                                has(result.value, 'message') &&
+                                result.value.message
+                              ) {
+                                content = result.value.message
+                              } else {
+                                content = formatToolOutput([result])
+                              }
+
+                              logger.info(
+                                {
+                                  agentId: block.agentId,
+                                  contentLength: content.length,
+                                  contentPreview: content.substring(0, 100),
+                                },
+                                'setMessages: spawn_agents result processed',
+                              )
+
+                              const resultTextBlock: ContentBlock = {
+                                type: 'text',
+                                content,
+                              }
+                              // Determine status based on whether there's an error
+                              const hasError =
+                                has(result.value, 'errorMessage') &&
+                                result.value.errorMessage
+                              return {
+                                ...block,
+                                blocks: [resultTextBlock],
+                                status: hasError
+                                  ? ('failed' as const)
+                                  : ('complete' as const),
+                              }
+                            }
+                          }
+                          return block
+                        })
+                        return { ...msg, blocks }
+                      }
+                      return msg
+                    }),
+                  )
+
+                  firstOutputValue.forEach((_: any, index: number) => {
+                    const agentId = `${toolCallId}-${index}`
+                    setStreamingAgents((prev) => {
+                      const next = new Set(prev)
+                      next.delete(agentId)
+                      return next
+                    })
+                  })
+                  return
+                }
+
+                const updateToolBlock = (
+                  blocks: ContentBlock[],
+                ): ContentBlock[] => {
+                  return blocks.map((block) => {
+                    if (
+                      block.type === 'tool' &&
+                      block.toolCallId === toolCallId
+                    ) {
+                      let output: string
+                      if (block.toolName === 'run_terminal_command') {
+                        const parsed = (event.output?.[0] as any)?.value
+                        if (parsed?.stdout || parsed?.stderr) {
+                          output = (parsed.stdout || '') + (parsed.stderr || '')
+                        } else {
+                          output = formatToolOutput(event.output)
+                        }
+                      } else {
+                        output = formatToolOutput(event.output)
+                      }
+                      return { ...block, output }
+                    } else if (block.type === 'agent' && block.blocks) {
+                      const updatedBlocks = updateToolBlock(block.blocks)
+                      // Avoid creating new block if nested blocks didn't change
+                      if (isEqual(block.blocks, updatedBlocks)) {
+                        return block
+                      }
+                      return { ...block, blocks: updatedBlocks }
+                    }
+                    return block
+                  })
+                }
 
                 applyMessageUpdate((prev) =>
                   prev.map((msg) => {
                     if (msg.id === aiMessageId && msg.blocks) {
-                      // Use recursive update to handle nested agents
-                      const blocks = updateBlocksRecursively(
-                        msg.blocks,
-                        event.agentId,
-                        (block) => ({ ...block, status: 'complete' as const }),
-                      )
-                      return { ...msg, blocks }
+                      return { ...msg, blocks: updateToolBlock(msg.blocks) }
                     }
                     return msg
                   }),
@@ -1330,298 +1693,21 @@ export const useSendMessage = ({
 
                 setStreamingAgents((prev) => {
                   const next = new Set(prev)
-                  next.delete(event.agentId)
+                  next.delete(toolCallId)
                   return next
                 })
               }
-            }
-
-            if (event.type === 'tool_call' && event.toolCallId) {
-              const { toolCallId, toolName, input, agentId, includeToolCall } =
-                event
-
-              if (toolName === 'spawn_agents' && input?.agents) {
-                const agents = Array.isArray(input.agents) ? input.agents : []
-
-                agents.forEach((agent: any, index: number) => {
-                  const tempAgentId = `${toolCallId}-${index}`
-                  spawnAgentsMapRef.current.set(tempAgentId, {
-                    index,
-                    agentType: agent.agent_type || 'unknown',
-                  })
-                })
-
-                applyMessageUpdate((prev) =>
-                  prev.map((msg) => {
-                    if (msg.id !== aiMessageId) {
-                      return msg
-                    }
-
-                    const existingBlocks: ContentBlock[] = msg.blocks
-                      ? [...msg.blocks]
-                      : []
-
-                    const newAgentBlocks: ContentBlock[] = agents.map(
-                      (agent: any, index: number) => ({
-                        type: 'agent',
-                        agentId: `${toolCallId}-${index}`,
-                        agentName: agent.agent_type || 'Agent',
-                        agentType: agent.agent_type || 'unknown',
-                        content: '',
-                        status: 'running' as const,
-                        blocks: [] as ContentBlock[],
-                        initialPrompt: agent.prompt || '',
-                        ...(shouldCollapseByDefault(agent.agent_type || '') && {
-                          isCollapsed: true,
-                        }),
-                      }),
-                    )
-
-                    return {
-                      ...msg,
-                      blocks: [...existingBlocks, ...newAgentBlocks],
-                    }
-                  }),
-                )
-
-                agents.forEach((_: any, index: number) => {
-                  const agentId = `${toolCallId}-${index}`
-                  setStreamingAgents((prev) => new Set(prev).add(agentId))
-                })
-
-                return
-              }
-
-              function isHiddenToolName(
-                toolName: string,
-              ): toolName is SetElement<typeof hiddenToolNames> {
-                return hiddenToolNames.has(
-                  toolName as SetElement<typeof hiddenToolNames>,
-                )
-              }
-              if (isHiddenToolName(toolName)) {
-                return
-              }
-
-              // If this tool call belongs to a subagent, add it to that agent's blocks
-              if (agentId) {
-                applyMessageUpdate((prev) =>
-                  prev.map((msg) => {
-                    if (msg.id !== aiMessageId || !msg.blocks) {
-                      return msg
-                    }
-
-                    // Use recursive update to handle nested agents
-                    const updatedBlocks = updateBlocksRecursively(
-                      msg.blocks,
-                      agentId,
-                      (block) => {
-                        if (block.type !== 'agent') {
-                          return block
-                        }
-                        const agentBlocks: ContentBlock[] = block.blocks
-                          ? [...block.blocks]
-                          : []
-                        const newToolBlock: ToolContentBlock = {
-                          type: 'tool',
-                          toolCallId,
-                          toolName: toolName as ToolName,
-                          input,
-                          agentId,
-                          ...(includeToolCall !== undefined && {
-                            includeToolCall,
-                          }),
-                        }
-
-                        return {
-                          ...block,
-                          blocks: [...agentBlocks, newToolBlock],
-                        }
-                      },
-                    )
-
-                    return { ...msg, blocks: updatedBlocks }
-                  }),
-                )
-              } else {
-                // Top-level tool call (or agent block doesn't exist yet)
-                applyMessageUpdate((prev) =>
-                  prev.map((msg) => {
-                    if (msg.id !== aiMessageId) {
-                      return msg
-                    }
-
-                    const existingBlocks: ContentBlock[] = msg.blocks
-                      ? [...msg.blocks]
-                      : []
-                    const newToolBlock: ContentBlock = {
-                      type: 'tool',
-                      toolCallId,
-                      toolName: toolName as ToolName,
-                      input,
-                      agentId,
-                      ...(includeToolCall !== undefined && { includeToolCall }),
-                    }
-
-                    return {
-                      ...msg,
-                      blocks: [...existingBlocks, newToolBlock],
-                    }
-                  }),
-                )
-              }
-
-              setStreamingAgents((prev) => new Set(prev).add(toolCallId))
-            } else if (event.type === 'tool_result' && event.toolCallId) {
-              const { toolCallId } = event
-
-              // Check if this is a spawn_agents result
-              // The structure is: output[0].value = [{ agentName, agentType, value }]
-              const firstOutputValue = has(event.output?.[0], 'value')
-                ? event.output?.[0]?.value
-                : undefined
-              const isSpawnAgentsResult =
-                Array.isArray(firstOutputValue) &&
-                firstOutputValue.some((v: any) => v?.agentName || v?.agentType)
-
-              if (isSpawnAgentsResult && Array.isArray(firstOutputValue)) {
-                applyMessageUpdate((prev) =>
-                  prev.map((msg) => {
-                    if (msg.id === aiMessageId && msg.blocks) {
-                      const blocks = msg.blocks.map((block) => {
-                        if (
-                          block.type === 'agent' &&
-                          block.agentId.startsWith(toolCallId)
-                        ) {
-                          const agentIndex = parseInt(
-                            block.agentId.split('-').pop() || '0',
-                            10,
-                          )
-                          const result = firstOutputValue[agentIndex]
-
-                          if (has(result, 'value') && result.value) {
-                            let content: string
-                            if (typeof result.value === 'string') {
-                              content = result.value
-                            } else if (
-                              has(result.value, 'errorMessage') &&
-                              result.value.errorMessage
-                            ) {
-                              // Handle error messages from failed agent spawns
-                              content = String(result.value.errorMessage)
-                            } else if (
-                              has(result.value, 'value') &&
-                              result.value.value &&
-                              typeof result.value.value === 'string'
-                            ) {
-                              // Handle nested value structure like { type: "lastMessage", value: "..." }
-                              content = result.value.value
-                            } else if (
-                              has(result.value, 'message') &&
-                              result.value.message
-                            ) {
-                              content = result.value.message
-                            } else {
-                              content = formatToolOutput([result])
-                            }
-
-                            logger.info(
-                              {
-                                agentId: block.agentId,
-                                contentLength: content.length,
-                                contentPreview: content.substring(0, 100),
-                              },
-                              'setMessages: spawn_agents result processed',
-                            )
-
-                            const resultTextBlock: ContentBlock = {
-                              type: 'text',
-                              content,
-                            }
-                            // Determine status based on whether there's an error
-                            const hasError =
-                              has(result.value, 'errorMessage') &&
-                              result.value.errorMessage
-                            return {
-                              ...block,
-                              blocks: [resultTextBlock],
-                              status: hasError
-                                ? ('failed' as const)
-                                : ('complete' as const),
-                            }
-                          }
-                        }
-                        return block
-                      })
-                      return { ...msg, blocks }
-                    }
-                    return msg
-                  }),
-                )
-
-                firstOutputValue.forEach((_: any, index: number) => {
-                  const agentId = `${toolCallId}-${index}`
-                  setStreamingAgents((prev) => {
-                    const next = new Set(prev)
-                    next.delete(agentId)
-                    return next
-                  })
-                })
-                return
-              }
-
-              const updateToolBlock = (
-                blocks: ContentBlock[],
-              ): ContentBlock[] => {
-                return blocks.map((block) => {
-                  if (
-                    block.type === 'tool' &&
-                    block.toolCallId === toolCallId
-                  ) {
-                    let output: string
-                    if (block.toolName === 'run_terminal_command') {
-                      const parsed = (event.output?.[0] as any)?.value
-                      if (parsed?.stdout || parsed?.stderr) {
-                        output = (parsed.stdout || '') + (parsed.stderr || '')
-                      } else {
-                        output = formatToolOutput(event.output)
-                      }
-                    } else {
-                      output = formatToolOutput(event.output)
-                    }
-                    return { ...block, output }
-                  } else if (block.type === 'agent' && block.blocks) {
-                    const updatedBlocks = updateToolBlock(block.blocks)
-                    // Avoid creating new block if nested blocks didn't change
-                    if (isEqual(block.blocks, updatedBlocks)) {
-                      return block
-                    }
-                    return { ...block, blocks: updatedBlocks }
-                  }
-                  return block
-                })
-              }
-
-              applyMessageUpdate((prev) =>
-                prev.map((msg) => {
-                  if (msg.id === aiMessageId && msg.blocks) {
-                    return { ...msg, blocks: updateToolBlock(msg.blocks) }
-                  }
-                  return msg
-                }),
-              )
-
-              setStreamingAgents((prev) => {
-                const next = new Set(prev)
-                next.delete(toolCallId)
-                return next
-              })
-            }
-          },
-        })
+            },
+          })
+        } catch (error) {
+          // SDK threw an error (abort or unexpected failure)
+          logger.error({ error: getErrorObject(error) }, 'SDK run threw error')
+          throw error
+        }
 
         previousRunStateRef.current = runState
         setRunState(runState)
+        setIsRetrying(false)
 
         // Save both runState and current messages
         applyMessageUpdate((currentMessages) => {
@@ -1640,6 +1726,13 @@ export const useSendMessage = ({
             'Agent run failed',
           )
           return
+        }
+
+        // Trigger usage data refresh if the banner is currently visible
+        // The query will only refetch if it's enabled (banner is visible)
+        const isUsageVisible = useChatStore.getState().isUsageVisible
+        if (isUsageVisible) {
+          queryClient.invalidateQueries({ queryKey: usageQueryKeys.current() })
         }
 
         setStreamStatus('idle')
@@ -1683,6 +1776,7 @@ export const useSendMessage = ({
           { error: getErrorObject(error) },
           'SDK client.run() failed',
         )
+        setIsRetrying(false)
         setStreamStatus('idle')
         setCanProcessQueue(true)
         updateChainInProgress(false)
@@ -1741,8 +1835,12 @@ export const useSendMessage = ({
       setLastMessageMode,
       addSessionCredits,
       resumeQueue,
+      setIsRetrying,
     ],
   )
 
-  return { sendMessage, clearMessages }
+  return {
+    sendMessage,
+    clearMessages,
+  }
 }

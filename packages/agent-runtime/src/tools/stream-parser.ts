@@ -1,5 +1,9 @@
 import { toolNames } from '@codebuff/common/tools/constants'
 import { buildArray } from '@codebuff/common/util/array'
+import {
+  toolJsonContent,
+  assistantMessage,
+} from '@codebuff/common/util/messages'
 import { generateCompactId } from '@codebuff/common/util/string'
 import { cloneDeep } from 'lodash'
 
@@ -18,7 +22,6 @@ import type {
   Message,
   ToolMessage,
 } from '@codebuff/common/types/messages/codebuff-message'
-import type { ToolResultPart } from '@codebuff/common/types/messages/content-part'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
 import type { AgentState, Subgoal } from '@codebuff/common/types/session-state'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
@@ -91,8 +94,8 @@ export async function processStreamWithTools(
 
   const messages = [...params.messages]
 
-  const toolResults: ToolResultPart[] = []
-  const toolResultsToAddAfterStream: ToolResultPart[] = []
+  const toolResults: ToolMessage[] = []
+  const toolResultsToAddAfterStream: ToolMessage[] = []
   const toolCalls: (CodebuffToolCall | CustomToolCall)[] = []
   const { promise: streamDonePromise, resolve: resolveStreamDonePromise } =
     Promise.withResolvers<void>()
@@ -171,11 +174,15 @@ export async function processStreamWithTools(
     ]),
     defaultProcessor: customToolCallback,
     onError: (toolName, error) => {
-      const toolResult: ToolResultPart = {
-        type: 'tool-result',
+      const toolResult: ToolMessage = {
+        role: 'tool',
         toolName,
         toolCallId: generateCompactId(),
-        output: [{ type: 'json', value: { errorMessage: error } }],
+        content: [
+          toolJsonContent({
+            errorMessage: error,
+          }),
+        ],
       }
       toolResults.push(cloneDeep(toolResult))
       toolResultsToAddAfterStream.push(cloneDeep(toolResult))
@@ -217,16 +224,9 @@ export async function processStreamWithTools(
 
   state.messages = buildArray<Message>([
     ...expireMessages(state.messages, 'agentStep'),
-    fullResponseChunks.length > 0 && {
-      role: 'assistant' as const,
-      content: fullResponseChunks.join(''),
-    },
-    ...toolResultsToAddAfterStream.map((toolResult) => {
-      return {
-        role: 'tool',
-        content: toolResult,
-      } satisfies ToolMessage
-    }),
+    fullResponseChunks.length > 0 &&
+      assistantMessage(fullResponseChunks.join('')),
+    ...toolResultsToAddAfterStream,
   ])
 
   if (!signal.aborted) {

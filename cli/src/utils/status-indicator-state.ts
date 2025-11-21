@@ -5,14 +5,25 @@ export type StatusIndicatorState =
   | { kind: 'clipboard'; message: string }
   | { kind: 'ctrlC' }
   | { kind: 'connecting' }
+  | { kind: 'retrying' }
   | { kind: 'waiting' }
   | { kind: 'streaming' }
+  | { kind: 'reconnected' }
+
+export type AuthStatus = 'ok' | 'retrying' | 'unreachable'
 
 export type StatusIndicatorStateArgs = {
   statusMessage?: string | null
   streamStatus: StreamStatus
   nextCtrlCWillExit: boolean
   isConnected: boolean
+  authStatus?: AuthStatus
+  isRetrying?: boolean
+  /**
+   * Whether to show a transient "Reconnected" status message.
+   * This should only be true for a short period after a reconnection event.
+   */
+  showReconnectionMessage?: boolean
 }
 
 /**
@@ -34,6 +45,9 @@ export const getStatusIndicatorState = ({
   streamStatus,
   nextCtrlCWillExit,
   isConnected,
+  authStatus = 'ok',
+  isRetrying = false,
+  showReconnectionMessage = false,
 }: StatusIndicatorStateArgs): StatusIndicatorState => {
   if (nextCtrlCWillExit) {
     return { kind: 'ctrlC' }
@@ -43,7 +57,22 @@ export const getStatusIndicatorState = ({
     return { kind: 'clipboard', message: statusMessage }
   }
 
-  if (!isConnected) {
+  // Transient reconnection indicator takes precedence over other status
+  if (showReconnectionMessage) {
+    return { kind: 'reconnected' }
+  }
+
+  // If we're online but the auth request hit a retryable error and is auto-retrying,
+  // surface that explicitly to the user.
+  if (authStatus === 'retrying') {
+    return { kind: 'retrying' }
+  }
+  if (isRetrying) {
+    return { kind: 'retrying' }
+  }
+
+  // Show connecting if service is disconnected OR auth service is unreachable
+  if (!isConnected || authStatus === 'unreachable') {
     return { kind: 'connecting' }
   }
 

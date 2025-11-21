@@ -18,7 +18,6 @@ import {
   spyOn,
 } from 'bun:test'
 
-import * as checkTerminalCommandModule from '../check-terminal-command'
 import { disableLiveUserInputCheck } from '../live-user-inputs'
 import * as liveUserInputs from '../live-user-inputs'
 import { mainPrompt } from '../main-prompt'
@@ -154,11 +153,6 @@ describe('mainPrompt', () => {
       }),
     )
 
-    spyOn(
-      checkTerminalCommandModule,
-      'checkTerminalCommand',
-    ).mockImplementation(async () => null)
-
     // Mock live user inputs
     spyOn(liveUserInputs, 'checkLiveUserInput').mockImplementation(() => true)
   })
@@ -200,54 +194,6 @@ describe('mainPrompt', () => {
       cpus: 1,
     },
   }
-
-  it('should handle direct terminal command', async () => {
-    // Override the mock to return a terminal command
-    spyOn(
-      checkTerminalCommandModule,
-      'checkTerminalCommand',
-    ).mockImplementation(async () => 'ls -la')
-
-    const sessionState = getInitialSessionState(mockFileContext)
-    const action = {
-      type: 'prompt' as const,
-      prompt: 'ls -la',
-      sessionState,
-      fingerprintId: 'test',
-      costMode: 'max' as const,
-      promptId: 'test',
-      toolResults: [],
-    }
-
-    const { sessionState: newSessionState, output } = await mainPrompt({
-      ...mainPromptBaseParams,
-      action,
-    })
-
-    // Verify that requestToolCall was called with the terminal command
-    const requestToolCallSpy = mainPromptBaseParams.requestToolCall
-    expect(requestToolCallSpy).toHaveBeenCalledTimes(1)
-    expect(requestToolCallSpy).toHaveBeenCalledWith({
-      userInputId: expect.any(String), // userInputId
-      toolName: 'run_terminal_command',
-      input: expect.objectContaining({
-        command: 'ls -la',
-        mode: 'user',
-        process_type: 'SYNC',
-        timeout_seconds: -1,
-      }),
-    })
-
-    // Verify that the output contains the expected structure
-    expect(output.type).toBeDefined()
-
-    // Verify that a tool result was added to message history
-    const toolResultMessages =
-      newSessionState.mainAgentState.messageHistory.filter(
-        (m) => m.role === 'tool',
-      )
-    expect(toolResultMessages.length).toBeGreaterThan(0)
-  })
 
   it('should handle write_file tool call', async () => {
     // Mock LLM to return a write_file tool call using getToolCallString

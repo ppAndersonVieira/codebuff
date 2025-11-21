@@ -5,24 +5,22 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
-  useMemo,
   useRef,
   useState,
 } from 'react'
 
 import { InputCursor } from './input-cursor'
-import { useOpentuiPaste } from '../hooks/use-opentui-paste'
 import { useTheme } from '../hooks/use-theme'
-import { logger } from '../utils/logger'
 import { clamp } from '../utils/math'
+import { logger } from '../utils/logger'
 import { calculateNewCursorPosition } from '../utils/word-wrap-utils'
 
 import type { InputValue } from '../state/chat-store'
 import type {
   KeyEvent,
-  LineInfo,
   PasteEvent,
   ScrollBoxRenderable,
+  TextBufferView,
   TextRenderable,
 } from '@opentui/core'
 
@@ -131,11 +129,6 @@ export const MultilineInput = forwardRef<
   const scrollBoxRef = useRef<ScrollBoxRenderable | null>(null)
   const [measuredCols, setMeasuredCols] = useState<number | null>(null)
   const [lastActivity, setLastActivity] = useState(Date.now())
-  const lineInfoRef = useRef<LineInfo>({
-    lineStarts: [],
-    lineWidths: [],
-    maxLineWidth: 0,
-  })
 
   // Update last activity on value or cursor changes
   useEffect(() => {
@@ -144,19 +137,13 @@ export const MultilineInput = forwardRef<
 
   const textRef = useRef<TextRenderable | null>(null)
 
-  if (textRef.current) {
-    lineInfoRef.current = (textRef.current as any).textBufferView.lineInfo
-  }
+  const lineInfo = textRef.current
+    ? (
+        (textRef.current satisfies TextRenderable as any)
+          .textBufferView as TextBufferView
+      ).lineInfo
+    : null
 
-  const getEffectiveCols = useCallback(() => {
-    // Prefer measured viewport columns; fallback to a conservative
-    // estimate: outer width minus border(2) minus padding(2) = 4.
-    const fallbackCols = Math.max(1, width - 4)
-    const cols = measuredCols ?? fallbackCols
-    // No extra negative fudge; use the true measured width to avoid
-    // early wrap by a few characters.
-    return Math.max(1, cols)
-  }, [measuredCols, width])
   useImperativeHandle(
     forwardedRef,
     () => ({
@@ -170,32 +157,32 @@ export const MultilineInput = forwardRef<
     [],
   )
 
-  useOpentuiPaste(
-    useCallback(
-      (event: PasteEvent) => {
-        if (!focused) return
+  const handlePaste = useCallback(
+    (event: PasteEvent) => {
+      if (!focused) return
 
-        const text = event.text ?? ''
-        if (!text) return
+      const text = event.text ?? ''
+      if (!text) return
 
-        const newValue =
-          value.slice(0, cursorPosition) + text + value.slice(cursorPosition)
-        onChange({
-          text: newValue,
-          cursorPosition: cursorPosition + text.length,
-          lastEditDueToNav: false,
-        })
-      },
-      [focused, value, cursorPosition, onChange],
-    ),
+      const newValue =
+        value.slice(0, cursorPosition) + text + value.slice(cursorPosition)
+      onChange({
+        text: newValue,
+        cursorPosition: cursorPosition + text.length,
+        lastEditDueToNav: false,
+      })
+    },
+    [focused, value, cursorPosition, onChange],
   )
 
-  const cursorRow = Math.max(
-    0,
-    lineInfoRef.current.lineStarts.findLastIndex(
-      (lineStart) => lineStart <= cursorPosition,
-    ),
-  )
+  const cursorRow = lineInfo
+    ? Math.max(
+        0,
+        lineInfo.lineStarts.findLastIndex(
+          (lineStart) => lineStart <= cursorPosition,
+        ),
+      )
+    : 0
 
   // Auto-scroll to cursor when content changes
   useEffect(() => {
@@ -270,43 +257,32 @@ export const MultilineInput = forwardRef<
     renderCursorPosition += displayValue[i] === '\t' ? TAB_WIDTH : 1
   }
 
-  const { beforeCursor, afterCursor, activeChar, shouldHighlight } =
-    useMemo(() => {
-      if (!showCursor) {
-        return {
-          beforeCursor: '',
-          afterCursor: '',
-          activeChar: ' ',
-          shouldHighlight: false,
-        }
-      }
-
-      const beforeCursor = displayValueForRendering.slice(
-        0,
-        renderCursorPosition,
-      )
-      const afterCursor = displayValueForRendering.slice(renderCursorPosition)
-      const activeChar = afterCursor.charAt(0) || ' '
-      const shouldHighlight =
-        !isPlaceholder &&
-        renderCursorPosition < displayValueForRendering.length &&
-        displayValue[cursorPosition] !== '\n' &&
-        displayValue[cursorPosition] !== '\t'
-
+  const { beforeCursor, afterCursor, activeChar, shouldHighlight } = (() => {
+    if (!showCursor) {
       return {
-        beforeCursor,
-        afterCursor,
-        activeChar,
-        shouldHighlight,
+        beforeCursor: '',
+        afterCursor: '',
+        activeChar: ' ',
+        shouldHighlight: false,
       }
-    }, [
-      showCursor,
-      displayValueForRendering,
-      renderCursorPosition,
-      cursorPosition,
-      isPlaceholder,
-      displayValue,
-    ])
+    }
+
+    const beforeCursor = displayValueForRendering.slice(0, renderCursorPosition)
+    const afterCursor = displayValueForRendering.slice(renderCursorPosition)
+    const activeChar = afterCursor.charAt(0) || ' '
+    const shouldHighlight =
+      !isPlaceholder &&
+      renderCursorPosition < displayValueForRendering.length &&
+      displayValue[cursorPosition] !== '\n' &&
+      displayValue[cursorPosition] !== '\t'
+
+    return {
+      beforeCursor,
+      afterCursor,
+      activeChar,
+      shouldHighlight,
+    }
+  })()
 
   // Handle all keyboard input with advanced shortcuts
   useKeyboard(
@@ -403,42 +379,41 @@ export const MultilineInput = forwardRef<
         const wordStart = findPreviousWordBoundary(value, cursorPosition)
         const wordEnd = findNextWordBoundary(value, cursorPosition)
 
-        // DELETION SHORTCUTS (check these first, before basic delete/backspace)
-
-        // Ctrl+U: Delete to line start (also triggered by Cmd+Delete on macOS)
+        // Ctrl+U: Delete from cursor to beginning of current VISUAL line (accounting for word-wrap)
+        // If at line start, act like backspace (delete to join with previous line)
         if (key.ctrl && lowerKeyName === 'u' && !key.meta && !key.option) {
           preventKeyDefault(key)
 
-          const originalValue = value
-          let newValue = originalValue
-          let nextCursor = cursorPosition
+          // Use lineInfo.lineStarts which includes both newlines AND word-wrap positions
+          const visualLineStart = lineInfo?.lineStarts?.[cursorRow] ?? lineStart
 
-          if (cursorPosition > lineStart) {
-            newValue = value.slice(0, lineStart) + value.slice(cursorPosition)
-            nextCursor = lineStart
-          } else if (
-            cursorPosition === lineStart &&
-            cursorPosition > 0 &&
-            value[cursorPosition - 1] === '\n'
-          ) {
-            newValue =
-              value.slice(0, cursorPosition - 1) + value.slice(cursorPosition)
-            nextCursor = cursorPosition - 1
-          } else if (cursorPosition > 0) {
-            newValue =
-              value.slice(0, cursorPosition - 1) + value.slice(cursorPosition)
-            nextCursor = cursorPosition - 1
-          }
-
-          if (newValue === originalValue) {
-            return
-          }
-
-          onChange({
-            text: newValue,
-            cursorPosition: nextCursor,
-            lastEditDueToNav: false,
+          logger.debug('Ctrl+U:', {
+            cursorPosition,
+            cursorRow,
+            visualLineStart,
+            oldLineStart: lineStart,
+            lineStarts: lineInfo?.lineStarts,
           })
+
+          if (cursorPosition > visualLineStart) {
+            // Delete from visual line start to cursor
+            const newValue =
+              value.slice(0, visualLineStart) + value.slice(cursorPosition)
+            onChange({
+              text: newValue,
+              cursorPosition: visualLineStart,
+              lastEditDueToNav: false,
+            })
+          } else if (cursorPosition > 0) {
+            // At line start: delete one character backward (backspace behavior)
+            const newValue =
+              value.slice(0, cursorPosition - 1) + value.slice(cursorPosition)
+            onChange({
+              text: newValue,
+              cursorPosition: cursorPosition - 1,
+              lastEditDueToNav: false,
+            })
+          }
           return
         }
 
@@ -701,7 +676,7 @@ export const MultilineInput = forwardRef<
             text: value,
             cursorPosition: calculateNewCursorPosition({
               cursorPosition,
-              lineInfo: lineInfoRef.current,
+              lineStarts: lineInfo?.lineStarts ?? [],
               cursorIsChar: !shouldHighlight,
               direction: 'up',
             }),
@@ -716,7 +691,7 @@ export const MultilineInput = forwardRef<
             text: value,
             cursorPosition: calculateNewCursorPosition({
               cursorPosition,
-              lineInfo: lineInfoRef.current,
+              lineStarts: lineInfo?.lineStarts ?? [],
               cursorIsChar: !shouldHighlight,
               direction: 'down',
             }),
@@ -758,7 +733,7 @@ export const MultilineInput = forwardRef<
         value,
         cursorPosition,
         shouldHighlight,
-        lineInfoRef.current,
+        lineInfo,
         onChange,
         onSubmit,
         onKeyIntercept,
@@ -768,12 +743,12 @@ export const MultilineInput = forwardRef<
     ),
   )
 
-  const layoutMetrics = useMemo(() => {
+  const layoutMetrics = (() => {
     const safeMaxHeight = Math.max(1, maxHeight)
     const effectiveMinHeight = Math.max(1, Math.min(minHeight, safeMaxHeight))
 
     const totalLines =
-      measuredCols === 0 ? 0 : lineInfoRef.current.lineStarts.length
+      measuredCols === 0 || lineInfo === null ? 0 : lineInfo.lineStarts.length
 
     // Add bottom gutter when cursor is on line 2 of exactly 2 lines
     const gutterEnabled =
@@ -790,7 +765,7 @@ export const MultilineInput = forwardRef<
       heightLines,
       gutterEnabled,
     }
-  }, [maxHeight, minHeight, lineInfoRef.current, cursorRow])
+  })()
 
   const inputColor = isPlaceholder
     ? theme.muted
@@ -807,6 +782,7 @@ export const MultilineInput = forwardRef<
       stickyScroll={true}
       stickyStart="bottom"
       scrollbarOptions={{ visible: false }}
+      onPaste={handlePaste}
       style={{
         flexGrow: 0,
         flexShrink: 0,

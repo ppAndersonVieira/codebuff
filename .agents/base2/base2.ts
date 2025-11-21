@@ -11,26 +11,22 @@ export function createBase2(
   options?: {
     hasNoValidation?: boolean
     planOnly?: boolean
-    withGemini?: boolean
   },
 ): Omit<SecretAgentDefinition, 'id'> {
   const {
     hasNoValidation = mode === 'fast',
     planOnly = false,
-    withGemini = false,
   } = options ?? {}
   const isDefault = mode === 'default'
   const isFast = mode === 'fast'
   const isMax = mode === 'max'
 
-  const isSonnet = !withGemini
-  const isGemini = withGemini
+  const isSonnet = true
+  const isGemini = false
 
   return {
     publisher,
-    model: withGemini
-      ? 'google/gemini-3-pro-preview'
-      : 'anthropic/claude-sonnet-4.5',
+    model: 'anthropic/claude-sonnet-4.5',
     displayName: 'Buffy the Orchestrator',
     spawnerPrompt:
       'Advanced base agent that orchestrates planning, editing, and reviewing for complex coding tasks',
@@ -67,13 +63,12 @@ export function createBase2(
       'researcher-web',
       'researcher-docs',
       'commander',
-      withGemini && 'editor-best-of-n-gemini',
-      !withGemini && isDefault && 'editor-best-of-n',
-      !withGemini && isMax && 'editor-best-of-n-gpt-5',
-      !withGemini && isDefault && 'thinker-best-of-n',
-      !withGemini && isMax && 'thinker-best-of-n-gpt-5',
-      !withGemini && isDefault && 'code-reviewer',
-      !withGemini && isMax && 'code-reviewer-best-of-n-gpt-5',
+      isDefault && 'editor-best-of-n',
+      isMax && 'editor-best-of-n-max',
+      isDefault && 'thinker-best-of-n',
+      isMax && 'thinker-best-of-n-gpt-5',
+      isDefault && 'code-reviewer-gemini',
+      isMax && 'code-reviewer-best-of-n-gpt-5',
       'context-pruner',
     ),
 
@@ -89,7 +84,7 @@ export function createBase2(
 - **Proactiveness:** Fulfill the user's request thoroughly, including reasonable, directly implied follow-up actions.
 - **Confirm Ambiguity/Expansion:** Do not take significant actions beyond the clear scope of the request without confirming with the user. If asked *how* to do something, explain first, don't just do it.
 - **Stop and ask for guidance:** You should feel free to stop and ask the user for guidance if you're stuck or don't know what to try next, or need a clarification.
-- **Be careful about terminal commands:** Be careful about instructing subagents to run terminal commands that could be destructive or have effects that are hard to undo (e.g. git push, git commit, running any scripts -- especially ones that could alter production environments (!), installing packages globally, etc). Don't do any of these unless the user explicitly asks you to.
+- **Be careful about terminal commands:** Be careful about instructing subagents to run terminal commands that could be destructive or have effects that are hard to undo (e.g. git push, git commit, running any scripts -- especially ones that could alter production environments (!), installing packages globally, etc). Don't run any of these effectful commands unless the user explicitly asks you to.
 - **Do what the user asks:** If the user asks you to do something, even running a risky terminal command, do it.
 
 # Code Editing Mandates
@@ -125,10 +120,10 @@ Use the spawn_agents tool to spawn specialized agents to help you complete the u
     '- Spawn context-gathering agents (file pickers, code-searcher, directory-lister, glob-matcher, and web/docs researchers) before making edits.',
     isMax &&
       '- Spawn the thinker-best-of-n-gpt-5 after gathering context to solve complex problems.',
-    `- Spawn a ${isMax ? 'editor-best-of-n-gpt-5' : 'editor-best-of-n'} agent to implement the changes after you have gathered all the context you need. You must spawn this agent for non-trivial changes, since it writes much better code than you would with the str_replace or write_file tools. Don't spawn the editor in parallel with context-gathering agents.`,
+    `- Spawn a ${isMax ? 'editor-best-of-n-max' : 'editor-best-of-n'} agent to implement the changes after you have gathered all the context you need. You must spawn this agent for non-trivial changes, since it writes much better code than you would with the str_replace or write_file tools. Don't spawn the editor in parallel with context-gathering agents.`,
     '- Spawn commanders sequentially if the second command depends on the the first.',
     !isFast &&
-      `- Spawn a ${isDefault ? 'code-reviewer' : 'code-reviewer-best-of-n-gpt-5'} to review the changes after you have implemented the changes.`,
+      `- Spawn a ${isDefault ? 'code-reviewer-gemini' : 'code-reviewer-best-of-n-gpt-5'} to review the changes after you have implemented the changes.`,
   ).join('\n  ')}
 - **No need to include context:** When prompting an agent, realize that many agents can already see the entire conversation history, so you can be brief in prompting them without needing to include context.
 
@@ -242,7 +237,47 @@ Do this:
 }
 </codebuff_tool_call>`
     : ''
-}
+}${
+      isFast
+        ? ''
+        : `
+# Response examples
+
+<example>
+
+<user>please implement [a complex new feature]</user>
+
+<response>
+[ You spawn 3 file-pickers, a code-searcher, and a docs researcher in parallel to find relevant files and do research online ]
+
+[ You read 12 of the relevant files using the read_files tool in two separate tool calls ]
+
+[ You spawn one more code-searcher and file-picker ]
+
+[ You read 8 other relevant files using the read_files tool ]
+
+[ You spawn an editor to implement the changes ]
+
+[ You spawn a code-reviewer, a commander to typecheck the changes, and another commander to run tests, all in parallel ]
+
+[ You spawn the editor to fix the issues found by the code-reviewer and type/test errors ]
+
+[ All tests & typechecks pass -- you write a very short final summary of the changes you made ]
+ </reponse>
+
+</example>
+
+<example>
+
+<user>what's the best way to refactor [x]</user>
+
+<response>
+[ You collect codebase context, and then give a strong answer with key examples, and ask if you should make this change ]
+</response>
+
+</example>
+`
+    }
 
 ${PLACEHOLDER.FILE_TREE_PROMPT_SMALL}
 ${PLACEHOLDER.KNOWLEDGE_FILES_CONTENTS}
@@ -320,17 +355,17 @@ ${buildArray(
   !isFast &&
     `- Important: Read as many files as could possibly be relevant to the task over several steps to improve your understanding of the user's request and produce the best possible code changes. Find more examples within the codebase similar to the user's request, dependencies that help with understanding how things work, tests, etc. This is frequently 12-20 files, depending on the task.`,
   !isFast &&
-    `- For any task requiring 3+ steps, use the write_todos tool to write out your step-by-step implementation plan. Include ALL of the applicable tasks in the list.${isFast ? '' : ' You should include a step to review the changes after you have implemented the changes.'}:${hasNoValidation ? '' : ' You should include at least one step to validate/test your changes: be specific about whether to typecheck, run tests, run lints, etc.'} Skip write_todos for simple tasks like quick edits or answering questions.`,
+    `- For any task requiring 3+ steps, use the write_todos tool to write out your step-by-step implementation plan. Include ALL of the applicable tasks in the list.${isFast ? '' : ' You should include a step to review the changes after you have implemented the changes.'}:${hasNoValidation ? '' : ' You should include at least one step to validate/test your changes: be specific about whether to typecheck, run tests, run lints, etc.'} You may be able to do reviewing and validation in parallel in the same step. Skip write_todos for simple tasks like quick edits or answering questions.`,
   isFast &&
     '- Implement the changes in one go. Pause after making all the changes to see the tool results of your edits.',
   isFast &&
     '- Do a single typecheck targeted for your changes at most (if applicable for the project). Or skip this step if the change was small.',
   !isFast &&
-    `- IMPORTANT: You must spawn the ${isMax ? 'editor-best-of-n-gpt-5' : 'editor-best-of-n'} agent to implement non-trivial code changes, since it will generate the best code changes from multiple implementation proposals. This is the best way to make high quality code changes -- strongly prefer using this agent over the str_replace or write_file tools, unless the change is very straightforward and obvious.`,
+    `- IMPORTANT: You must spawn the ${isMax ? 'editor-best-of-n-max' : 'editor-best-of-n'} agent to implement non-trivial code changes, since it will generate the best code changes from multiple implementation proposals. This is the best way to make high quality code changes -- strongly prefer using this agent over the str_replace or write_file tools, unless the change is very straightforward and obvious.`,
   !isFast &&
-    `- Spawn a ${isDefault ? 'code-reviewer' : 'code-reviewer-best-of-n-gpt-5'} to review the changes after you have implemented the changes. (Skip this step only if the change is extremely straightforward and obvious.)`,
+    `- Spawn a ${isDefault ? 'code-reviewer-gemini' : 'code-reviewer-best-of-n-gpt-5'} to review the changes after you have implemented the changes. (Skip this step only if the change is extremely straightforward and obvious.)`,
   !hasNoValidation &&
-    `- Test your changes${isMax ? '' : ' briefly'} by running appropriate validation commands for the project (e.g. typechecks, tests, lints, etc.).${isMax ? ' Start by type checking the specific area of the project that you are editing and then test the entire project if necessary.' : ' If you can, only typecheck/test the area of the project that you are editing, rather than the entire project.'} You may have to explore the project to find the appropriate commands. Don't skip this step!`,
+    `- Test your changes by running appropriate validation commands for the project (e.g. typechecks, tests, lints, etc.). Try to run all appropriate commands in parallel. ${isMax ? ' Typecheck and test the specific area of the project that you are editing *AND* then typecheck and test the entire project if necessary.' : ' If you can, only test the area of the project that you are editing, rather than the entire project.'} You may have to explore the project to find the appropriate commands. Don't skip this step!`,
   `- Inform the user that you have completed the task in one sentence or a few short bullet points.${isSonnet ? " Don't create any markdown summary files or example documentation files, unless asked by the user." : ''}`,
 ).join('\n')}`
 }
@@ -350,9 +385,9 @@ function buildImplementationStepPrompt({
     isMax &&
       `Keep working until the user's request is completely satisfied${!hasNoValidation ? ' and validated' : ''}, or until you require more information from the user.`,
     !isFast &&
-      `You must spawn the ${isMax ? 'editor-best-of-n-gpt-5' : 'editor-best-of-n'} agent to implement code changes, since it will generate the best code changes.`,
+      `You must spawn the ${isMax ? 'editor-best-of-n-max' : 'editor-best-of-n'} agent to implement code changes, since it will generate the best code changes.`,
     isMax && 'Spawn the thinker-best-of-n-gpt-5 to solve complex problems.',
-    `After completing the user request, summarize your changes in a sentence${isFast ? '' : ' or a few short bullet points'}.${isSonnet ? " Don't create any summary markdown files or example documentation files, unless asked by the user." : ''}. Don't repeat yourself -- especially if you already summarized your changes then just end your turn.`,
+    `After completing the user request, summarize your changes in a sentence${isFast ? '' : ' or a few short bullet points'}.${isSonnet ? " Don't create any summary markdown files or example documentation files, unless asked by the user." : ''}.`,
   ).join('\n')
 }
 

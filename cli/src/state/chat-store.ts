@@ -4,9 +4,9 @@ import { immer } from 'zustand/middleware/immer'
 
 import { clamp } from '../utils/math'
 
-import type { RunState } from '@codebuff/sdk'
 import type { ChatMessage } from '../types/chat'
 import type { AgentMode } from '../utils/constants'
+import type { RunState } from '@codebuff/sdk'
 
 export type InputValue = {
   text: string
@@ -31,6 +31,10 @@ export type ChatStoreState = {
   lastMessageMode: AgentMode | null
   sessionCreditsUsed: number
   runState: RunState | null
+  isUsageVisible: boolean
+  isAnnouncementVisible: boolean
+  isBashMode: boolean
+  isRetrying: boolean
 }
 
 type ChatStoreActions = {
@@ -59,6 +63,10 @@ type ChatStoreActions = {
   setLastMessageMode: (mode: AgentMode | null) => void
   addSessionCredits: (credits: number) => void
   setRunState: (runState: RunState | null) => void
+  setIsUsageVisible: (visible: boolean) => void
+  setIsAnnouncementVisible: (visible: boolean) => void
+  setBashMode: (isBashMode: boolean) => void
+  setIsRetrying: (retrying: boolean) => void
   reset: () => void
 }
 
@@ -81,6 +89,10 @@ const initialState: ChatStoreState = {
   lastMessageMode: null,
   sessionCreditsUsed: 0,
   runState: null,
+  isUsageVisible: false,
+  isAnnouncementVisible: true,
+  isBashMode: false,
+  isRetrying: false,
 }
 
 export const useChatStore = create<ChatStore>()(
@@ -184,6 +196,26 @@ export const useChatStore = create<ChatStore>()(
         state.runState = runState ? castDraft(runState) : null
       }),
 
+    setIsUsageVisible: (visible) =>
+      set((state) => {
+        state.isUsageVisible = visible
+      }),
+
+    setIsAnnouncementVisible: (visible) =>
+      set((state) => {
+        state.isAnnouncementVisible = visible
+      }),
+
+    setBashMode: (isBashMode) =>
+      set((state) => {
+        state.isBashMode = isBashMode
+      }),
+
+    setIsRetrying: (retrying) =>
+      set((state) => {
+        state.isRetrying = retrying
+      }),
+
     reset: () =>
       set((state) => {
         state.messages = initialState.messages.slice()
@@ -204,6 +236,10 @@ export const useChatStore = create<ChatStore>()(
         state.runState = initialState.runState
           ? castDraft(initialState.runState)
           : null
+        state.isUsageVisible = initialState.isUsageVisible
+        state.isAnnouncementVisible = initialState.isAnnouncementVisible
+        state.isBashMode = initialState.isBashMode
+        state.isRetrying = initialState.isRetrying
       }),
   })),
 )

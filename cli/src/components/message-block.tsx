@@ -1,14 +1,18 @@
 import { TextAttributes } from '@opentui/core'
 import { pluralize } from '@codebuff/common/util/string'
-import React, { memo, useCallback, type ReactNode } from 'react'
+import React, { memo, useCallback, useMemo, type ReactNode } from 'react'
 
+import {
+  shouldRenderAsSimpleText,
+  isImplementorAgent,
+  getImplementorDisplayName,
+} from '../utils/constants'
 import { AgentBranchItem } from './agent-branch-item'
 import { ElapsedTimer } from './elapsed-timer'
 import { FeedbackIconButton } from './feedback-icon-button'
 import { useTheme } from '../hooks/use-theme'
 import { useWhyDidYouUpdateById } from '../hooks/use-why-did-you-update'
 import { isTextBlock, isToolBlock } from '../types/chat'
-import { logger } from '../utils/logger'
 import { type MarkdownPalette } from '../utils/markdown-renderer'
 import {
   useFeedbackStore,
@@ -29,6 +33,7 @@ import { ContentWithMarkdown } from './blocks/content-with-markdown'
 import { ToolBranch } from './blocks/tool-branch'
 import { PlanBox } from './renderers/plan-box'
 import { AgentListBranch } from './blocks/agent-list-branch'
+import { BULLET_CHAR } from '../utils/strings'
 
 interface MessageBlockProps {
   messageId: string
@@ -86,22 +91,39 @@ export const MessageBlock = memo((props: MessageBlockProps): ReactNode => {
   })
 
   const theme = useTheme()
-  const isFeedbackOpen = useFeedbackStore(selectIsFeedbackOpenForMessage(messageId))
-  const hasSubmittedFeedback = useFeedbackStore(selectHasSubmittedFeedback(messageId))
-  const selectedFeedbackCategory = useFeedbackStore(selectMessageFeedbackCategory(messageId))
+
+  // Memoize selectors to prevent new function references on every render
+  const selectIsFeedbackOpenMemo = useMemo(
+    () => selectIsFeedbackOpenForMessage(messageId),
+    [messageId],
+  )
+  const selectHasSubmittedFeedbackMemo = useMemo(
+    () => selectHasSubmittedFeedback(messageId),
+    [messageId],
+  )
+  const selectMessageFeedbackCategoryMemo = useMemo(
+    () => selectMessageFeedbackCategory(messageId),
+    [messageId],
+  )
+
+  const isFeedbackOpen = useFeedbackStore(selectIsFeedbackOpenMemo)
+  const hasSubmittedFeedback = useFeedbackStore(selectHasSubmittedFeedbackMemo)
+  const selectedFeedbackCategory = useFeedbackStore(
+    selectMessageFeedbackCategoryMemo,
+  )
 
   const resolvedTextColor = textColor ?? theme.foreground
   const shouldShowLoadingTimer = isAi && isLoading && !isComplete
   const shouldShowCompletionFooter = isAi && isComplete
-  const canRequestFeedback =
-    shouldShowCompletionFooter && !hasSubmittedFeedback
+  const canRequestFeedback = shouldShowCompletionFooter && !hasSubmittedFeedback
   const isGoodOrBadSelection =
     selectedFeedbackCategory === 'good_result' ||
     selectedFeedbackCategory === 'bad_result'
   const shouldShowSubmittedFeedbackState =
     shouldShowCompletionFooter && hasSubmittedFeedback && isGoodOrBadSelection
   const shouldRenderFeedbackButton =
-    Boolean(onFeedback) && (canRequestFeedback || shouldShowSubmittedFeedbackState)
+    Boolean(onFeedback) &&
+    (canRequestFeedback || shouldShowSubmittedFeedbackState)
 
   const handleFeedbackOpen = useCallback(() => {
     if (!canRequestFeedback || !onFeedback) return
@@ -229,7 +251,7 @@ export const MessageBlock = memo((props: MessageBlockProps): ReactNode => {
   }
 
   return (
-    <>
+    <box style={{ flexDirection: 'column', gap: 0, width: '100%' }}>
       {isUser && (
         <text
           attributes={TextAttributes.DIM}
@@ -279,7 +301,7 @@ export const MessageBlock = memo((props: MessageBlockProps): ReactNode => {
           {renderCompletionFooter()}
         </>
       )}
-    </>
+    </box>
   )
 })
 
@@ -564,6 +586,83 @@ const AgentBranchWrapper = memo(
     onBuildMax,
   }: AgentBranchWrapperProps) => {
     const theme = useTheme()
+
+    if (shouldRenderAsSimpleText(agentBlock.agentType)) {
+      const isStreaming =
+        agentBlock.status === 'running' ||
+        streamingAgents.has(agentBlock.agentId)
+      const isComplete = agentBlock.status === 'complete'
+      const statusIndicator = isStreaming ? '●' : isComplete ? '✓' : '○'
+      const statusColor = isStreaming
+        ? theme.primary
+        : isComplete
+          ? theme.foreground
+          : theme.muted
+
+      return (
+        <box
+          key={keyPrefix}
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            width: '100%',
+            marginTop: 1,
+          }}
+        >
+          <text style={{ wrapMode: 'word' }}>
+            <span fg={statusColor}>{statusIndicator}</span>
+            <span fg={theme.foreground} attributes={TextAttributes.BOLD}>
+              {' '}
+              Selecting best
+            </span>
+          </text>
+        </box>
+      )
+    }
+
+    // Render implementor agents as simple tool calls
+    if (isImplementorAgent(agentBlock.agentType)) {
+      const isStreaming =
+        agentBlock.status === 'running' ||
+        streamingAgents.has(agentBlock.agentId)
+      const isComplete = agentBlock.status === 'complete'
+      const isFailed = agentBlock.status === 'failed'
+      const displayName = getImplementorDisplayName(agentBlock.agentType)
+      const statusIndicator = isStreaming
+        ? '●'
+        : isFailed
+          ? '✗'
+          : isComplete
+            ? '✓'
+            : '○'
+      const statusColor = isStreaming
+        ? theme.primary
+        : isFailed
+          ? 'red'
+          : isComplete
+            ? theme.foreground
+            : theme.muted
+
+      return (
+        <box
+          key={keyPrefix}
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            width: '100%',
+          }}
+        >
+          <text style={{ wrapMode: 'word' }}>
+            <span fg={statusColor}>{statusIndicator}</span>
+            <span fg={theme.foreground} attributes={TextAttributes.BOLD}>
+              {' '}
+              {displayName}
+            </span>
+          </text>
+        </box>
+      )
+    }
+
     const isCollapsed = agentBlock.isCollapsed ?? false
     const isStreaming =
       agentBlock.status === 'running' || streamingAgents.has(agentBlock.agentId)
@@ -608,17 +707,6 @@ const AgentBranchWrapper = memo(
       onToggleCollapsed(agentBlock.agentId)
     }, [onToggleCollapsed, agentBlock.agentId])
 
-    // Create a status message for editor-best-of-n, thinker-best-of-n, and code-reviewer-best-of-n agents
-    const nParameterMessage =
-      agentBlock.params?.n !== undefined &&
-      (agentBlock.agentType.includes('editor-best-of-n')
-        ? `Generating ${agentBlock.params.n} implementations...`
-        : agentBlock.agentType.includes('thinker-best-of-n')
-          ? `Generating ${agentBlock.params.n} deep thoughts...`
-          : agentBlock.agentType.includes('code-reviewer-best-of-n')
-            ? `Generating ${agentBlock.params.n} code reviews...`
-            : undefined)
-
     return (
       <box key={keyPrefix} style={{ flexDirection: 'column', gap: 0 }}>
         <AgentBranchItem
@@ -634,18 +722,6 @@ const AgentBranchWrapper = memo(
           statusIndicator={statusIndicator}
           onToggle={onToggle}
         >
-          {nParameterMessage && (
-            <text
-              style={{
-                wrapMode: 'word',
-                fg: theme.muted,
-                marginBottom: 1,
-              }}
-              attributes={TextAttributes.ITALIC}
-            >
-              {nParameterMessage}
-            </text>
-          )}
           <AgentBody
             agentBlock={agentBlock}
             indentLevel={indentLevel + 1}

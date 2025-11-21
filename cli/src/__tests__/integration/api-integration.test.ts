@@ -1,5 +1,10 @@
 import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test'
-import { getUserInfoFromApiKey, WEBSITE_URL } from '@codebuff/sdk'
+import {
+  AuthenticationError,
+  NetworkError,
+  getUserInfoFromApiKey,
+  WEBSITE_URL,
+} from '@codebuff/sdk'
 import { userColumns } from '@codebuff/common/types/contracts/database'
 
 import type { Logger } from '@codebuff/common/types/contracts/logger'
@@ -135,13 +140,32 @@ describe('API Integration', () => {
       })
       const testLogger = createLoggerMocks()
 
-      const result = await getUserInfoFromApiKey({
-        apiKey: 'unauthorized-token',
-        fields: ['id'],
-        logger: testLogger,
-      })
+      await expect(
+        getUserInfoFromApiKey({
+          apiKey: 'unauthorized-token',
+          fields: ['id'],
+          logger: testLogger,
+        }),
+      ).rejects.toBeInstanceOf(AuthenticationError)
 
-      expect(result).toBeNull()
+      // 401s are now logged as auth failures
+      expect(testLogger.error.mock.calls.length).toBeGreaterThan(0)
+    })
+
+    test('should treat 404 from /api/v1/me as invalid credentials (AuthenticationError)', async () => {
+      setFetchMock(async () => {
+        return new Response(null, { status: 404 })
+      })
+      const testLogger = createLoggerMocks()
+
+      await expect(
+        getUserInfoFromApiKey({
+          apiKey: 'not-found-token',
+          fields: ['id'],
+          logger: testLogger,
+        }),
+      ).rejects.toBeInstanceOf(AuthenticationError)
+
       expect(testLogger.error.mock.calls.length).toBeGreaterThan(0)
     })
   })
@@ -153,13 +177,14 @@ describe('API Integration', () => {
       })
       const testLogger = createLoggerMocks()
 
-      const result = await getUserInfoFromApiKey({
-        apiKey: 'server-error-token',
-        fields: ['id'],
-        logger: testLogger,
-      })
+      await expect(
+        getUserInfoFromApiKey({
+          apiKey: 'server-error-token',
+          fields: ['id'],
+          logger: testLogger,
+        }),
+      ).rejects.toBeInstanceOf(NetworkError)
 
-      expect(result).toBeNull()
       expect(testLogger.error.mock.calls.length).toBeGreaterThan(0)
     })
 
@@ -169,13 +194,14 @@ describe('API Integration', () => {
       })
       const testLogger = createLoggerMocks()
 
-      const result = await getUserInfoFromApiKey({
-        apiKey: 'timeout-token',
-        fields: ['id'],
-        logger: testLogger,
-      })
+      await expect(
+        getUserInfoFromApiKey({
+          apiKey: 'timeout-token',
+          fields: ['id'],
+          logger: testLogger,
+        }),
+      ).rejects.toBeInstanceOf(NetworkError)
 
-      expect(result).toBeNull()
       expect(
         testLogger.error.mock.calls.some(([payload]) =>
           JSON.stringify(payload).includes('Request timed out'),
@@ -189,13 +215,14 @@ describe('API Integration', () => {
       })
       const testLogger = createLoggerMocks()
 
-      const result = await getUserInfoFromApiKey({
-        apiKey: 'malformed-json-token',
-        fields: ['id'],
-        logger: testLogger,
-      })
+      await expect(
+        getUserInfoFromApiKey({
+          apiKey: 'malformed-json-token',
+          fields: ['id'],
+          logger: testLogger,
+        }),
+      ).rejects.toBeInstanceOf(NetworkError)
 
-      expect(result).toBeNull()
       expect(testLogger.error.mock.calls.length).toBeGreaterThan(0)
     })
   })
@@ -209,13 +236,14 @@ describe('API Integration', () => {
       })
       const testLogger = createLoggerMocks()
 
-      const result = await getUserInfoFromApiKey({
-        apiKey: 'network-failure-token',
-        fields: ['id'],
-        logger: testLogger,
-      })
+      await expect(
+        getUserInfoFromApiKey({
+          apiKey: 'network-failure-token',
+          fields: ['id'],
+          logger: testLogger,
+        }),
+      ).rejects.toBeInstanceOf(NetworkError)
 
-      expect(result).toBeNull()
       expect(fetchMock.mock.calls.length).toBe(1)
       expect(
         testLogger.error.mock.calls.some(([payload]) =>
@@ -232,13 +260,14 @@ describe('API Integration', () => {
       })
       const testLogger = createLoggerMocks()
 
-      const result = await getUserInfoFromApiKey({
-        apiKey: 'dns-failure-token',
-        fields: ['id'],
-        logger: testLogger,
-      })
+      await expect(
+        getUserInfoFromApiKey({
+          apiKey: 'dns-failure-token',
+          fields: ['id'],
+          logger: testLogger,
+        }),
+      ).rejects.toBeInstanceOf(NetworkError)
 
-      expect(result).toBeNull()
       expect(fetchMock.mock.calls.length).toBe(1)
       expect(
         testLogger.error.mock.calls.some(([payload]) =>

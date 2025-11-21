@@ -1,54 +1,62 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { RECONNECTION_MESSAGE_DURATION_MS } from '@codebuff/sdk'
 import { useKeyboard } from '@opentui/react'
+import { useQueryClient } from '@tanstack/react-query'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+} from 'react'
 import { useShallow } from 'zustand/react/shallow'
 
 import { routeUserPrompt } from './commands/router'
-import { AgentModeToggle } from './components/agent-mode-toggle'
+import { AnnouncementBanner } from './components/announcement-banner'
+import { ChatInputBar } from './components/chat-input-bar'
 import { MessageWithAgents } from './components/message-with-agents'
-import { FeedbackContainer } from './components/feedback-container'
-import { useFeedbackStore } from './state/feedback-store'
-import {
-  MultilineInput,
-  type MultilineInputHandle,
-} from './components/multiline-input'
-import { getStatusIndicatorState } from './utils/status-indicator-state'
 import { StatusBar } from './components/status-bar'
-import { SuggestionMenu } from './components/suggestion-menu'
 import { SLASH_COMMANDS } from './data/slash-commands'
 import { useAgentValidation } from './hooks/use-agent-validation'
+import { authQueryKeys } from './hooks/use-auth-query'
 import { useChatInput } from './hooks/use-chat-input'
 import { useClipboard } from './hooks/use-clipboard'
 import { useConnectionStatus } from './hooks/use-connection-status'
 import { useElapsedTime } from './hooks/use-elapsed-time'
+import { useEvent } from './hooks/use-event'
 import { useExitHandler } from './hooks/use-exit-handler'
 import { useInputHistory } from './hooks/use-input-history'
 import { useKeyboardHandlers } from './hooks/use-keyboard-handlers'
 import { useMessageQueue } from './hooks/use-message-queue'
-import { useMessageVirtualization } from './hooks/use-message-virtualization'
+import { useQueueControls } from './hooks/use-queue-controls'
+import { useQueueUi } from './hooks/use-queue-ui'
 import { useChatScrollbox } from './hooks/use-scroll-management'
 import { useSendMessage } from './hooks/use-send-message'
 import { useSuggestionEngine } from './hooks/use-suggestion-engine'
 import { useSuggestionMenuHandlers } from './hooks/use-suggestion-menu-handlers'
 import { useTerminalDimensions } from './hooks/use-terminal-dimensions'
 import { useTheme } from './hooks/use-theme'
+import { useTimeout } from './hooks/use-timeout'
 import { useValidationBanner } from './hooks/use-validation-banner'
-import { useQueueUi } from './hooks/use-queue-ui'
-import { useQueueControls } from './hooks/use-queue-controls'
-import { logger } from './utils/logger'
-import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import { useChatStore } from './state/chat-store'
+import { useFeedbackStore } from './state/feedback-store'
 import { createChatScrollAcceleration } from './utils/chat-scroll-accel'
 import { loadLocalAgents } from './utils/local-agent-registry'
 import { buildMessageTree } from './utils/message-tree-utils'
+import {
+  getStatusIndicatorState,
+  type AuthStatus,
+} from './utils/status-indicator-state'
 import { computeInputLayoutMetrics } from './utils/text-layout'
 import { createMarkdownPalette } from './utils/theme-system'
-import { BORDER_CHARS } from './utils/ui-constants'
 
-import type { ChatMessage, ContentBlock } from './types/chat'
+import type { MultilineInputHandle } from './components/multiline-input'
+import type { ContentBlock } from './types/chat'
 import type { SendMessageFn } from './types/contracts/send-message'
 import type { User } from './utils/auth'
+import type { AgentMode } from './utils/constants'
 import type { FileTreeNode } from '@codebuff/common/util/file'
-import type { ScrollBoxRenderable } from '@opentui/core'
+import type { KeyEvent, ScrollBoxRenderable } from '@opentui/core'
 import type { UseMutationResult } from '@tanstack/react-query'
 import type { Dispatch, SetStateAction } from 'react'
 
@@ -65,6 +73,7 @@ export const Chat = ({
   logoutMutation,
   continueChat,
   continueChatId,
+  authStatus,
 }: {
   headerContent: React.ReactNode
   initialPrompt: string | null
@@ -81,13 +90,22 @@ export const Chat = ({
   logoutMutation: UseMutationResult<boolean, Error, void, unknown>
   continueChat: boolean
   continueChatId?: string
+  authStatus: AuthStatus
 }) => {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
-  const [showScrollbar, setShowScrollbar] = useState(false)
-  const hasShownScrollbarRef = useRef(false)
+  const [hasOverflow, setHasOverflow] = useState(false)
+  const hasOverflowRef = useRef(false)
+
+  const queryClient = useQueryClient()
+  const [, startUiTransition] = useTransition()
+
+  const [showReconnectionMessage, setShowReconnectionMessage] = useState(false)
+  const reconnectionTimeout = useTimeout()
+  const [forceFileOnlyMentions, setForceFileOnlyMentions] = useState(false)
 
   const { separatorWidth, terminalWidth, terminalHeight } =
     useTerminalDimensions()
+  const messageAvailableWidth = separatorWidth
 
   const theme = useTheme()
   const markdownPalette = useMemo(() => createMarkdownPalette(theme), [theme])
@@ -125,6 +143,9 @@ export const Chat = ({
     resetChatStore,
     sessionCreditsUsed,
     setRunState,
+    isAnnouncementVisible,
+    setIsAnnouncementVisible,
+    isRetrying,
   } = useChatStore(
     useShallow((store) => ({
       inputValue: store.inputValue,
@@ -158,6 +179,9 @@ export const Chat = ({
       resetChatStore: store.reset,
       sessionCreditsUsed: store.sessionCreditsUsed,
       setRunState: store.setRunState,
+      isAnnouncementVisible: store.isAnnouncementVisible,
+      setIsAnnouncementVisible: store.setIsAnnouncementVisible,
+      isRetrying: store.isRetrying,
     })),
   )
 
@@ -192,7 +216,31 @@ export const Chat = ({
   const sendMessageRef = useRef<SendMessageFn>()
 
   const { statusMessage } = useClipboard()
-  const isConnected = useConnectionStatus()
+
+  const handleReconnection = useCallback(
+    (isInitialConnection: boolean) => {
+      // Invalidate auth queries so we refetch with current credentials
+      queryClient.invalidateQueries({ queryKey: authQueryKeys.all })
+
+      startUiTransition(() => {
+        if (!isInitialConnection) {
+          setShowReconnectionMessage(true)
+          reconnectionTimeout.setTimeout(
+            'reconnection-message',
+            () => {
+              startUiTransition(() => {
+                setShowReconnectionMessage(false)
+              })
+            },
+            RECONNECTION_MESSAGE_DURATION_MS,
+          )
+        }
+      })
+    },
+    [queryClient, reconnectionTimeout, startUiTransition],
+  )
+
+  const isConnected = useConnectionStatus(handleReconnection)
   const mainAgentTimer = useElapsedTime()
   const timerStartTime = mainAgentTimer.startTime
 
@@ -295,7 +343,7 @@ export const Chat = ({
 
               return block
             })
-            
+
             // Return original array reference if nothing changed
             return foundTarget ? result : blocks
           }
@@ -325,7 +373,31 @@ export const Chat = ({
     isUserCollapsing,
   )
 
+  // Check if content has overflowed and needs scrolling
+  useEffect(() => {
+    const scrollbox = scrollRef.current
+    if (!scrollbox) return
 
+    const checkOverflow = () => {
+      const contentHeight = scrollbox.scrollHeight
+      const viewportHeight = scrollbox.viewport.height
+      const isOverflowing = contentHeight > viewportHeight
+
+      // Only update state if overflow status actually changed
+      if (hasOverflowRef.current !== isOverflowing) {
+        hasOverflowRef.current = isOverflowing
+        setHasOverflow(isOverflowing)
+      }
+    }
+
+    // Check initially and whenever scroll state changes
+    checkOverflow()
+    scrollbox.verticalScrollBar.on('change', checkOverflow)
+
+    return () => {
+      scrollbox.verticalScrollBar.off('change', checkOverflow)
+    }
+  }, [])
 
   const inertialScrollAcceleration = useMemo(
     () => createChatScrollAcceleration(),
@@ -337,6 +409,7 @@ export const Chat = ({
     : scrollboxProps
 
   const localAgents = useMemo(() => loadLocalAgents(), [])
+  const isBashMode = useChatStore((state) => state.isBashMode)
 
   const {
     slashContext,
@@ -348,11 +421,19 @@ export const Chat = ({
     agentSuggestionItems,
     fileSuggestionItems,
   } = useSuggestionEngine({
-    inputValue,
+    disableAgentSuggestions: forceFileOnlyMentions || isBashMode,
+    inputValue: isBashMode ? '' : inputValue,
+    cursorPosition,
     slashCommands: SLASH_COMMANDS,
     localAgents,
     fileTree,
   })
+
+  useEffect(() => {
+    if (!mentionContext.active) {
+      setForceFileOnlyMentions(false)
+    }
+  }, [mentionContext.active])
 
   // Reset suggestion menu indexes when context changes
   useEffect(() => {
@@ -395,19 +476,86 @@ export const Chat = ({
     setAgentSelectedIndex,
   ])
 
-  const { handleSuggestionMenuKey } = useSuggestionMenuHandlers({
-    slashContext,
-    mentionContext,
-    slashMatches,
-    agentMatches,
-    fileMatches,
-    slashSelectedIndex,
-    agentSelectedIndex,
-    inputValue,
-    setInputValue,
-    setSlashSelectedIndex,
-    setAgentSelectedIndex,
-  })
+  const { handleSuggestionMenuKey: handleSuggestionMenuKeyInternal } =
+    useSuggestionMenuHandlers({
+      slashContext,
+      mentionContext,
+      slashMatches,
+      agentMatches,
+      fileMatches,
+      slashSelectedIndex,
+      agentSelectedIndex,
+      inputValue,
+      setInputValue,
+      setSlashSelectedIndex,
+      setAgentSelectedIndex,
+    })
+  const openFileMenuWithTab = useCallback(() => {
+    const safeCursor = Math.max(0, Math.min(cursorPosition, inputValue.length))
+
+    let wordStart = safeCursor
+    while (wordStart > 0 && !/\s/.test(inputValue[wordStart - 1])) {
+      wordStart--
+    }
+
+    const before = inputValue.slice(0, wordStart)
+    const wordAtCursor = inputValue.slice(wordStart, safeCursor)
+    const after = inputValue.slice(safeCursor)
+    const mentionWord = wordAtCursor.startsWith('@')
+      ? wordAtCursor
+      : `@${wordAtCursor}`
+
+    const text = `${before}${mentionWord}${after}`
+    const nextCursor = before.length + mentionWord.length
+
+    setInputValue({
+      text,
+      cursorPosition: nextCursor,
+      lastEditDueToNav: false,
+    })
+    setForceFileOnlyMentions(true)
+  }, [cursorPosition, inputValue, setInputValue])
+
+  const handleSuggestionMenuKey = useCallback(
+    (key: KeyEvent): boolean => {
+      // In bash mode at cursor position 0, backspace should exit bash mode
+      const isBashMode = useChatStore.getState().isBashMode
+      if (isBashMode && cursorPosition === 0 && key.name === 'backspace') {
+        useChatStore.getState().setBashMode(false)
+        return true
+      }
+
+      if (handleSuggestionMenuKeyInternal(key)) {
+        return true
+      }
+
+      const isPlainTab =
+        key &&
+        key.name === 'tab' &&
+        !key.shift &&
+        !key.ctrl &&
+        !key.meta &&
+        !key.option
+
+      if (isPlainTab && !mentionContext.active) {
+        // Only open file menu if there's a word at cursor to complete
+        const safeCursor = Math.max(0, Math.min(cursorPosition, inputValue.length))
+        let wordStart = safeCursor
+        while (wordStart > 0 && !/\s/.test(inputValue[wordStart - 1])) {
+          wordStart--
+        }
+        const hasWordAtCursor = wordStart < safeCursor
+        
+        if (hasWordAtCursor) {
+          openFileMenuWithTab()
+          return true
+        }
+      }
+
+      return false
+    },
+    [handleSuggestionMenuKeyInternal, mentionContext.active, openFileMenuWithTab, inputValue],
+  )
 
   const { saveToHistory, navigateUp, navigateDown } = useInputHistory(
     inputValue,
@@ -490,7 +638,7 @@ export const Chat = ({
     onBeforeMessageSend: validateAgents,
     mainAgentTimer,
     scrollToLatest,
-    availableWidth: separatorWidth,
+    availableWidth: messageAvailableWidth,
     onTimerEvent: () => {}, // No-op for now
     setHasReceivedPlanResponse,
     lastMessageMode,
@@ -505,6 +653,33 @@ export const Chat = ({
 
   sendMessageRef.current = sendMessage
 
+  const onSubmitPrompt = useEvent((content: string, mode: AgentMode) => {
+    return routeUserPrompt({
+      abortControllerRef,
+      agentMode: mode,
+      inputRef,
+      inputValue: content,
+      isChainInProgressRef,
+      isStreaming,
+      logoutMutation,
+      streamMessageIdRef,
+      addToQueue,
+      clearMessages,
+      clearQueue,
+      handleCtrlC,
+      saveToHistory,
+      scrollToLatest,
+      sendMessage,
+      setCanProcessQueue,
+      setInputFocused,
+      setInputValue,
+      setIsAuthenticated,
+      setMessages,
+      setUser,
+      stopStreaming,
+    })
+  })
+
   const { inputWidth, handleBuildFast, handleBuildMax } = useChatInput({
     inputValue,
     setInputValue,
@@ -512,7 +687,7 @@ export const Chat = ({
     setAgentMode,
     separatorWidth,
     initialPrompt,
-    sendMessageRef,
+    onSubmitPrompt,
   })
 
   const {
@@ -586,12 +761,6 @@ export const Chat = ({
   const handleSubmit = useCallback(async () => {
     ensureQueueActiveBeforeSubmit()
 
-    // Show scrollbar on first message
-    if (!hasShownScrollbarRef.current) {
-      hasShownScrollbarRef.current = true
-      setShowScrollbar(true)
-    }
-
     const result = await routeUserPrompt({
       abortControllerRef,
       agentMode,
@@ -612,10 +781,10 @@ export const Chat = ({
       setInputFocused,
       setInputValue,
       setIsAuthenticated,
-      setMessages,
-      setUser,
-      stopStreaming,
-    })
+    setMessages,
+    setUser,
+    stopStreaming,
+  })
 
     if (result?.openFeedbackMode) {
       saveCurrentInput('', 0)
@@ -685,31 +854,14 @@ export const Chat = ({
     historyNavUpEnabled,
     historyNavDownEnabled,
     disabled: feedbackMode,
+    inputValue,
+    setInputValue,
   })
 
   const { tree: messageTree, topLevelMessages } = useMemo(
     () => buildMessageTree(messages),
     [messages],
   )
-
-  const { shouldVirtualize, virtualTopLevelMessages, hiddenTopLevelCount } =
-    useMessageVirtualization({
-      topLevelMessages,
-      isAtBottom,
-    })
-
-  const virtualizationNotice =
-    shouldVirtualize && hiddenTopLevelCount > 0 ? (
-      <text
-        key="virtualization-notice"
-        style={{ width: '100%', wrapMode: 'none' }}
-      >
-        <span fg={theme.secondary}>
-          Showing latest {virtualTopLevelMessages.length} of{' '}
-          {topLevelMessages.length} messages. Scroll up to load more.
-        </span>
-      </text>
-    ) : null
 
   const hasSlashSuggestions =
     slashContext.active && slashSuggestionItems.length > 0
@@ -720,6 +872,7 @@ export const Chat = ({
   const hasSuggestionMenu = hasSlashSuggestions || hasMentionSuggestions
 
   const inputLayoutMetrics = useMemo(() => {
+    // In bash mode, layout is based on the actual input (no ! prefix needed)
     const text = inputValue ?? ''
     const layoutContent = text.length > 0 ? text : ' '
     const safeCursor = Math.max(
@@ -745,6 +898,9 @@ export const Chat = ({
     streamStatus,
     nextCtrlCWillExit,
     isConnected,
+    authStatus,
+    showReconnectionMessage,
+    isRetrying,
   })
   const hasStatusIndicatorContent = statusIndicatorState.kind !== 'idle'
   const inputBoxTitle = useMemo(() => {
@@ -798,8 +954,6 @@ export const Chat = ({
       style={{
         flexDirection: 'column',
         gap: 0,
-        paddingLeft: 1,
-        paddingRight: 1,
         flexGrow: 1,
       }}
     >
@@ -809,7 +963,10 @@ export const Chat = ({
         stickyStart="bottom"
         scrollX={false}
         scrollbarOptions={{ visible: false }}
-        verticalScrollbarOptions={{ visible: showScrollbar, trackOptions: { width: 1 } }}
+        verticalScrollbarOptions={{
+          visible: !isStreaming && !isWaitingForResponse && hasOverflow,
+          trackOptions: { width: 1 },
+        }}
         {...appliedScrollboxProps}
         style={{
           flexGrow: 1,
@@ -834,11 +991,16 @@ export const Chat = ({
             shouldFill: true,
             justifyContent: 'flex-end',
             backgroundColor: 'transparent',
+            paddingLeft: 1,
+            paddingRight: 2,
           },
         }}
       >
+        {isAnnouncementVisible && (
+          <AnnouncementBanner onClose={() => setIsAnnouncementVisible(false)} />
+        )}
+
         {headerContent}
-        {virtualizationNotice}
         {topLevelMessages.map((message, idx) => {
           const isLast = idx === topLevelMessages.length - 1
           return (
@@ -852,7 +1014,7 @@ export const Chat = ({
               streamingAgents={streamingAgents}
               messageTree={messageTree}
               messages={messages}
-              availableWidth={separatorWidth}
+              availableWidth={messageAvailableWidth}
               setFocusedAgentId={setFocusedAgentId}
               isWaitingForResponse={isWaitingForResponse}
               timerStartTime={timerStartTime}
@@ -879,103 +1041,42 @@ export const Chat = ({
             timerStartTime={timerStartTime}
             nextCtrlCWillExit={nextCtrlCWillExit}
             isConnected={isConnected}
+            authStatus={authStatus}
             isAtBottom={isAtBottom}
             scrollToLatest={scrollToLatest}
+            statusIndicatorState={statusIndicatorState}
           />
         )}
 
-        {/* Wrap the input row in a single OpenTUI border so the toggle stays inside the flex layout.
-            Non-actionable queue context is injected via the border title to keep the content
-            area stable while still surfacing that information. */}
-        {feedbackMode ? (
-          <FeedbackContainer
-            inputRef={inputRef}
-            onExitFeedback={handleExitFeedback}
-            width={separatorWidth}
-          />
-        ) : (
-          <box
-            title={inputBoxTitle}
-            titleAlignment="center"
-            style={{
-              width: '100%',
-              borderStyle: 'single',
-              borderColor: theme.foreground,
-              customBorderChars: BORDER_CHARS,
-              paddingLeft: 1,
-              paddingRight: 1,
-              paddingTop: 0,
-              paddingBottom: 0,
-              flexDirection: 'column',
-              gap: hasSuggestionMenu ? 1 : 0,
-            }}
-          >
-            {hasSlashSuggestions ? (
-              <SuggestionMenu
-                items={slashSuggestionItems}
-                selectedIndex={slashSelectedIndex}
-                maxVisible={10}
-                prefix="/"
-              />
-            ) : null}
-            {hasMentionSuggestions ? (
-              <SuggestionMenu
-                items={[...agentSuggestionItems, ...fileSuggestionItems]}
-                selectedIndex={agentSelectedIndex}
-                maxVisible={10}
-                prefix="@"
-              />
-            ) : null}
-            <box
-              style={{
-                flexDirection: 'column',
-                justifyContent: shouldCenterInputVertically
-                  ? 'center'
-                  : 'flex-start',
-                minHeight: shouldCenterInputVertically ? 3 : undefined,
-                gap: 0,
-              }}
-            >
-              <box
-                style={{
-                  flexDirection: 'row',
-                  alignItems: shouldCenterInputVertically
-                    ? 'center'
-                    : 'flex-start',
-                  width: '100%',
-                }}
-              >
-                <box style={{ flexGrow: 1, minWidth: 0 }}>
-                  <MultilineInput
-                    value={inputValue}
-                    onChange={setInputValue}
-                    onSubmit={handleSubmit}
-                    placeholder={inputPlaceholder}
-                    focused={inputFocused && !feedbackMode}
-                    maxHeight={Math.floor(terminalHeight / 2)}
-                    width={inputWidth}
-                    onKeyIntercept={handleSuggestionMenuKey}
-                    textAttributes={theme.messageTextAttributes}
-                    ref={inputRef}
-                    cursorPosition={cursorPosition}
-                  />
-                </box>
-                <box
-                  style={{
-                    flexShrink: 0,
-                    paddingLeft: 2,
-                  }}
-                >
-                  <AgentModeToggle
-                    mode={agentMode}
-                    onToggle={toggleAgentMode}
-                    onSelectMode={setAgentMode}
-                  />
-                </box>
-              </box>
-            </box>
-          </box>
-        )}
+        <ChatInputBar
+          inputValue={inputValue}
+          cursorPosition={cursorPosition}
+          setInputValue={setInputValue}
+          inputFocused={inputFocused}
+          inputRef={inputRef}
+          inputPlaceholder={inputPlaceholder}
+          inputWidth={inputWidth}
+          agentMode={agentMode}
+          toggleAgentMode={toggleAgentMode}
+          setAgentMode={setAgentMode}
+          hasSlashSuggestions={hasSlashSuggestions}
+          hasMentionSuggestions={hasMentionSuggestions}
+          hasSuggestionMenu={hasSuggestionMenu}
+          slashSuggestionItems={slashSuggestionItems}
+          agentSuggestionItems={agentSuggestionItems}
+          fileSuggestionItems={fileSuggestionItems}
+          slashSelectedIndex={slashSelectedIndex}
+          agentSelectedIndex={agentSelectedIndex}
+          handleSuggestionMenuKey={handleSuggestionMenuKey}
+          theme={theme}
+          terminalHeight={terminalHeight}
+          separatorWidth={separatorWidth}
+          shouldCenterInputVertically={shouldCenterInputVertically}
+          inputBoxTitle={inputBoxTitle}
+          feedbackMode={feedbackMode}
+          handleExitFeedback={handleExitFeedback}
+          handleSubmit={handleSubmit}
+        />
       </box>
 
       {validationBanner}

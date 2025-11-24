@@ -3,26 +3,17 @@ import type {
   CodebuffToolCall,
   CodebuffToolOutput,
 } from '@codebuff/common/tools/list'
-import type { Message } from '@codebuff/common/types/messages/codebuff-message'
+import type { AgentState } from '@codebuff/common/types/session-state'
 
-export const handleSetMessages = (({
-  previousToolCallFinished,
-  toolCall,
-  getLatestState,
-}: {
+export const handleSetMessages = (async (params: {
   previousToolCallFinished: Promise<void>
   toolCall: CodebuffToolCall<'set_messages'>
-  getLatestState: () => { messages: Message[] }
-}): {
-  result: Promise<CodebuffToolOutput<'set_messages'>>
-  state: {}
-} => {
-  return {
-    result: (async () => {
-      await previousToolCallFinished
-      getLatestState().messages = toolCall.input.messages
-      return []
-    })(),
-    state: {},
-  }
+
+  agentState: AgentState
+}): Promise<{ output: CodebuffToolOutput<'set_messages'> }> => {
+  const { previousToolCallFinished, toolCall, agentState } = params
+
+  await previousToolCallFinished
+  agentState.messageHistory = toolCall.input.messages
+  return { output: [] }
 }) satisfies CodebuffToolHandlerFunction<'set_messages'>

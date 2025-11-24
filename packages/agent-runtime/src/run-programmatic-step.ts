@@ -5,6 +5,7 @@ import { cloneDeep } from 'lodash'
 
 import { executeToolCall } from './tools/tool-executor'
 
+import type { FileProcessingState } from './tools/handlers/tool/write-file'
 import type { CodebuffToolCall } from '@codebuff/common/tools/list'
 import type {
   AgentTemplate,
@@ -48,6 +49,7 @@ export async function runProgrammaticStep(
     repoUrl: string | undefined
     userInputId: string
     fingerprintId: string
+    clientSessionId: string
     onResponseChunk: (chunk: string | PrintModeEvent) => void
     localAgentTemplates: Record<string, AgentTemplate>
     stepsComplete: boolean
@@ -61,16 +63,17 @@ export async function runProgrammaticStep(
     typeof executeToolCall,
     | 'toolName'
     | 'input'
-    | 'toolCalls'
-    | 'toolResults'
-    | 'toolResultsToAddAfterStream'
-    | 'previousToolCallFinished'
+    | 'autoInsertEndStepParam'
+    | 'excludeToolFromMessageHistory'
+    | 'agentContext'
     | 'agentStepId'
     | 'agentTemplate'
     | 'fullResponse'
-    | 'autoInsertEndStepParam'
-    | 'state'
-    | 'excludeToolFromMessageHistory'
+    | 'previousToolCallFinished'
+    | 'fileProcessingState'
+    | 'toolCalls'
+    | 'toolResults'
+    | 'toolResultsToAddAfterStream'
   > &
     ParamsExcluding<
       AddAgentStepFn,
@@ -92,6 +95,7 @@ export async function runProgrammaticStep(
   const {
     agentState,
     template,
+    clientSessionId,
     prompt,
     toolCallParams,
     nResponses,
@@ -173,33 +177,28 @@ export async function runProgrammaticStep(
   // Initialize state for tool execution
   const toolCalls: CodebuffToolCall[] = []
   const toolResults: ToolMessage[] = []
-  const state = {
-    fingerprintId,
-    userId,
-    agentTemplate: template,
-    localAgentTemplates,
-    system,
-    sendSubagentChunk: (data: {
-      userInputId: string
-      agentId: string
-      agentType: string
-      chunk: string
-      prompt?: string
-      forwardToPrompt?: boolean
-    }) => {
-      sendAction({
-        action: {
-          type: 'subagent-response-chunk',
-          ...data,
-        },
-      })
-    },
-    agentState: cloneDeep({
-      ...agentState,
-      runId: agentState.runId!, // We've already verified runId exists above
-    }),
-    agentContext: cloneDeep(agentState.agentContext),
-    messages: cloneDeep(agentState.messageHistory),
+  const fileProcessingState: FileProcessingState = {
+    promisesByPath: {},
+    allPromises: [],
+    fileChangeErrors: [],
+    fileChanges: [],
+    firstFileProcessed: false,
+  }
+  const agentContext = cloneDeep(agentState.agentContext)
+  const sendSubagentChunk = (data: {
+    userInputId: string
+    agentId: string
+    agentType: string
+    chunk: string
+    prompt?: string
+    forwardToPrompt?: boolean
+  }) => {
+    sendAction({
+      action: {
+        type: 'subagent-response-chunk',
+        ...data,
+      },
+    })
   }
 
   let toolResult: ToolResultOutput[] | undefined = undefined
@@ -215,11 +214,13 @@ export async function runProgrammaticStep(
     // Execute tools synchronously as the generator yields them
     do {
       startTime = new Date()
-      creditsBefore = state.agentState.directCreditsUsed
-      childrenBefore = state.agentState.childRunIds.length
+      creditsBefore = agentState.directCreditsUsed
+      childrenBefore = agentState.childRunIds.length
 
       const result = generator!.next({
-        agentState: getPublicAgentState(state.agentState),
+        agentState: getPublicAgentState(
+          agentState as AgentState & Required<Pick<AgentState, 'runId'>>,
+        ),
         toolResult: toolResult ?? [],
         stepsComplete,
         nResponses,
@@ -233,7 +234,7 @@ export async function runProgrammaticStep(
         break
       }
       if (result.value === 'STEP_ALL') {
-        runIdToStepAll.add(state.agentState.runId)
+        runIdToStepAll.add(agentState.runId)
         break
       }
 
@@ -275,14 +276,14 @@ export async function runProgrammaticStep(
           toolCall.input,
         )
         onResponseChunk(toolCallString)
-        state.messages.push(assistantMessage(toolCallString))
+        agentState.messageHistory.push(assistantMessage(toolCallString))
         // Optional call handles both top-level and nested agents
-        state.sendSubagentChunk?.({
+        sendSubagentChunk({
           userInputId,
-          agentId: state.agentState.agentId,
-          agentType: state.agentState.agentType!,
+          agentId: agentState.agentId,
+          agentType: agentState.agentType!,
           chunk: toolCallString,
-          forwardToPrompt: !state.agentState.parentId,
+          forwardToPrompt: !agentState.parentId,
         })
       }
 
@@ -292,17 +293,20 @@ export async function runProgrammaticStep(
         ...params,
         toolName: toolCall.toolName,
         input: toolCall.input,
-        toolCalls,
-        toolResults,
-        toolResultsToAddAfterStream: [],
-        previousToolCallFinished: Promise.resolve(),
-        agentTemplate: template,
-        agentStepId,
-        fullResponse: '',
-        state,
         autoInsertEndStepParam: true,
         excludeToolFromMessageHistory,
         fromHandleSteps: true,
+
+        agentContext,
+        agentStepId,
+        agentTemplate: template,
+        fileProcessingState,
+        fullResponse: '',
+        previousToolCallFinished: Promise.resolve(),
+        toolCalls,
+        toolResults,
+        toolResultsToAddAfterStream: [],
+
         onResponseChunk: (chunk: string | PrintModeEvent) => {
           if (typeof chunk === 'string') {
             onResponseChunk(chunk)
@@ -311,8 +315,8 @@ export async function runProgrammaticStep(
 
           // Only add parentAgentId if this programmatic agent has a parent (i.e., it's nested)
           // This ensures we don't add parentAgentId to top-level spawns
-          if (state.agentState.parentId) {
-            const parentAgentId = state.agentState.agentId
+          if (agentState.parentId) {
+            const parentAgentId = agentState.agentId
 
             switch (chunk.type) {
               case 'subagent_start':
@@ -357,21 +361,17 @@ export async function runProgrammaticStep(
         },
       })
 
-      // TODO: Remove messages from state and always use agentState.messageHistory.
-      // Sync state.messages back to agentState.messageHistory
-      state.agentState.messageHistory = state.messages
-
       // Get the latest tool result
       const latestToolResult = toolResults[toolResults.length - 1]
       toolResult = latestToolResult?.content
 
-      if (state.agentState.runId) {
+      if (agentState.runId) {
         await addAgentStep({
           ...params,
-          agentRunId: state.agentState.runId,
+          agentRunId: agentState.runId,
           stepNumber,
-          credits: state.agentState.directCreditsUsed - creditsBefore,
-          childRunIds: state.agentState.childRunIds.slice(childrenBefore),
+          credits: agentState.directCreditsUsed - creditsBefore,
+          childRunIds: agentState.childRunIds.slice(childrenBefore),
           status: 'completed',
           startTime,
           messageId: null,
@@ -388,7 +388,7 @@ export async function runProgrammaticStep(
     } while (true)
 
     return {
-      agentState: state.agentState,
+      agentState,
       textOverride,
       endTurn,
       stepNumber,
@@ -407,12 +407,9 @@ export async function runProgrammaticStep(
 
     onResponseChunk(errorMessage)
 
-    state.agentState.messageHistory = [
-      ...state.messages,
-      assistantMessage(errorMessage),
-    ]
-    state.agentState.output = {
-      ...state.agentState.output,
+    agentState.messageHistory.push(assistantMessage(errorMessage))
+    agentState.output = {
+      ...agentState.output,
       error: errorMessage,
     }
 
@@ -435,7 +432,7 @@ export async function runProgrammaticStep(
     stepNumber++
 
     return {
-      agentState: state.agentState,
+      agentState,
       textOverride: null,
       endTurn,
       stepNumber,

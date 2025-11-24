@@ -22,6 +22,7 @@ import { authQueryKeys } from './hooks/use-auth-query'
 import { useChatInput } from './hooks/use-chat-input'
 import { useClipboard } from './hooks/use-clipboard'
 import { useConnectionStatus } from './hooks/use-connection-status'
+
 import { useElapsedTime } from './hooks/use-elapsed-time'
 import { useEvent } from './hooks/use-event'
 import { useExitHandler } from './hooks/use-exit-handler'
@@ -37,7 +38,7 @@ import { useSuggestionMenuHandlers } from './hooks/use-suggestion-menu-handlers'
 import { useTerminalDimensions } from './hooks/use-terminal-dimensions'
 import { useTheme } from './hooks/use-theme'
 import { useTimeout } from './hooks/use-timeout'
-import { useValidationBanner } from './hooks/use-validation-banner'
+
 import { useChatStore } from './state/chat-store'
 import { useFeedbackStore } from './state/feedback-store'
 import { createChatScrollAcceleration } from './utils/chat-scroll-accel'
@@ -539,13 +540,16 @@ export const Chat = ({
 
       if (isPlainTab && !mentionContext.active) {
         // Only open file menu if there's a word at cursor to complete
-        const safeCursor = Math.max(0, Math.min(cursorPosition, inputValue.length))
+        const safeCursor = Math.max(
+          0,
+          Math.min(cursorPosition, inputValue.length),
+        )
         let wordStart = safeCursor
         while (wordStart > 0 && !/\s/.test(inputValue[wordStart - 1])) {
           wordStart--
         }
         const hasWordAtCursor = wordStart < safeCursor
-        
+
         if (hasWordAtCursor) {
           openFileMenuWithTab()
           return true
@@ -554,7 +558,12 @@ export const Chat = ({
 
       return false
     },
-    [handleSuggestionMenuKeyInternal, mentionContext.active, openFileMenuWithTab, inputValue],
+    [
+      handleSuggestionMenuKeyInternal,
+      mentionContext.active,
+      openFileMenuWithTab,
+      inputValue,
+    ],
   )
 
   const { saveToHistory, navigateUp, navigateDown } = useInputHistory(
@@ -649,6 +658,7 @@ export const Chat = ({
     resumeQueue,
     continueChat,
     continueChatId,
+    onOpenFeedback: () => handleOpenFeedbackForMessage(null),
   })
 
   sendMessageRef.current = sendMessage
@@ -718,16 +728,30 @@ export const Chat = ({
   }, [cursorPosition])
 
   const handleOpenFeedbackForMessage = useCallback(
-    (id: string | null) => {
+    (
+      id: string | null,
+      options?: {
+        category?: string
+        footerMessage?: string
+        errors?: Array<{ id: string; message: string }>
+      },
+    ) => {
       saveCurrentInput(inputValueRef.current, cursorPositionRef.current)
-      openFeedbackForMessage(id)
+      openFeedbackForMessage(id, options)
     },
     [saveCurrentInput, openFeedbackForMessage],
   )
 
   const handleMessageFeedback = useCallback(
-    (id: string) => {
-      handleOpenFeedbackForMessage(id)
+    (
+      id: string,
+      options?: {
+        category?: string
+        footerMessage?: string
+        errors?: Array<{ id: string; message: string }>
+      },
+    ) => {
+      handleOpenFeedbackForMessage(id, options)
     },
     [handleOpenFeedbackForMessage],
   )
@@ -781,10 +805,10 @@ export const Chat = ({
       setInputFocused,
       setInputValue,
       setIsAuthenticated,
-    setMessages,
-    setUser,
-    stopStreaming,
-  })
+      setMessages,
+      setUser,
+      stopStreaming,
+    })
 
     if (result?.openFeedbackMode) {
       saveCurrentInput('', 0)
@@ -883,7 +907,7 @@ export const Chat = ({
       safeCursor >= layoutContent.length
         ? layoutContent
         : layoutContent.slice(0, safeCursor)
-    const cols = Math.max(1, inputWidth - 4)
+    const cols = Math.max(1, inputWidth)
     return computeInputLayoutMetrics({
       layoutContent,
       cursorProbe,
@@ -943,11 +967,6 @@ export const Chat = ({
       [handleOpenFeedbackForLatestMessage, feedbackMode],
     ),
   )
-  const validationBanner = useValidationBanner({
-    liveValidationErrors: validationErrors,
-    loadedAgentsData,
-    theme,
-  })
 
   return (
     <box
@@ -1078,8 +1097,6 @@ export const Chat = ({
           handleSubmit={handleSubmit}
         />
       </box>
-
-      {validationBanner}
     </box>
   )
 }

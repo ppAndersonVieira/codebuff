@@ -22,11 +22,7 @@ import { handleSpawnAgents } from '../tools/handlers/tool/spawn-agents'
 
 import type { CodebuffToolCall } from '@codebuff/common/tools/list'
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
-import type {
-  ParamsExcluding,
-  ParamsOf,
-} from '@codebuff/common/types/function-params'
-import type { Message } from '@codebuff/common/types/messages/codebuff-message'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 
 describe('Spawn Agents Message History', () => {
   let mockSendSubagentChunk: any
@@ -35,11 +31,7 @@ describe('Spawn Agents Message History', () => {
 
   let handleSpawnAgentsBaseParams: ParamsExcluding<
     typeof handleSpawnAgents,
-    'toolCall' | 'state' | 'getLatestState'
-  >
-  let baseState: Omit<
-    ParamsOf<typeof handleSpawnAgents>['state'],
-    'agentTemplate' | 'localAgentTemplates' | 'agentState' | 'messages'
+    'agentState' | 'agentTemplate' | 'localAgentTemplates' | 'toolCall'
   >
 
   beforeEach(() => {
@@ -66,22 +58,19 @@ describe('Spawn Agents Message History', () => {
 
     handleSpawnAgentsBaseParams = {
       ...TEST_AGENT_RUNTIME_IMPL,
+      ancestorRunIds: [],
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
       repoId: undefined,
       repoUrl: undefined,
       previousToolCallFinished: Promise.resolve(),
-      fileContext: mockFileContext,
-      clientSessionId: 'test-session',
-      userInputId: 'test-input',
-      ancestorRunIds: [],
-      writeToClient: () => {},
-      signal: new AbortController().signal,
-    }
-
-    baseState = {
-      fingerprintId: 'test-fingerprint',
-      userId: TEST_USER_ID,
       sendSubagentChunk: mockSendSubagentChunk,
+      signal: new AbortController().signal,
       system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      writeToClient: () => {},
     }
   })
 
@@ -132,27 +121,20 @@ describe('Spawn Agents Message History', () => {
     const toolCall = createSpawnToolCall('child-agent')
 
     // Create mock messages including system message
-    const mockMessages: Message[] = [
+    sessionState.mainAgentState.messageHistory = [
       systemMessage('This is the parent system prompt that should be excluded'),
       userMessage('Hello'),
       assistantMessage('Hi there!'),
       userMessage('How are you?'),
     ]
 
-    const { result } = handleSpawnAgents({
+    await handleSpawnAgents({
       ...handleSpawnAgentsBaseParams,
+      agentState: sessionState.mainAgentState,
+      agentTemplate: parentAgent,
+      localAgentTemplates: { 'child-agent': childAgent },
       toolCall,
-      getLatestState: () => ({ messages: mockMessages }),
-      state: {
-        ...baseState,
-        agentTemplate: parentAgent,
-        localAgentTemplates: { 'child-agent': childAgent },
-        messages: mockMessages,
-        agentState: sessionState.mainAgentState,
-      },
     })
-
-    await result
 
     // Verify that the spawned agent was called
     expect(mockLoopAgentSteps).toHaveBeenCalledTimes(1)
@@ -198,26 +180,19 @@ describe('Spawn Agents Message History', () => {
     const sessionState = getInitialSessionState(mockFileContext)
     const toolCall = createSpawnToolCall('child-agent')
 
-    const mockMessages: Message[] = [
+    sessionState.mainAgentState.messageHistory = [
       systemMessage('System prompt'),
       userMessage('Hello'),
       assistantMessage('Hi there!'),
     ]
 
-    const { result } = handleSpawnAgents({
+    await handleSpawnAgents({
       ...handleSpawnAgentsBaseParams,
+      agentState: sessionState.mainAgentState,
+      agentTemplate: parentAgent,
+      localAgentTemplates: { 'child-agent': childAgent },
       toolCall,
-      getLatestState: () => ({ messages: mockMessages }),
-      state: {
-        ...baseState,
-        agentTemplate: parentAgent,
-        localAgentTemplates: { 'child-agent': childAgent },
-        messages: mockMessages,
-        agentState: sessionState.mainAgentState,
-      },
     })
-
-    await result
 
     // Verify that the subagent's message history is empty when includeMessageHistory is false
     expect(capturedSubAgentState.messageHistory).toHaveLength(0)
@@ -229,22 +204,15 @@ describe('Spawn Agents Message History', () => {
     const sessionState = getInitialSessionState(mockFileContext)
     const toolCall = createSpawnToolCall('child-agent')
 
-    const mockMessages: Message[] = [] // Empty message history
+    sessionState.mainAgentState.messageHistory = [] // Empty message history
 
-    const { result } = handleSpawnAgents({
+    await handleSpawnAgents({
       ...handleSpawnAgentsBaseParams,
+      agentState: sessionState.mainAgentState,
+      agentTemplate: parentAgent,
+      localAgentTemplates: { 'child-agent': childAgent },
       toolCall,
-      getLatestState: () => ({ messages: mockMessages }),
-      state: {
-        ...baseState,
-        agentTemplate: parentAgent,
-        localAgentTemplates: { 'child-agent': childAgent },
-        messages: mockMessages,
-        agentState: sessionState.mainAgentState,
-      },
     })
-
-    await result
 
     // Verify that the subagent's message history is empty when there are no messages to pass
     expect(capturedSubAgentState.messageHistory).toHaveLength(0)
@@ -256,25 +224,18 @@ describe('Spawn Agents Message History', () => {
     const sessionState = getInitialSessionState(mockFileContext)
     const toolCall = createSpawnToolCall('child-agent')
 
-    const mockMessages: Message[] = [
+    sessionState.mainAgentState.messageHistory = [
       systemMessage('System prompt 1'),
       systemMessage('System prompt 2'),
     ]
 
-    const { result } = handleSpawnAgents({
+    await handleSpawnAgents({
       ...handleSpawnAgentsBaseParams,
+      agentState: sessionState.mainAgentState,
+      agentTemplate: parentAgent,
+      localAgentTemplates: { 'child-agent': childAgent },
       toolCall,
-      getLatestState: () => ({ messages: mockMessages }),
-      state: {
-        ...baseState,
-        agentTemplate: parentAgent,
-        localAgentTemplates: { 'child-agent': childAgent },
-        messages: mockMessages,
-        agentState: sessionState.mainAgentState,
-      },
     })
-
-    await result
 
     // Verify that system messages without timeToLive are included
     // expireMessages only filters messages with timeToLive='userPrompt'

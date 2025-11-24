@@ -1,3 +1,5 @@
+import { jsonToolResult } from '@codebuff/common/util/messages'
+
 import type { CodebuffToolHandlerFunction } from '../handler-function-type'
 import type {
   CodebuffToolCall,
@@ -6,16 +8,12 @@ import type {
 import type { Subgoal } from '@codebuff/common/types/session-state'
 
 type ToolName = 'update_subgoal'
-export const handleUpdateSubgoal = ((params: {
+export const handleUpdateSubgoal = (async (params: {
   previousToolCallFinished: Promise<void>
   toolCall: CodebuffToolCall<ToolName>
-  state: { agentContext?: Record<string, Subgoal> }
-}): {
-  result: Promise<CodebuffToolOutput<ToolName>>
-  state: { agentContext: Record<string, Subgoal> }
-} => {
-  const { previousToolCallFinished, toolCall, state } = params
-  const agentContext = state.agentContext ?? {}
+  agentContext: Record<string, Subgoal>
+}): Promise<{ output: CodebuffToolOutput<ToolName> }> => {
+  const { previousToolCallFinished, toolCall, agentContext } = params
 
   let messages: string[] = []
   if (!agentContext[toolCall.input.id]) {
@@ -39,18 +37,12 @@ export const handleUpdateSubgoal = ((params: {
     agentContext[toolCall.input.id].logs.push(toolCall.input.log)
   }
   messages.push('Successfully updated subgoal.')
+
+  await previousToolCallFinished
+
   return {
-    result: (async () => {
-      await previousToolCallFinished
-      return [
-        {
-          type: 'json',
-          value: {
-            message: messages.join('\n\n'),
-          },
-        },
-      ]
-    })(),
-    state: { agentContext },
+    output: jsonToolResult({
+      message: messages.join('\n\n'),
+    }),
   }
 }) satisfies CodebuffToolHandlerFunction<ToolName>

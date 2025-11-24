@@ -1,18 +1,18 @@
 import { endsAgentStepParam } from '@codebuff/common/tools/constants'
-import { toolJsonContent } from '@codebuff/common/util/messages'
+import { toolParams } from '@codebuff/common/tools/list'
+import { jsonToolResult } from '@codebuff/common/util/messages'
 import { generateCompactId } from '@codebuff/common/util/string'
-import { type ToolCallPart } from 'ai'
 import { cloneDeep } from 'lodash'
 import z from 'zod/v4'
 import { convertJsonSchemaToZod } from 'zod-from-json-schema'
 
 import { checkLiveUserInput } from '../live-user-inputs'
 import { getMCPToolData } from '../mcp'
-import { codebuffToolDefs } from './definitions/list'
 import { codebuffToolHandlers } from './handlers/list'
 
 import type { AgentTemplate } from '../templates/types'
 import type { CodebuffToolHandlerFunction } from './handlers/handler-function-type'
+import type { FileProcessingState } from './handlers/tool/write-file'
 import type { ToolName } from '@codebuff/common/tools/constants'
 import type {
   ClientToolCall,
@@ -24,13 +24,16 @@ import type {
   AgentRuntimeDeps,
   AgentRuntimeScopedDeps,
 } from '@codebuff/common/types/contracts/agent-runtime'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { ToolMessage } from '@codebuff/common/types/messages/codebuff-message'
 import type { ToolResultOutput } from '@codebuff/common/types/messages/content-part'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
+import type { AgentState, Subgoal } from '@codebuff/common/types/session-state'
 import type {
   customToolDefinitionsSchema,
   ProjectFileContext,
 } from '@codebuff/common/util/file'
+import type { ToolCallPart } from 'ai'
 
 export type CustomToolCall = {
   toolName: string
@@ -54,7 +57,7 @@ export function parseRawToolCall<T extends ToolName = ToolName>(params: {
   const { rawToolCall, autoInsertEndStepParam = false } = params
   const toolName = rawToolCall.toolName
 
-  if (!(toolName in codebuffToolDefs)) {
+  if (!(toolName in toolParams)) {
     return {
       toolName,
       toolCallId: rawToolCall.toolCallId,
@@ -72,19 +75,16 @@ export function parseRawToolCall<T extends ToolName = ToolName>(params: {
   // Add the required codebuff_end_step parameter with the correct value for this tool if requested
   if (autoInsertEndStepParam) {
     processedParameters[endsAgentStepParam] =
-      codebuffToolDefs[validName].endsAgentStep
+      toolParams[validName].endsAgentStep
   }
 
-  const paramsSchema = codebuffToolDefs[validName].endsAgentStep
+  const paramsSchema = toolParams[validName].endsAgentStep
     ? (
-        codebuffToolDefs[validName]
-          .parameters satisfies z.ZodObject as z.ZodObject
+        toolParams[validName].inputSchema satisfies z.ZodObject as z.ZodObject
       ).extend({
-        [endsAgentStepParam]: z.literal(
-          codebuffToolDefs[validName].endsAgentStep,
-        ),
+        [endsAgentStepParam]: z.literal(toolParams[validName].endsAgentStep),
       })
-    : codebuffToolDefs[validName].parameters
+    : toolParams[validName].inputSchema
   const result = paramsSchema.safeParse(processedParameters)
 
   if (!result.success) {
@@ -114,29 +114,38 @@ export function parseRawToolCall<T extends ToolName = ToolName>(params: {
 export type ExecuteToolCallParams<T extends string = ToolName> = {
   toolName: T
   input: Record<string, unknown>
+  autoInsertEndStepParam?: boolean
+  excludeToolFromMessageHistory?: boolean
+
+  agentContext: Record<string, Subgoal>
+  agentState: AgentState
+  agentStepId: string
+  ancestorRunIds: string[]
+  agentTemplate: AgentTemplate
+  clientSessionId: string
+  fileContext: ProjectFileContext
+  fileProcessingState: FileProcessingState
+  fingerprintId: string
+  fromHandleSteps?: boolean
+  fullResponse: string
+  localAgentTemplates: Record<string, AgentTemplate>
+  logger: Logger
+  previousToolCallFinished: Promise<void>
+  prompt: string | undefined
+  repoId: string | undefined
+  repoUrl: string | undefined
+  runId: string
+  signal: AbortSignal
+  system: string
   toolCalls: (CodebuffToolCall | CustomToolCall)[]
   toolResults: ToolMessage[]
   toolResultsToAddAfterStream: ToolMessage[]
-  previousToolCallFinished: Promise<void>
-  agentTemplate: AgentTemplate
-  fileContext: ProjectFileContext
-  runId: string
-  agentStepId: string
-  clientSessionId: string
-  userInputId: string
-  fullResponse: string
-  repoId: string | undefined
-  repoUrl: string | undefined
-  signal: AbortSignal
-  onResponseChunk: (chunk: string | PrintModeEvent) => void
-  state: Record<string, any>
   userId: string | undefined
-  autoInsertEndStepParam?: boolean
-  excludeToolFromMessageHistory?: boolean
+  userInputId: string
+
   fetch: typeof globalThis.fetch
-  fromHandleSteps?: boolean
   onCostCalculated: (credits: number) => Promise<void>
-  ancestorRunIds: string[]
+  onResponseChunk: (chunk: string | PrintModeEvent) => void
 } & AgentRuntimeDeps &
   AgentRuntimeScopedDeps
 
@@ -146,28 +155,22 @@ export function executeToolCall<T extends ToolName>(
   const {
     toolName,
     input,
+    autoInsertEndStepParam = false,
+    excludeToolFromMessageHistory = false,
+    fromHandleSteps = false,
+
+    agentState,
+    agentTemplate,
+    logger,
+    previousToolCallFinished,
     toolCalls,
     toolResults,
     toolResultsToAddAfterStream,
-    previousToolCallFinished,
-    agentTemplate,
-    fileContext,
-    agentStepId,
-    clientSessionId,
     userInputId,
-    fullResponse,
-    onResponseChunk,
-    state,
-    repoId,
-    repoUrl,
-    userId,
-    autoInsertEndStepParam = false,
-    excludeToolFromMessageHistory = false,
-    requestToolCall,
-    requestMcpToolData,
-    logger,
-    fromHandleSteps = false,
+
     onCostCalculated,
+    onResponseChunk,
+    requestToolCall,
   } = params
   const toolCall: CodebuffToolCall<T> | ToolCallError = parseRawToolCall<T>({
     rawToolCall: {
@@ -182,11 +185,9 @@ export function executeToolCall<T extends ToolName>(
       role: 'tool',
       toolName,
       toolCallId: toolCall.toolCallId,
-      content: [
-        toolJsonContent({
-          errorMessage: toolCall.error,
-        }),
-      ],
+      content: jsonToolResult({
+        errorMessage: toolCall.error,
+      }),
     }
     toolResults.push(cloneDeep(toolResult))
     toolResultsToAddAfterStream.push(cloneDeep(toolResult))
@@ -203,7 +204,7 @@ export function executeToolCall<T extends ToolName>(
     toolName,
     input: toolCall.input,
     // Only include agentId for subagents (agents with a parent)
-    ...(state.agentState?.parentId && { agentId: state.agentState.agentId }),
+    ...(agentState.parentId && { agentId: agentState.agentId }),
     // Include includeToolCall flag if explicitly set to false
     ...(excludeToolFromMessageHistory && { includeToolCall: false }),
   })
@@ -219,11 +220,9 @@ export function executeToolCall<T extends ToolName>(
       role: 'tool',
       toolName,
       toolCallId: toolCall.toolCallId,
-      content: [
-        toolJsonContent({
-          errorMessage: `Tool \`${toolName}\` is not currently available. Make sure to only use tools listed in the system instructions.`,
-        }),
-      ],
+      content: jsonToolResult({
+        errorMessage: `Tool \`${toolName}\` is not currently available. Make sure to only use tools listed in the system instructions.`,
+      }),
     }
     toolResults.push(cloneDeep(toolResult))
     toolResultsToAddAfterStream.push(cloneDeep(toolResult))
@@ -234,7 +233,7 @@ export function executeToolCall<T extends ToolName>(
   const handler = codebuffToolHandlers[
     toolName
   ] as unknown as CodebuffToolHandlerFunction<T>
-  const { result: toolResultPromise, state: stateUpdate } = handler({
+  const toolResultPromise = handler({
     ...params,
     previousToolCallFinished,
     writeToClient: onResponseChunk,
@@ -253,41 +252,19 @@ export function executeToolCall<T extends ToolName>(
       return clientToolResult.output as CodebuffToolOutput<T>
     }) as any,
     toolCall,
-    getLatestState: () => state,
-    state,
   })
 
-  for (const [key, value] of Object.entries(stateUpdate ?? {})) {
-    if (key === 'agentState' && typeof value === 'object' && value !== null) {
-      // Replace the agentState reference to ensure all updates are captured
-      state.agentState = value
-    } else if (key === 'creditsUsed') {
-      // Handle both synchronous and asynchronous creditsUsed values
-      if (value instanceof Promise) {
-        // Store the promise to be awaited later
-        state.creditsUsed = value
-      } else if (typeof value === 'number') {
-        onCostCalculated(value)
-      }
-    } else {
-      state[key] = value
-    }
-  }
-
-  return toolResultPromise.then(async (result) => {
+  return toolResultPromise.then(async ({ output, creditsUsed }) => {
     const toolResult: ToolMessage = {
       role: 'tool',
       toolName,
       toolCallId: toolCall.toolCallId,
-      content: result,
+      content: output,
     }
     logger.debug(
       { input, toolResult },
       `${toolName} tool call & result (${toolResult.toolCallId})`,
     )
-    if (result === undefined) {
-      return
-    }
 
     onResponseChunk({
       type: 'tool_result',
@@ -299,20 +276,16 @@ export function executeToolCall<T extends ToolName>(
     toolResults.push(toolResult)
 
     if (!excludeToolFromMessageHistory) {
-      state.messages.push(toolResult)
+      agentState.messageHistory.push(toolResult)
     }
 
     // After tool completes, resolve any pending creditsUsed promise
-    if (state.creditsUsed instanceof Promise) {
-      const credits = await state.creditsUsed
-      if (typeof credits === 'number') {
-        onCostCalculated(credits)
-        logger.debug(
-          { credits, totalCredits: state.agentState.creditsUsed },
-          `Added ${credits} credits from ${toolName} to agent state`,
-        )
-      }
-      delete state.creditsUsed
+    if (creditsUsed) {
+      onCostCalculated(creditsUsed)
+      logger.debug(
+        { credits: creditsUsed, totalCredits: agentState.creditsUsed },
+        `Added ${creditsUsed} credits from ${toolName} to agent state`,
+      )
     }
   })
 }
@@ -399,20 +372,21 @@ export async function executeCustomToolCall(
   const {
     toolName,
     input,
+    autoInsertEndStepParam = false,
+    excludeToolFromMessageHistory = false,
+    fromHandleSteps = false,
+
+    agentState,
+    agentTemplate,
+    fileContext,
+    logger,
+    onResponseChunk,
+    previousToolCallFinished,
+    requestToolCall,
     toolCalls,
     toolResults,
     toolResultsToAddAfterStream,
-    previousToolCallFinished,
-    agentTemplate,
-    fileContext,
     userInputId,
-    onResponseChunk,
-    state,
-    autoInsertEndStepParam = false,
-    excludeToolFromMessageHistory = false,
-    requestToolCall,
-    logger,
-    fromHandleSteps = false,
   } = params
   const toolCall: CustomToolCall | ToolCallError = parseRawCustomToolCall({
     customToolDefs: await getMCPToolData({
@@ -433,11 +407,9 @@ export async function executeCustomToolCall(
       role: 'tool',
       toolName,
       toolCallId: toolCall.toolCallId,
-      content: [
-        toolJsonContent({
-          errorMessage: toolCall.error,
-        }),
-      ],
+      content: jsonToolResult({
+        errorMessage: toolCall.error,
+      }),
     }
     toolResults.push(cloneDeep(toolResult))
     toolResultsToAddAfterStream.push(cloneDeep(toolResult))
@@ -454,7 +426,7 @@ export async function executeCustomToolCall(
     toolName,
     input: toolCall.input,
     // Only include agentId for subagents (agents with a parent)
-    ...(state.agentState?.parentId && { agentId: state.agentState.agentId }),
+    ...(agentState?.parentId && { agentId: agentState.agentId }),
     // Include includeToolCall flag if explicitly set to false
     ...(excludeToolFromMessageHistory && { includeToolCall: false }),
   })
@@ -474,11 +446,9 @@ export async function executeCustomToolCall(
       role: 'tool',
       toolName,
       toolCallId: toolCall.toolCallId,
-      content: [
-        toolJsonContent({
-          errorMessage: `Tool \`${toolName}\` is not currently available. Make sure to only use tools listed in the system instructions.`,
-        }),
-      ],
+      content: jsonToolResult({
+        errorMessage: `Tool \`${toolName}\` is not currently available. Make sure to only use tools listed in the system instructions.`,
+      }),
     }
     toolResults.push(cloneDeep(toolResult))
     toolResultsToAddAfterStream.push(cloneDeep(toolResult))
@@ -532,7 +502,7 @@ export async function executeCustomToolCall(
       toolResults.push(toolResult)
 
       if (!excludeToolFromMessageHistory) {
-        state.messages.push(toolResult)
+        agentState.messageHistory.push(toolResult)
       }
       return
     })

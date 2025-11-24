@@ -26,6 +26,8 @@ export const FeedbackContainer: React.FC<FeedbackContainerProps> = ({
     feedbackCursor,
     feedbackCategory,
     feedbackMessageId,
+    feedbackFooterMessage,
+    errors,
     setFeedbackText,
     setFeedbackCursor,
     setFeedbackCategory,
@@ -40,6 +42,8 @@ export const FeedbackContainer: React.FC<FeedbackContainerProps> = ({
       feedbackCursor: state.feedbackCursor,
       feedbackCategory: state.feedbackCategory,
       feedbackMessageId: state.feedbackMessageId,
+      feedbackFooterMessage: state.feedbackFooterMessage,
+      errors: state.errors,
       setFeedbackText: state.setFeedbackText,
       setFeedbackCursor: state.setFeedbackCursor,
       setFeedbackCategory: state.setFeedbackCategory,
@@ -67,7 +71,9 @@ export const FeedbackContainer: React.FC<FeedbackContainerProps> = ({
         ? messages.find((m: ChatMessage) => m.id === targetMessageId)
         : null
 
-      const targetIndex = target ? messages.indexOf(target) : messages.length - 1
+      const targetIndex = target
+        ? messages.indexOf(target)
+        : messages.length - 1
       const startIndex = Math.max(0, targetIndex - 9)
       const recentMessages = messages
         .slice(startIndex, targetIndex + 1)
@@ -106,6 +112,7 @@ export const FeedbackContainer: React.FC<FeedbackContainerProps> = ({
           text,
           category: feedbackCategory,
           type: feedbackMessageId ? 'message' : 'general',
+          errors,
         },
         runState,
       },
@@ -118,7 +125,9 @@ export const FeedbackContainer: React.FC<FeedbackContainerProps> = ({
 
     resetFeedbackForm()
     closeFeedback()
-    showClipboardMessage('Feedback sent ✔', { durationMs: 5000 })
+    showClipboardMessage('Thanks, your feedback helps! 💖', {
+      durationMs: 5000,
+    })
 
     if (onExitFeedback) {
       onExitFeedback()
@@ -127,6 +136,7 @@ export const FeedbackContainer: React.FC<FeedbackContainerProps> = ({
     feedbackText,
     feedbackMessageId,
     feedbackCategory,
+    errors,
     buildMessageContext,
     agentMode,
     sessionCreditsUsed,
@@ -176,6 +186,7 @@ export const FeedbackContainer: React.FC<FeedbackContainerProps> = ({
       onCategoryChange={setFeedbackCategory}
       inputRef={inputRef}
       width={width}
+      footerMessage={feedbackFooterMessage}
     />
   )
 }

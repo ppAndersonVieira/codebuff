@@ -1,5 +1,6 @@
+import { jsonToolResult } from '@codebuff/common/util/messages'
+
 import {
-  validateSpawnState,
   validateAndGetAgentTemplate,
   validateAgentInput,
   createAgentState,
@@ -15,7 +16,6 @@ import type {
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { ParamsExcluding } from '@codebuff/common/types/function-params'
-import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
 import type { AgentState } from '@codebuff/common/types/session-state'
 
@@ -29,30 +29,24 @@ export type SendSubagentChunk = (data: {
 }) => void
 
 type ToolName = 'spawn_agents'
-export const handleSpawnAgents = ((
+export const handleSpawnAgents = (async (
   params: {
     previousToolCallFinished: Promise<void>
     toolCall: CodebuffToolCall<ToolName>
 
-    userInputId: string
-    writeToClient: (chunk: string | PrintModeEvent) => void
-
-    getLatestState: () => { messages: Message[] }
-    state: {
-      fingerprintId?: string
-      userId?: string
-      agentTemplate?: AgentTemplate
-      localAgentTemplates?: Record<string, AgentTemplate>
-      sendSubagentChunk?: SendSubagentChunk
-      messages?: Message[]
-      agentState?: AgentState
-      system?: string
-      modelOverride?: string
-    }
+    agentState: AgentState
+    agentTemplate: AgentTemplate
+    fingerprintId: string
+    localAgentTemplates: Record<string, AgentTemplate>
     logger: Logger
+    system: string
+    userId: string | undefined
+    userInputId: string
+    sendSubagentChunk: SendSubagentChunk
+    writeToClient: (chunk: string | PrintModeEvent) => void
   } & ParamsExcluding<
     typeof validateAndGetAgentTemplate,
-    'agentTypeStr' | 'parentAgentTemplate' | 'localAgentTemplates'
+    'agentTypeStr' | 'parentAgentTemplate'
   > &
     ParamsExcluding<
       typeof executeSubagent,
@@ -63,89 +57,68 @@ export const handleSpawnAgents = ((
       | 'parentAgentState'
       | 'agentState'
       | 'fingerprintId'
-      | 'localAgentTemplates'
-      | 'userId'
       | 'isOnlyChild'
       | 'parentSystemPrompt'
       | 'onResponseChunk'
       | 'modelOverride'
     >,
-): { result: Promise<CodebuffToolOutput<ToolName>>; state: {} } => {
+): Promise<{ output: CodebuffToolOutput<ToolName> }> => {
   const {
     previousToolCallFinished,
     toolCall,
 
+    agentState: parentAgentState,
+    agentTemplate: parentAgentTemplate,
+    fingerprintId,
+    system: parentSystemPrompt,
     userInputId,
-    getLatestState,
-    state,
+    sendSubagentChunk,
     writeToClient,
   } = params
   const { agents } = toolCall.input
-  const validatedState = validateSpawnState(state, 'spawn_agents')
   const { logger } = params
-  const { sendSubagentChunk, system: parentSystemPrompt, modelOverride } = state
 
-  if (!sendSubagentChunk) {
-    throw new Error(
-      'Internal error for spawn_agents: Missing sendSubagentChunk in state',
-    )
-  }
+  await previousToolCallFinished
 
-  const {
-    fingerprintId,
-    userId,
-    agentTemplate: parentAgentTemplate,
-    localAgentTemplates,
-    agentState: parentAgentState,
-  } = validatedState
+  const results = await Promise.allSettled(
+    agents.map(
+      async ({ agent_type: agentTypeStr, prompt, params: spawnParams }) => {
+        const { agentTemplate, agentType } = await validateAndGetAgentTemplate({
+          ...params,
+          agentTypeStr,
+          parentAgentTemplate,
+        })
 
-  const triggerSpawnAgents = async () => {
-    const results = await Promise.allSettled(
-      agents.map(
-        async ({ agent_type: agentTypeStr, prompt, params: spawnParams }) => {
-          const { agentTemplate, agentType } =
-            await validateAndGetAgentTemplate({
-              ...params,
-              agentTypeStr,
-              parentAgentTemplate,
-              localAgentTemplates,
-            })
+        validateAgentInput(agentTemplate, agentType, prompt, spawnParams)
 
-          validateAgentInput(agentTemplate, agentType, prompt, spawnParams)
+        const subAgentState = createAgentState(
+          agentType,
+          agentTemplate,
+          parentAgentState,
+          {},
+        )
 
-          const subAgentState = createAgentState(
-            agentType,
-            agentTemplate,
-            parentAgentState,
-            getLatestState().messages,
-            {},
-          )
+        logAgentSpawn({
+          agentTemplate,
+          agentType,
+          agentId: subAgentState.agentId,
+          parentId: subAgentState.parentId,
+          prompt,
+          spawnParams,
+          logger,
+        })
 
-          logAgentSpawn({
-            agentTemplate,
-            agentType,
-            agentId: subAgentState.agentId,
-            parentId: subAgentState.parentId,
-            prompt,
-            spawnParams,
-            logger,
-          })
-
-          const result = await executeSubagent({
-            ...params,
-            userInputId: `${userInputId}-${agentType}${subAgentState.agentId}`,
-            prompt: prompt || '',
-            spawnParams,
-            agentTemplate,
-            parentAgentState,
-            agentState: subAgentState,
-            fingerprintId,
-            localAgentTemplates,
-            userId,
-            isOnlyChild: agents.length === 1,
-            parentSystemPrompt,
-            modelOverride,
-            onResponseChunk: (chunk: string | PrintModeEvent) => {
+        const result = await executeSubagent({
+          ...params,
+          userInputId: `${userInputId}-${agentType}${subAgentState.agentId}`,
+          prompt: prompt || '',
+          spawnParams,
+          agentTemplate,
+          parentAgentState,
+          agentState: subAgentState,
+          fingerprintId,
+          isOnlyChild: agents.length === 1,
+          parentSystemPrompt,            onResponseChunk: (chunk: string | PrintModeEvent) => {
               if (typeof chunk === 'string') {
                 sendSubagentChunk({
                   userInputId,
@@ -157,139 +130,123 @@ export const handleSpawnAgents = ((
                 return
               }
 
-              if (chunk.type === 'text') {
-                if (chunk.text) {
-                  sendSubagentChunk({
-                    userInputId,
-                    agentId: subAgentState.agentId,
-                    agentType,
-                    chunk: chunk.text,
-                    prompt,
-                  })
-                }
-                return
+            if (chunk.type === 'text') {
+              if (chunk.text) {
+                sendSubagentChunk({
+                  userInputId,
+                  agentId: subAgentState.agentId,
+                  agentType,
+                  chunk: chunk.text,
+                  prompt,
+                })
               }
+              return
+            }
 
-              // Add parentAgentId for proper nesting in UI
-              const ensureParentAgentId = () => {
-                if (
-                  chunk.type === 'subagent_start' ||
-                  chunk.type === 'subagent_finish'
-                ) {
-                  return (
-                    chunk.parentAgentId ??
-                    subAgentState.parentId ??
-                    parentAgentState?.agentId
-                  )
-                }
-                if (
-                  chunk.type === 'tool_call' ||
-                  chunk.type === 'tool_result'
-                ) {
-                  return (chunk as any).parentAgentId ?? subAgentState.agentId
-                }
-                return undefined
-              }
-
-              const parentAgentId = ensureParentAgentId()
+            // Add parentAgentId for proper nesting in UI
+            const ensureParentAgentId = () => {
               if (
-                parentAgentId !== undefined &&
-                (chunk.type === 'subagent_start' ||
-                  chunk.type === 'subagent_finish' ||
-                  chunk.type === 'tool_call' ||
-                  chunk.type === 'tool_result')
+                chunk.type === 'subagent_start' ||
+                chunk.type === 'subagent_finish'
               ) {
-                writeToClient({ ...chunk, parentAgentId })
-                return
+                return (
+                  chunk.parentAgentId ??
+                  subAgentState.parentId ??
+                  parentAgentState?.agentId
+                )
               }
-
-              const eventWithAgent = {
-                ...chunk,
-                agentId: subAgentState.agentId,
+              if (chunk.type === 'tool_call' || chunk.type === 'tool_result') {
+                return (chunk as any).parentAgentId ?? subAgentState.agentId
               }
-              writeToClient(eventWithAgent)
-            },
-          })
-          return { ...result, agentType, agentName: agentTemplate.displayName }
-        },
-      ),
-    )
+              return undefined
+            }
 
-    const reports = await Promise.all(
-      results.map(async (result, index) => {
-        if (result.status === 'fulfilled') {
-          const { output, agentType, agentName } = result.value
-          return {
-            agentName,
-            agentType,
-            value: output,
-          }
-        } else {
-          const agentTypeStr = agents[index].agent_type
-          return {
-            agentType: agentTypeStr,
-            agentName: agentTypeStr,
-            value: { errorMessage: `Error spawning agent: ${result.reason}` },
-          }
-        }
-      }),
-    )
+            const parentAgentId = ensureParentAgentId()
+            if (
+              parentAgentId !== undefined &&
+              (chunk.type === 'subagent_start' ||
+                chunk.type === 'subagent_finish' ||
+                chunk.type === 'tool_call' ||
+                chunk.type === 'tool_result')
+            ) {
+              writeToClient({ ...chunk, parentAgentId })
+              return
+            }
 
-    // Aggregate costs from subagents
-    results.forEach((result, index) => {
-      const agentInfo = agents[index]
-      let subAgentCredits = 0
-
-      if (result.status === 'fulfilled') {
-        subAgentCredits = result.value.agentState.creditsUsed || 0
-        // Note (James): Try not to include frequent logs with narrow debugging value.
-        // logger.debug(
-        //   {
-        //     parentAgentId: validatedState.agentState.agentId,
-        //     subAgentType: agentInfo.agent_type,
-        //     subAgentCredits,
-        //   },
-        //   'Aggregating successful subagent cost',
-        // )
-      } else if (result.reason?.agentState?.creditsUsed) {
-        // Even failed agents may have incurred partial costs
-        subAgentCredits = result.reason.agentState.creditsUsed || 0
-        logger.debug(
-          {
-            parentAgentId: validatedState.agentState.agentId,
-            subAgentType: agentInfo.agent_type,
-            subAgentCredits,
+            const eventWithAgent = {
+              ...chunk,
+              agentId: subAgentState.agentId,
+            }
+            writeToClient(eventWithAgent)
           },
-          'Aggregating failed subagent partial cost',
-        )
-      }
+        })
+        return { ...result, agentType, agentName: agentTemplate.displayName }
+      },
+    ),
+  )
 
-      if (subAgentCredits > 0) {
-        validatedState.agentState.creditsUsed += subAgentCredits
-        // Note (James): Try not to include frequent logs with narrow debugging value.
-        // logger.debug(
-        //   {
-        //     parentAgentId: validatedState.agentState.agentId,
-        //     addedCredits: subAgentCredits,
-        //     totalCredits: validatedState.agentState.creditsUsed,
-        //   },
-        //   'Updated parent agent total cost',
-        // )
+  const reports = await Promise.all(
+    results.map(async (result, index) => {
+      if (result.status === 'fulfilled') {
+        const { output, agentType, agentName } = result.value
+        return {
+          agentName,
+          agentType,
+          value: output,
+        }
+      } else {
+        const agentTypeStr = agents[index].agent_type
+        return {
+          agentType: agentTypeStr,
+          agentName: agentTypeStr,
+          value: { errorMessage: `Error spawning agent: ${result.reason}` },
+        }
       }
-    })
+    }),
+  )
 
-    return reports
-  }
-  return {
-    result: (async () => {
-      await previousToolCallFinished
-      return [
+  // Aggregate costs from subagents
+  results.forEach((result, index) => {
+    const agentInfo = agents[index]
+    let subAgentCredits = 0
+
+    if (result.status === 'fulfilled') {
+      subAgentCredits = result.value.agentState.creditsUsed || 0
+      // Note (James): Try not to include frequent logs with narrow debugging value.
+      // logger.debug(
+      //   {
+      //     parentAgentId: validatedState.agentState.agentId,
+      //     subAgentType: agentInfo.agent_type,
+      //     subAgentCredits,
+      //   },
+      //   'Aggregating successful subagent cost',
+      // )
+    } else if (result.reason?.agentState?.creditsUsed) {
+      // Even failed agents may have incurred partial costs
+      subAgentCredits = result.reason.agentState.creditsUsed || 0
+      logger.debug(
         {
-          type: 'json',
-          value: await triggerSpawnAgents(),
+          parentAgentId: parentAgentState.agentId,
+          subAgentType: agentInfo.agent_type,
+          subAgentCredits,
         },
-      ]
-    })(),
-    state: {},
-  }
+        'Aggregating failed subagent partial cost',
+      )
+    }
+
+    if (subAgentCredits > 0) {
+      parentAgentState.creditsUsed += subAgentCredits
+      // Note (James): Try not to include frequent logs with narrow debugging value.
+      // logger.debug(
+      //   {
+      //     parentAgentId: validatedState.agentState.agentId,
+      //     addedCredits: subAgentCredits,
+      //     totalCredits: validatedState.agentState.creditsUsed,
+      //   },
+      //   'Updated parent agent total cost',
+      // )
+    }
+  })
+
+  return { output: jsonToolResult(reports) }
 }) satisfies CodebuffToolHandlerFunction<ToolName>

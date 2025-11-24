@@ -12,6 +12,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Command } from 'commander'
 import React from 'react'
 
+import { handlePublish } from './commands/publish'
 import { App } from './app'
 import { initializeApp } from './init/init-app'
 import { getProjectRoot } from './project-files'
@@ -20,6 +21,7 @@ import { initAnalytics } from './utils/analytics'
 import { loadAgentDefinitions } from './utils/load-agent-definitions'
 import { getLoadedAgentsData } from './utils/local-agent-registry'
 import { clearLogFile, logger } from './utils/logger'
+import { filterNetworkErrors } from './utils/validation-error-helpers'
 
 import type { FileTreeNode } from '@codebuff/common/util/file'
 
@@ -130,6 +132,14 @@ async function main(): Promise<void> {
 
   await initializeApp({ cwd, isOscDetectionRun: isOscDetectionRun() })
 
+  // Handle publish command before rendering the app
+  if (process.argv.includes('publish')) {
+    const publishIndex = process.argv.indexOf('publish')
+    const agentIds = process.argv.slice(publishIndex + 1)
+    await handlePublish(agentIds)
+    process.exit(0)
+  }
+
   // Initialize analytics
   try {
     initAnalytics()
@@ -152,7 +162,7 @@ async function main(): Promise<void> {
     })
 
     if (!validationResult.success) {
-      validationErrors = validationResult.validationErrors
+      validationErrors = filterNetworkErrors(validationResult.validationErrors)
     }
   }
 

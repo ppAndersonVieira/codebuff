@@ -21,10 +21,7 @@ import { handleSpawnAgents } from '../tools/handlers/tool/spawn-agents'
 import type { AgentTemplate } from '../templates/types'
 import type { SendSubagentChunk } from '../tools/handlers/tool/spawn-agents'
 import type { CodebuffToolCall } from '@codebuff/common/tools/list'
-import type {
-  ParamsExcluding,
-  ParamsOf,
-} from '@codebuff/common/types/function-params'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { Mock } from 'bun:test'
 
 describe('Subagent Streaming', () => {
@@ -36,11 +33,7 @@ describe('Subagent Streaming', () => {
   >
   let handleSpawnAgentsBaseParams: ParamsExcluding<
     typeof handleSpawnAgents,
-    'toolCall' | 'state'
-  >
-  let baseState: Omit<
-    ParamsOf<typeof handleSpawnAgents>['state'],
-    'agentTemplate' | 'localAgentTemplates' | 'agentState'
+    'agentState' | 'agentTemplate' | 'localAgentTemplates' | 'toolCall'
   >
 
   beforeEach(() => {
@@ -67,24 +60,19 @@ describe('Subagent Streaming', () => {
 
     handleSpawnAgentsBaseParams = {
       ...TEST_AGENT_RUNTIME_IMPL,
+      ancestorRunIds: [],
+      clientSessionId: 'test-session',
+      fileContext: mockFileContext,
+      fingerprintId: 'test-fingerprint',
+      previousToolCallFinished: Promise.resolve(),
       repoId: undefined,
       repoUrl: undefined,
-      previousToolCallFinished: Promise.resolve(),
-      fileContext: mockFileContext,
-      clientSessionId: 'test-session',
+      sendSubagentChunk: mockSendSubagentChunk,
+      signal: new AbortController().signal,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
       userInputId: 'test-input',
       writeToClient: mockWriteToClient,
-      ancestorRunIds: [],
-      getLatestState: () => ({ messages: [] }),
-      signal: new AbortController().signal,
-    }
-
-    baseState = {
-      fingerprintId: 'test-fingerprint',
-      userId: TEST_USER_ID,
-      sendSubagentChunk: mockSendSubagentChunk,
-      messages: [],
-      system: 'Test system prompt',
     }
   })
 
@@ -158,20 +146,15 @@ describe('Subagent Streaming', () => {
       },
     }
 
-    const { result } = handleSpawnAgents({
+    await handleSpawnAgents({
       ...handleSpawnAgentsBaseParams,
-      toolCall,
-      state: {
-        ...baseState,
-        agentTemplate: parentTemplate,
-        localAgentTemplates: {
-          [mockAgentTemplate.id]: mockAgentTemplate,
-        },
-        agentState,
+      agentState,
+      agentTemplate: parentTemplate,
+      localAgentTemplates: {
+        [mockAgentTemplate.id]: mockAgentTemplate,
       },
+      toolCall,
     })
-
-    await result
 
     // Verify that subagent streaming messages were sent
     expect(mockWriteToClient).toHaveBeenCalledTimes(2)
@@ -212,19 +195,15 @@ describe('Subagent Streaming', () => {
       },
     }
 
-    const { result } = handleSpawnAgents({
+    await handleSpawnAgents({
       ...handleSpawnAgentsBaseParams,
-      toolCall,
-      state: {
-        ...baseState,
-        agentTemplate: parentTemplate,
-        localAgentTemplates: {
-          [mockAgentTemplate.id]: mockAgentTemplate,
-        },
-        agentState,
+      agentState,
+      agentTemplate: parentTemplate,
+      localAgentTemplates: {
+        [mockAgentTemplate.id]: mockAgentTemplate,
       },
+      toolCall,
     })
-    await result
 
     // Verify the streaming messages have consistent agentId and correct agentType
     expect(mockSendSubagentChunk.mock.calls.length).toBeGreaterThanOrEqual(2)

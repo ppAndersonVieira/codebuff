@@ -11,6 +11,7 @@ import {
 
 import { InputCursor } from './input-cursor'
 import { useTheme } from '../hooks/use-theme'
+import { useChatStore } from '../state/chat-store'
 import { clamp } from '../utils/math'
 import { logger } from '../utils/logger'
 import { calculateNewCursorPosition } from '../utils/word-wrap-utils'
@@ -95,6 +96,7 @@ interface MultilineInputProps {
   onKeyIntercept?: (key: KeyEvent) => boolean
   placeholder?: string
   focused?: boolean
+  shouldBlinkCursor?: boolean
   maxHeight?: number
   minHeight?: number
   width: number
@@ -116,6 +118,7 @@ export const MultilineInput = forwardRef<
     onSubmit,
     placeholder = '',
     focused = true,
+    shouldBlinkCursor,
     maxHeight = 5,
     minHeight = 1,
     width,
@@ -126,6 +129,9 @@ export const MultilineInput = forwardRef<
   forwardedRef,
 ) {
   const theme = useTheme()
+  const hookBlinkValue = useChatStore((state) => state.isFocusSupported)
+  const effectiveShouldBlinkCursor = shouldBlinkCursor ?? hookBlinkValue
+
   const scrollBoxRef = useRef<ScrollBoxRenderable | null>(null)
   const [measuredCols, setMeasuredCols] = useState<number | null>(null)
   const [lastActivity, setLastActivity] = useState(Date.now())
@@ -822,6 +828,7 @@ export const MultilineInput = forwardRef<
               <InputCursor
                 visible={true}
                 focused={focused}
+                shouldBlink={effectiveShouldBlinkCursor}
                 color={theme.info}
                 key={lastActivity}
               />

@@ -1,7 +1,7 @@
 import { toolNames } from '@codebuff/common/tools/constants'
 import { buildArray } from '@codebuff/common/util/array'
 import {
-  toolJsonContent,
+  jsonToolResult,
   assistantMessage,
 } from '@codebuff/common/util/messages'
 import { generateCompactId } from '@codebuff/common/util/string'
@@ -13,9 +13,9 @@ import { expireMessages } from '../util/messages'
 
 import type { CustomToolCall, ExecuteToolCallParams } from './tool-executor'
 import type { AgentTemplate } from '../templates/types'
+import type { FileProcessingState } from './handlers/tool/write-file'
 import type { ToolName } from '@codebuff/common/tools/constants'
 import type { CodebuffToolCall } from '@codebuff/common/tools/list'
-import type { SendSubagentChunkFn } from '@codebuff/common/types/contracts/client'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type {
@@ -23,7 +23,7 @@ import type {
   ToolMessage,
 } from '@codebuff/common/types/messages/codebuff-message'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
-import type { AgentState, Subgoal } from '@codebuff/common/types/session-state'
+import type { Subgoal } from '@codebuff/common/types/session-state'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
 import type { ToolCallPart } from 'ai'
 
@@ -35,36 +35,33 @@ export type ToolCallError = {
 
 export async function processStreamWithTools(
   params: {
-    clientSessionId: string
-    fingerprintId: string
-    userId: string | undefined
-    repoId: string | undefined
-    ancestorRunIds: string[]
-    runId: string
-    agentTemplate: AgentTemplate
-    localAgentTemplates: Record<string, AgentTemplate>
-    fileContext: ProjectFileContext
-    messages: Message[]
-    system: string
-    agentState: AgentState
     agentContext: Record<string, Subgoal>
-    signal: AbortSignal
-    onResponseChunk: (chunk: string | PrintModeEvent) => void
+    agentTemplate: AgentTemplate
+    ancestorRunIds: string[]
+    fileContext: ProjectFileContext
+    fingerprintId: string
     fullResponse: string
-    sendSubagentChunk: SendSubagentChunkFn
-    modelOverride?: string
     logger: Logger
+    messages: Message[]
+    repoId: string | undefined
+    runId: string
+    signal: AbortSignal
+    userId: string | undefined
+
     onCostCalculated: (credits: number) => Promise<void>
+    onResponseChunk: (chunk: string | PrintModeEvent) => void
   } & Omit<
     ExecuteToolCallParams<any>,
-    | 'toolName'
+    | 'fileProcessingState'
+    | 'fromHandleSteps'
+    | 'fullResponse'
     | 'input'
+    | 'previousToolCallFinished'
+    | 'state'
     | 'toolCalls'
+    | 'toolName'
     | 'toolResults'
     | 'toolResultsToAddAfterStream'
-    | 'previousToolCallFinished'
-    | 'fullResponse'
-    | 'state'
   > &
     ParamsExcluding<
       typeof processStreamWithTags,
@@ -72,27 +69,18 @@ export async function processStreamWithTools(
     >,
 ) {
   const {
-    fingerprintId,
-    userId,
-    ancestorRunIds,
-    runId,
-    repoId,
-    agentTemplate,
-    localAgentTemplates,
-    fileContext,
-    agentContext,
-    system,
     agentState,
-    signal,
-    onResponseChunk,
-    sendSubagentChunk,
-    modelOverride,
-    logger,
+    agentTemplate,
+    ancestorRunIds,
+    fileContext,
+    fullResponse,
     onCostCalculated,
+    onResponseChunk,
+    runId,
+    signal,
+    userId,
   } = params
-  const fullResponseChunks: string[] = [params.fullResponse]
-
-  const messages = [...params.messages]
+  const fullResponseChunks: string[] = [fullResponse]
 
   const toolResults: ToolMessage[] = []
   const toolResultsToAddAfterStream: ToolMessage[] = []
@@ -101,19 +89,12 @@ export async function processStreamWithTools(
     Promise.withResolvers<void>()
   let previousToolCallFinished = streamDonePromise
 
-  const state: Record<string, any> = {
-    fingerprintId,
-    userId,
-    repoId,
-    agentTemplate,
-    localAgentTemplates,
-    sendSubagentChunk,
-    agentState,
-    agentContext,
-    messages,
-    system,
-    modelOverride,
-    logger,
+  const fileProcessingState: FileProcessingState = {
+    promisesByPath: {},
+    allPromises: [],
+    fileChangeErrors: [],
+    fileChanges: [],
+    firstFileProcessed: false,
   }
 
   function toolCallback<T extends ToolName>(toolName: T) {
@@ -128,13 +109,15 @@ export async function processStreamWithTools(
           ...params,
           toolName,
           input,
+          fromHandleSteps: false,
+
+          fileProcessingState,
+          fullResponse: fullResponseChunks.join(''),
+          previousToolCallFinished,
           toolCalls,
           toolResults,
           toolResultsToAddAfterStream,
-          previousToolCallFinished,
-          fullResponse: fullResponseChunks.join(''),
-          state,
-          fromHandleSteps: false,
+
           onCostCalculated,
         })
       },
@@ -152,12 +135,13 @@ export async function processStreamWithTools(
           ...params,
           toolName,
           input,
+
+          fileProcessingState,
+          fullResponse: fullResponseChunks.join(''),
+          previousToolCallFinished,
           toolCalls,
           toolResults,
           toolResultsToAddAfterStream,
-          previousToolCallFinished,
-          fullResponse: fullResponseChunks.join(''),
-          state,
         })
       },
     }
@@ -178,11 +162,9 @@ export async function processStreamWithTools(
         role: 'tool',
         toolName,
         toolCallId: generateCompactId(),
-        content: [
-          toolJsonContent({
-            errorMessage: error,
-          }),
-        ],
+        content: jsonToolResult({
+          errorMessage: error,
+        }),
       }
       toolResults.push(cloneDeep(toolResult))
       toolResultsToAddAfterStream.push(cloneDeep(toolResult))
@@ -222,8 +204,8 @@ export async function processStreamWithTools(
     }
   }
 
-  state.messages = buildArray<Message>([
-    ...expireMessages(state.messages, 'agentStep'),
+  agentState.messageHistory = buildArray<Message>([
+    ...expireMessages(agentState.messageHistory, 'agentStep'),
     fullResponseChunks.length > 0 &&
       assistantMessage(fullResponseChunks.join('')),
     ...toolResultsToAddAfterStream,
@@ -234,11 +216,10 @@ export async function processStreamWithTools(
     await previousToolCallFinished
   }
   return {
-    toolCalls,
-    toolResults,
-    state,
     fullResponse: fullResponseChunks.join(''),
     fullResponseChunks,
     messageId,
+    toolCalls,
+    toolResults,
   }
 }

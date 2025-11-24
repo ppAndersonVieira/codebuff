@@ -51,23 +51,12 @@ const mockFileContext: ProjectFileContext = {
 describe('Cost Aggregation System', () => {
   let mockAgentTemplate: any
   let mockLocalAgentTemplates: Record<string, any>
-  let params: ParamsExcluding<typeof handleSpawnAgents, 'toolCall' | 'state'>
+  let params: ParamsExcluding<
+    typeof handleSpawnAgents,
+    'agentState' | 'toolCall'
+  >
 
   beforeEach(() => {
-    params = {
-      ...TEST_AGENT_RUNTIME_IMPL,
-      repoId: undefined,
-      repoUrl: undefined,
-      previousToolCallFinished: Promise.resolve(),
-      fileContext: mockFileContext,
-      clientSessionId: 'test-session',
-      userInputId: 'test-input',
-      ancestorRunIds: [],
-      signal: new AbortController().signal,
-      writeToClient: () => {},
-      getLatestState: () => ({ messages: [] }),
-    }
-
     // Setup mock agent template
     mockAgentTemplate = {
       id: 'test-agent',
@@ -86,6 +75,24 @@ describe('Cost Aggregation System', () => {
 
     mockLocalAgentTemplates = {
       'test-agent': mockAgentTemplate,
+    }
+
+    params = {
+      ...TEST_AGENT_RUNTIME_IMPL,
+      agentTemplate: mockAgentTemplate,
+      ancestorRunIds: [],
+      clientSessionId: 'test-session',
+      fileContext: mockFileContext,
+      fingerprintId: 'test-fingerprint',
+      localAgentTemplates: mockLocalAgentTemplates,
+      previousToolCallFinished: Promise.resolve(),
+      repoId: undefined,
+      repoUrl: undefined,
+      signal: new AbortController().signal,
+      system: 'Test system prompt',
+      userId: 'test-user',
+      userInputId: 'test-input',
+      writeToClient: () => {},
     }
 
     // Mock getAgentTemplate to return our mock template
@@ -142,17 +149,6 @@ describe('Cost Aggregation System', () => {
         directCreditsUsed: 50,
       }
 
-      const mockValidatedState = {
-        fingerprintId: 'test-fingerprint',
-        userId: 'test-user',
-        agentTemplate: mockAgentTemplate,
-        localAgentTemplates: mockLocalAgentTemplates,
-        messages: [],
-        agentState: parentAgentState,
-        sendSubagentChunk: () => {},
-        system: 'Test system prompt',
-      }
-
       // Mock executeAgent to return results with different credit costs
       const mockExecuteAgent = spyOn(spawnAgentUtils, 'executeSubagent')
         .mockResolvedValueOnce({
@@ -187,13 +183,11 @@ describe('Cost Aggregation System', () => {
         },
       }
 
-      const result = handleSpawnAgents({
+      await handleSpawnAgents({
         ...params,
+        agentState: parentAgentState,
         toolCall: mockToolCall,
-        state: mockValidatedState,
       })
-
-      await result.result
 
       // Parent should have aggregated costs: original 50 + subagent 75 + subagent 100 = 225
       expect(parentAgentState.creditsUsed).toBe(225)
@@ -215,7 +209,6 @@ describe('Cost Aggregation System', () => {
         agentTemplate: mockAgentTemplate,
         localAgentTemplates: mockLocalAgentTemplates,
         messages: [],
-        agentState: parentAgentState,
         sendSubagentChunk: () => {},
         system: 'Test system prompt',
       }
@@ -260,13 +253,11 @@ describe('Cost Aggregation System', () => {
         },
       }
 
-      const result = handleSpawnAgents({
+      await handleSpawnAgents({
         ...params,
+        agentState: parentAgentState,
         toolCall: mockToolCall,
-        state: mockValidatedState,
       })
-
-      await result.result
 
       // Parent should aggregate costs: original 10 + successful subagent 50 + failed subagent 25 = 85
       expect(parentAgentState.creditsUsed).toBe(85)
@@ -366,9 +357,7 @@ describe('Cost Aggregation System', () => {
         agentTemplate: mockAgentTemplate,
         localAgentTemplates: mockLocalAgentTemplates,
         messages: [],
-        agentState: mainAgentState,
         sendSubagentChunk: () => {},
-        system: 'Test system prompt',
       }
 
       const mockExecuteAgent = spyOn(spawnAgentUtils, 'executeSubagent')
@@ -406,13 +395,11 @@ describe('Cost Aggregation System', () => {
         },
       }
 
-      const result = handleSpawnAgents({
+      await handleSpawnAgents({
         ...params,
+        agentState: mainAgentState,
         toolCall: mockToolCall,
-        state: mockValidatedState,
       })
-
-      await result.result
 
       // Verify exact cost accounting
       expect(mainAgentState.creditsUsed).toBe(expectedTotal)

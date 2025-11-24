@@ -11,92 +11,12 @@ import type {
   ParamsExcluding,
   OptionalFields,
 } from '@codebuff/common/types/function-params'
-import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
 import type {
   AgentState,
   AgentTemplateType,
   Subgoal,
 } from '@codebuff/common/types/session-state'
-import type { ProjectFileContext } from '@codebuff/common/util/file'
-
-export interface SpawnAgentParams {
-  agent_type: string
-  prompt?: string
-  params?: any
-}
-
-export interface BaseSpawnState {
-  fingerprintId?: string
-  userId?: string
-  agentTemplate?: AgentTemplate
-  localAgentTemplates?: Record<string, AgentTemplate>
-  messages?: Message[]
-  agentState?: AgentState
-  system?: string
-}
-
-export interface SpawnContext {
-  fileContext: ProjectFileContext
-  clientSessionId: string
-  userInputId: string
-  getLatestState: () => { messages: Message[] }
-}
-
-/**
- * Validates that all required state is present for spawning agents
- */
-export function validateSpawnState(
-  state: BaseSpawnState,
-  toolName: string,
-): Omit<Required<BaseSpawnState>, 'userId'> & { userId: string | undefined } {
-  const {
-    fingerprintId,
-    agentTemplate: parentAgentTemplate,
-    localAgentTemplates,
-    messages,
-    agentState,
-    userId,
-    system,
-  } = state
-
-  if (!fingerprintId) {
-    throw new Error(
-      `Internal error for ${toolName}: Missing fingerprintId in state`,
-    )
-  }
-  if (!parentAgentTemplate) {
-    throw new Error(
-      `Internal error for ${toolName}: Missing agentTemplate in state`,
-    )
-  }
-  if (!messages) {
-    throw new Error(`Internal error for ${toolName}: Missing messages in state`)
-  }
-  if (!agentState) {
-    throw new Error(
-      `Internal error for ${toolName}: Missing agentState in state`,
-    )
-  }
-  if (!localAgentTemplates) {
-    throw new Error(
-      `Internal error for ${toolName}: Missing localAgentTemplates in state`,
-    )
-  }
-  if (!system) {
-    throw new Error(`Internal error for ${toolName}: Missing system in state`)
-  }
-
-  return {
-    fingerprintId,
-    userId,
-    agentTemplate: parentAgentTemplate,
-    localAgentTemplates,
-    messages,
-    agentState,
-    system,
-  }
-}
 
 /**
  * Checks if a parent agent is allowed to spawn a child agent
@@ -170,8 +90,7 @@ export async function validateAndGetAgentTemplate(
     logger: Logger
   } & ParamsExcluding<typeof getAgentTemplate, 'agentId'>,
 ): Promise<{ agentTemplate: AgentTemplate; agentType: string }> {
-  const { agentTypeStr, parentAgentTemplate, localAgentTemplates, logger } =
-    params
+  const { agentTypeStr, parentAgentTemplate } = params
   const agentTemplate = await getAgentTemplate({
     ...params,
     agentId: agentTypeStr,
@@ -238,13 +157,12 @@ export function createAgentState(
   agentType: string,
   agentTemplate: AgentTemplate,
   parentAgentState: AgentState,
-  parentMessageHistory: Message[],
   agentContext: Record<string, Subgoal>,
 ): AgentState {
   const agentId = generateCompactId()
 
   const messageHistory = agentTemplate.includeMessageHistory
-    ? parentMessageHistory
+    ? parentAgentState.messageHistory
     : []
 
   return {

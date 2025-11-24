@@ -1,3 +1,5 @@
+import { jsonToolResult } from '@codebuff/common/util/messages'
+
 import {
   requestRelevantFiles,
   requestRelevantFilesForTraining,
@@ -18,73 +20,53 @@ import type {
   ParamsExcluding,
   ParamsOf,
 } from '@codebuff/common/types/function-params'
-import type { Message } from '@codebuff/common/types/messages/codebuff-message'
+import type { AgentState } from '@codebuff/common/types/session-state'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
 
 // Turn this on to collect full file context, using Claude-4-Opus to pick which files to send up
 // TODO: We might want to be able to turn this on on a per-repo basis.
 const COLLECT_FULL_FILE_CONTEXT = false
 
-export const handleFindFiles = ((
+export const handleFindFiles = (async (
   params: {
     previousToolCallFinished: Promise<any>
     toolCall: CodebuffToolCall<'find_files'>
     logger: Logger
 
-    fileContext: ProjectFileContext
+    agentState: AgentState
     agentStepId: string
     clientSessionId: string
+    fileContext: ProjectFileContext
+    fingerprintId: string
+    repoId: string | undefined
+    userId: string | undefined
     userInputId: string
-
-    state: {
-      fingerprintId?: string
-      userId?: string
-      repoId?: string
-      messages?: Message[]
-    }
   } & ParamsExcluding<
     typeof requestRelevantFiles,
-    | 'messages'
-    | 'system'
-    | 'assistantPrompt'
-    | 'fingerprintId'
-    | 'userId'
-    | 'repoId'
+    'messages' | 'system' | 'assistantPrompt'
   > &
     ParamsExcluding<
       typeof uploadExpandedFileContextForTraining,
-      | 'messages'
-      | 'system'
-      | 'assistantPrompt'
-      | 'fingerprintId'
-      | 'userId'
-      | 'repoId'
+      'messages' | 'system' | 'assistantPrompt'
     > &
     ParamsExcluding<typeof getFileReadingUpdates, 'requestedFiles'>,
-): { result: Promise<CodebuffToolOutput<'find_files'>>; state: {} } => {
+): Promise<{ output: CodebuffToolOutput<'find_files'> }> => {
   const {
     previousToolCallFinished,
     toolCall,
-    logger,
-    fileContext,
+
+    agentState,
     agentStepId,
     clientSessionId,
+    fileContext,
+    fingerprintId,
+    logger,
+    userId,
     userInputId,
-    state,
   } = params
   const { prompt } = toolCall.input
-  const { fingerprintId, userId, repoId, messages } = state
 
-  if (!messages) {
-    throw new Error('Internal error for find_files: Missing messages in state')
-  }
-  if (!fingerprintId) {
-    throw new Error(
-      'Internal error for find_files: Missing fingerprintId in state',
-    )
-  }
-
-  const fileRequestMessagesTokens = countTokensJson(messages)
+  const fileRequestMessagesTokens = countTokensJson(agentState.messageHistory)
   const system = getSearchSystemPrompt({
     fileContext,
     messagesTokens: fileRequestMessagesTokens,
@@ -98,102 +80,62 @@ export const handleFindFiles = ((
     },
   })
 
-  const triggerFindFiles: () => Promise<
-    CodebuffToolOutput<'find_files'>
-  > = async () => {
-    const requestedFiles = await requestRelevantFiles({
+  await previousToolCallFinished
+
+  const requestedFiles = await requestRelevantFiles({
+    ...params,
+    messages: agentState.messageHistory,
+    system,
+    assistantPrompt: prompt,
+  })
+
+  if (requestedFiles && requestedFiles.length > 0) {
+    const addedFiles = await getFileReadingUpdates({
       ...params,
-      messages,
-      system,
-      assistantPrompt: prompt,
-      fingerprintId,
-      userId,
-      repoId,
+      requestedFiles,
     })
 
-    if (requestedFiles && requestedFiles.length > 0) {
-      const addedFiles = await getFileReadingUpdates({
+    if (COLLECT_FULL_FILE_CONTEXT && addedFiles.length > 0) {
+      uploadExpandedFileContextForTraining({
         ...params,
-        requestedFiles,
+        messages: agentState.messageHistory,
+        system,
+        assistantPrompt: prompt,
+      }).catch((error) => {
+        logger.error(
+          { error },
+          'Error uploading expanded file context for training',
+        )
       })
-
-      if (COLLECT_FULL_FILE_CONTEXT && addedFiles.length > 0) {
-        uploadExpandedFileContextForTraining({
-          ...params,
-          messages,
-          system,
-          assistantPrompt: prompt,
-          fingerprintId,
-          userId,
-          repoId,
-        }).catch((error) => {
-          logger.error(
-            { error },
-            'Error uploading expanded file context for training',
-          )
-        })
-      }
-
-      if (addedFiles.length > 0) {
-        return [
-          {
-            type: 'json',
-            value: renderReadFilesResult(
-              addedFiles,
-              fileContext.tokenCallers ?? {},
-            ),
-          },
-        ]
-      }
-      return [
-        {
-          type: 'json',
-          value: {
-            message: `No new relevant files found for prompt: ${prompt}`,
-          },
-        },
-      ]
-    } else {
-      return [
-        {
-          type: 'json',
-          value: {
-            message: `No relevant files found for prompt: ${prompt}`,
-          },
-        },
-      ]
     }
-  }
 
-  return {
-    result: (async () => {
-      await previousToolCallFinished
-      return await triggerFindFiles()
-    })(),
-    state: {},
+    if (addedFiles.length > 0) {
+      return {
+        output: jsonToolResult(
+          renderReadFilesResult(addedFiles, fileContext.tokenCallers ?? {}),
+        ),
+      }
+    }
+    return {
+      output: jsonToolResult({
+        message: `No new relevant files found for prompt: ${prompt}`,
+      }),
+    }
+  } else {
+    return {
+      output: jsonToolResult({
+        message: `No relevant files found for prompt: ${prompt}`,
+      }),
+    }
   }
 }) satisfies CodebuffToolHandlerFunction<'find_files'>
 
 async function uploadExpandedFileContextForTraining(
   params: {
-    agentStepId: string
-    clientSessionId: string
-    fingerprintId: string
-    userInputId: string
-    userId: string | undefined
     requestFiles: RequestFilesFn
-    logger: Logger
   } & ParamsOf<typeof requestRelevantFilesForTraining>,
 ) {
-  const {
-    agentStepId,
-    clientSessionId,
-    fingerprintId,
-    userInputId,
-    userId,
-    requestFiles,
-    logger,
-  } = params
+  const { requestFiles } = params
   const files = await requestRelevantFilesForTraining(params)
 
   const loadedFiles = await requestFiles({ filePaths: files })

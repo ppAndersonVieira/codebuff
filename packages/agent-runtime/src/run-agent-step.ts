@@ -33,12 +33,16 @@ import type {
   StartAgentRunFn,
 } from '@codebuff/common/types/contracts/database'
 import type { CheckLiveUserInputFn } from '@codebuff/common/types/contracts/live-user-input'
+import type { PromptAiSdkFn } from '@codebuff/common/types/contracts/llm'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type {
   ParamsExcluding,
   ParamsOf,
 } from '@codebuff/common/types/function-params'
-import type { Message, ToolMessage } from '@codebuff/common/types/messages/codebuff-message'
+import type {
+  Message,
+  ToolMessage,
+} from '@codebuff/common/types/messages/codebuff-message'
 import type {
   TextPart,
   ImagePart,
@@ -72,17 +76,18 @@ export const runAgentStep = async (
     n?: number
 
     trackEvent: TrackEventFn
+    promptAiSdk: PromptAiSdkFn
   } & ParamsExcluding<
     typeof processStreamWithTools,
-    | 'stream'
-    | 'agentStepId'
-    | 'agentState'
-    | 'repoId'
-    | 'messages'
-    | 'agentTemplate'
     | 'agentContext'
+    | 'agentState'
+    | 'agentStepId'
+    | 'agentTemplate'
     | 'fullResponse'
+    | 'messages'
     | 'onCostCalculated'
+    | 'repoId'
+    | 'stream'
   > &
     ParamsExcluding<
       typeof getAgentStreamFromTemplate,
@@ -104,6 +109,10 @@ export const runAgentStep = async (
     ParamsExcluding<
       typeof getAgentStreamFromTemplate,
       'agentId' | 'template' | 'onCostCalculated' | 'includeCacheControl'
+    > &
+    ParamsExcluding<
+      PromptAiSdkFn,
+      'messages' | 'model' | 'onCostCalculated' | 'n'
     >,
 ): Promise<{
   agentState: AgentState
@@ -113,20 +122,22 @@ export const runAgentStep = async (
   nResponses?: string[]
 }> => {
   const {
-    userId,
-    userInputId,
-    fingerprintId,
-    clientSessionId,
-    repoId,
-    onResponseChunk,
-    fileContext,
     agentType,
+    clientSessionId,
+    fileContext,
+    fingerprintId,
     localAgentTemplates,
+    logger,
     prompt,
+    repoId,
     spawnParams,
     system,
+    userId,
+    userInputId,
     modelOverride,
-    logger,
+
+    onResponseChunk,
+    promptAiSdk,
     trackEvent,
   } = params
   let agentState = params.agentState
@@ -260,8 +271,6 @@ export const runAgentStep = async (
   const iterationNum = agentState.messageHistory.length
   const systemTokens = countTokensJson(system)
 
-  const agentMessages = agentState.messageHistory
-
   logger.debug(
     {
       iteration: iterationNum,
@@ -281,13 +290,12 @@ export const runAgentStep = async (
 
   // Handle n parameter for generating multiple responses
   if (params.n !== undefined) {
-    const responsesString = await params.promptAiSdk({
+    const responsesString = await promptAiSdk({
       ...params,
-      messages: agentMessages,
-      system,
+      messages: agentState.messageHistory,
       model,
-      onCostCalculated,
       n: params.n,
+      onCostCalculated,
     })
 
     let nResponses: string[]
@@ -310,12 +318,6 @@ export const runAgentStep = async (
       nResponses = [responsesString]
     }
 
-    // Update agent state with the message history including the generations
-    agentState = {
-      ...agentState,
-      messageHistory: agentMessages,
-    }
-
     return {
       agentState,
       fullResponse: responsesString,
@@ -336,25 +338,27 @@ export const runAgentStep = async (
     includeCacheControl: supportsCacheControl(agentTemplate.model),
   })
 
-  const stream = getStream([systemMessage(system), ...agentMessages])
+  const stream = getStream([
+    systemMessage(system),
+    ...agentState.messageHistory,
+  ])
 
   const {
-    toolCalls,
-    toolResults: newToolResults,
-    state,
     fullResponse: fullResponseAfterStream,
     fullResponseChunks,
     messageId,
+    toolCalls,
+    toolResults: newToolResults,
   } = await processStreamWithTools({
     ...params,
-    stream,
-    agentStepId,
-    agentState,
-    repoId,
-    messages: agentMessages,
-    agentTemplate,
     agentContext,
+    agentState,
+    agentStepId,
+    agentTemplate,
     fullResponse,
+    messages: agentState.messageHistory,
+    repoId,
+    stream,
     onCostCalculated,
   })
   toolResults.push(...newToolResults)
@@ -377,12 +381,8 @@ export const runAgentStep = async (
 
   insertTrace({ trace: agentResponseTrace, logger })
 
-  const newAgentContext = state.agentContext as AgentState['agentContext']
-  // Use the updated agent state from tool execution
-  agentState = state.agentState as AgentState
-
-  let finalMessageHistoryWithToolResults: Message[] = expireMessages(
-    state.messages,
+  agentState.messageHistory = expireMessages(
+    agentState.messageHistory,
     'agentStep',
   )
 
@@ -391,7 +391,7 @@ export const runAgentStep = async (
     prompt &&
     (prompt.toLowerCase() === '/compact' || prompt.toLowerCase() === 'compact')
   if (wasCompacted) {
-    finalMessageHistoryWithToolResults = [
+    agentState.messageHistory = [
       userMessage(
         withSystemTags(
           `The following is a summary of the conversation between you and the user. The conversation continues after this summary:\n\n${fullResponse}`,
@@ -431,9 +431,8 @@ export const runAgentStep = async (
 
   agentState = {
     ...agentState,
-    messageHistory: finalMessageHistoryWithToolResults,
     stepsRemaining: agentState.stepsRemaining - 1,
-    agentContext: newAgentContext,
+    agentContext,
   }
 
   logger.debug(
@@ -448,7 +447,7 @@ export const runAgentStep = async (
       finalMessageHistoryWithToolResults: agentState.messageHistory,
       toolCalls,
       toolResults,
-      agentContext: newAgentContext,
+      agentContext,
       fullResponseChunks,
       stepCreditsUsed,
     },

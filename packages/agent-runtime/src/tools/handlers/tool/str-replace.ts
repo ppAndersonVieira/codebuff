@@ -1,11 +1,8 @@
-import { getFileProcessingValues, postStreamProcessing } from './write-file'
+import { postStreamProcessing } from './write-file'
 import { processStrReplace } from '../../../process-str-replace'
 
 import type { CodebuffToolHandlerFunction } from '../handler-function-type'
-import type {
-  FileProcessingState,
-  OptionalFileProcessingState,
-} from './write-file'
+import type { FileProcessingState } from './write-file'
 import type {
   ClientToolCall,
   CodebuffToolCall,
@@ -15,36 +12,34 @@ import type { RequestOptionalFileFn } from '@codebuff/common/types/contracts/cli
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 
-export function handleStrReplace(
+export const handleStrReplace = (async (
   params: {
     previousToolCallFinished: Promise<void>
     toolCall: CodebuffToolCall<'str_replace'>
+
+    fileProcessingState: FileProcessingState
+    logger: Logger
+
     requestClientToolCall: (
       toolCall: ClientToolCall<'str_replace'>,
     ) => Promise<CodebuffToolOutput<'str_replace'>>
     writeToClient: (chunk: string) => void
-    logger: Logger
 
-    getLatestState: () => FileProcessingState
-    state: OptionalFileProcessingState
     requestOptionalFile: RequestOptionalFileFn
   } & ParamsExcluding<RequestOptionalFileFn, 'filePath'>,
-): {
-  result: Promise<CodebuffToolOutput<'str_replace'>>
-  state: FileProcessingState
-} {
+): Promise<{ output: CodebuffToolOutput<'str_replace'> }> => {
   const {
     previousToolCallFinished,
     toolCall,
-    requestClientToolCall,
-    writeToClient,
+
+    fileProcessingState,
     logger,
-    getLatestState,
+
+    requestClientToolCall,
     requestOptionalFile,
-    state,
+    writeToClient,
   } = params
   const { path, replacements } = toolCall.input
-  const fileProcessingState = getFileProcessingValues(state)
 
   if (!fileProcessingState.promisesByPath[path]) {
     fileProcessingState.promisesByPath[path] = []
@@ -83,28 +78,20 @@ export function handleStrReplace(
   fileProcessingState.promisesByPath[path].push(newPromise)
   fileProcessingState.allPromises.push(newPromise)
 
-  return {
-    result: (async () => {
-      await previousToolCallFinished
+  await previousToolCallFinished
 
-      const strReplaceResult = await newPromise
-      const clientToolResult = await postStreamProcessing<'str_replace'>(
-        strReplaceResult,
-        getLatestState(),
-        writeToClient,
-        requestClientToolCall,
-      )
+  const strReplaceResult = await newPromise
+  const clientToolResult = await postStreamProcessing<'str_replace'>(
+    strReplaceResult,
+    fileProcessingState,
+    writeToClient,
+    requestClientToolCall,
+  )
 
-      const value = clientToolResult[0].value
-      if ('messages' in strReplaceResult && 'message' in value) {
-        value.message = [...strReplaceResult.messages, value.message].join(
-          '\n\n',
-        )
-      }
-
-      return clientToolResult
-    })(),
-    state: fileProcessingState,
+  const value = clientToolResult[0].value
+  if ('messages' in strReplaceResult && 'message' in value) {
+    value.message = [...strReplaceResult.messages, value.message].join('\n\n')
   }
-}
-handleStrReplace satisfies CodebuffToolHandlerFunction<'str_replace'>
+
+  return { output: clientToolResult }
+}) satisfies CodebuffToolHandlerFunction<'str_replace'>

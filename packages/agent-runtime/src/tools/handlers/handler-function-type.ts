@@ -1,3 +1,4 @@
+import type { FileProcessingState } from './tool/write-file'
 import type { ToolName } from '@codebuff/common/tools/constants'
 import type {
   ClientToolCall,
@@ -6,12 +7,16 @@ import type {
   CodebuffToolMessage,
   CodebuffToolOutput,
 } from '@codebuff/common/tools/list'
+import type { AgentTemplate } from '@codebuff/common/types/agent-template'
 import type {
   AgentRuntimeDeps,
   AgentRuntimeScopedDeps,
 } from '@codebuff/common/types/contracts/agent-runtime'
 import type { TrackEventFn } from '@codebuff/common/types/contracts/analytics'
+import type { SendSubagentChunkFn } from '@codebuff/common/types/contracts/client'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
+import type { AgentState, Subgoal } from '@codebuff/common/types/session-state'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
 
 type PresentOrAbsent<K extends PropertyKey, V> =
@@ -23,27 +28,31 @@ export type CodebuffToolHandlerFunction<T extends ToolName = ToolName> = (
     previousToolCallFinished: Promise<void>
     toolCall: CodebuffToolCall<T>
 
-    runId: string
+    agentContext: Record<string, Subgoal>
+    agentState: AgentState
     agentStepId: string
-    clientSessionId: string
-    userInputId: string
-    repoUrl: string | undefined
-    repoId: string | undefined
-    fileContext: ProjectFileContext
-    apiKey: string
-
-    signal: AbortSignal
-
+    agentTemplate: AgentTemplate
     ancestorRunIds: string[]
-
-    fullResponse: string
+    apiKey: string
+    clientSessionId: string
     fetch: typeof globalThis.fetch
-
-    writeToClient: (chunk: string | PrintModeEvent) => void
+    fileContext: ProjectFileContext
+    fileProcessingState: FileProcessingState
+    fingerprintId: string
+    fullResponse: string
+    localAgentTemplates: Record<string, AgentTemplate>
+    logger: Logger
+    prompt: string | undefined
+    repoId: string | undefined
+    repoUrl: string | undefined
+    runId: string
+    sendSubagentChunk: SendSubagentChunkFn
+    signal: AbortSignal
+    system: string
     trackEvent: TrackEventFn
-
-    getLatestState: () => any
-    state: { [K in string]?: any }
+    userId: string | undefined
+    userInputId: string
+    writeToClient: (chunk: string | PrintModeEvent) => void
   } & PresentOrAbsent<
     'requestClientToolCall',
     (
@@ -52,7 +61,7 @@ export type CodebuffToolHandlerFunction<T extends ToolName = ToolName> = (
   > &
     AgentRuntimeDeps &
     AgentRuntimeScopedDeps,
-) => {
-  result: Promise<CodebuffToolMessage<T>['content']>
-  state?: Record<string, any>
-}
+) => Promise<{
+  output: CodebuffToolMessage<T>['content']
+  creditsUsed?: number
+}>

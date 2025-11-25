@@ -2,21 +2,60 @@ import { describe, test, expect, beforeEach, mock } from 'bun:test'
 
 import { fetchAndUpdateUsage } from '../fetch-usage'
 
+import type { CodebuffApiClient } from '../codebuff-api'
 import type { FetchAndUpdateUsageParams } from '../fetch-usage'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 
 describe('fetchAndUpdateUsage (deprecated)', () => {
-  let setIsUsageVisibleMock: ReturnType<typeof mock>
+  let setInputModeMock: ReturnType<typeof mock>
   let getAuthTokenMock: ReturnType<typeof mock>
   let loggerMock: Logger
-  let fetchMock: ReturnType<typeof mock>
+  let apiClientMock: CodebuffApiClient
 
-  const createMockResponse = (data: any, status: number = 200) => {
-    return new Response(JSON.stringify(data), {
-      status,
-      headers: { 'Content-Type': 'application/json' },
-    })
-  }
+  // Note: fetch-usage now uses apiClient.usage() instead of apiClient.post()
+  const createMockApiClient = (
+    usageMock: ReturnType<typeof mock>,
+  ): CodebuffApiClient => ({
+    get: mock(() =>
+      Promise.resolve({ ok: true, status: 200, data: {} }),
+    ) as CodebuffApiClient['get'],
+    post: mock(() =>
+      Promise.resolve({ ok: true, status: 200, data: {} }),
+    ) as CodebuffApiClient['post'],
+    put: mock(() =>
+      Promise.resolve({ ok: true, status: 200, data: {} }),
+    ) as CodebuffApiClient['put'],
+    patch: mock(() =>
+      Promise.resolve({ ok: true, status: 200, data: {} }),
+    ) as CodebuffApiClient['patch'],
+    delete: mock(() =>
+      Promise.resolve({ ok: true, status: 200, data: {} }),
+    ) as CodebuffApiClient['delete'],
+    request: mock(() =>
+      Promise.resolve({ ok: true, status: 200, data: {} }),
+    ) as CodebuffApiClient['request'],
+    me: mock(() =>
+      Promise.resolve({ ok: true, status: 200, data: {} }),
+    ) as CodebuffApiClient['me'],
+    usage: usageMock as CodebuffApiClient['usage'],
+    loginCode: mock(() =>
+      Promise.resolve({ ok: true, status: 200, data: {} }),
+    ) as CodebuffApiClient['loginCode'],
+    loginStatus: mock(() =>
+      Promise.resolve({ ok: true, status: 200, data: {} }),
+    ) as CodebuffApiClient['loginStatus'],
+    referral: mock(() =>
+      Promise.resolve({ ok: true, status: 200, data: {} }),
+    ) as CodebuffApiClient['referral'],
+    publish: mock(() =>
+      Promise.resolve({ ok: true, status: 200, data: {} }),
+    ) as CodebuffApiClient['publish'],
+    logout: mock(() =>
+      Promise.resolve({ ok: true, status: 200, data: {} }),
+    ) as CodebuffApiClient['logout'],
+    baseUrl: 'https://test.codebuff.com',
+    authToken: 'test-auth-token',
+  })
 
   const createDefaultParams = (
     overrides: Partial<FetchAndUpdateUsageParams> = {},
@@ -24,15 +63,15 @@ describe('fetchAndUpdateUsage (deprecated)', () => {
     getAuthToken: getAuthTokenMock,
     getChatStore: () => ({
       sessionCreditsUsed: 150,
-      setIsUsageVisible: setIsUsageVisibleMock,
+      setInputMode: setInputModeMock,
     }),
     logger: loggerMock,
-    fetch: fetchMock as any,
+    apiClient: apiClientMock,
     ...overrides,
   })
 
   beforeEach(() => {
-    setIsUsageVisibleMock = mock(() => {})
+    setInputModeMock = mock(() => {})
     getAuthTokenMock = mock(() => 'test-auth-token')
     loggerMock = {
       info: mock(() => {}),
@@ -40,14 +79,17 @@ describe('fetchAndUpdateUsage (deprecated)', () => {
       warn: mock(() => {}),
       debug: mock(() => {}),
     }
-    fetchMock = mock(async () =>
-      createMockResponse({
+    const usageMock = mock(async () => ({
+      ok: true,
+      status: 200,
+      data: {
         type: 'usage-response',
         usage: 100,
         remainingBalance: 500,
         next_quota_reset: '2024-02-01T00:00:00.000Z',
-      }),
-    )
+      },
+    }))
+    apiClientMock = createMockApiClient(usageMock)
   })
 
   describe('successful usage refresh', () => {
@@ -56,7 +98,7 @@ describe('fetchAndUpdateUsage (deprecated)', () => {
 
       expect(result).toBe(true)
       // Note: setUsageData no longer called - data managed by TanStack Query
-      expect(setIsUsageVisibleMock).not.toHaveBeenCalled()
+      expect(setInputModeMock).not.toHaveBeenCalled()
     })
 
     test('should show banner when showBanner parameter is true', async () => {
@@ -66,41 +108,47 @@ describe('fetchAndUpdateUsage (deprecated)', () => {
 
       expect(result).toBe(true)
       // Note: setUsageData no longer called - data managed by TanStack Query
-      expect(setIsUsageVisibleMock).toHaveBeenCalledTimes(1)
-      expect(setIsUsageVisibleMock.mock.calls[0][0]).toBe(true)
+      expect(setInputModeMock).toHaveBeenCalledTimes(1)
+      expect(setInputModeMock.mock.calls[0][0]).toBe('usage')
     })
 
     test('should handle null remainingBalance correctly', async () => {
-      fetchMock.mockImplementation(async () =>
-        createMockResponse({
+      const usageMock = mock(async () => ({
+        ok: true,
+        status: 200,
+        data: {
           type: 'usage-response',
           usage: 100,
           remainingBalance: null,
           next_quota_reset: null,
-        }),
-      )
+        },
+      }))
+      const client = createMockApiClient(usageMock)
 
-      const result = await fetchAndUpdateUsage(createDefaultParams())
+      const result = await fetchAndUpdateUsage(
+        createDefaultParams({ apiClient: client }),
+      )
 
       expect(result).toBe(true)
       // Note: setUsageData no longer called - data managed by TanStack Query
     })
 
     test('should send correct request to API', async () => {
-      await fetchAndUpdateUsage(createDefaultParams())
+      const usageMock = mock(async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          type: 'usage-response',
+          usage: 100,
+          remainingBalance: 500,
+          next_quota_reset: '2024-02-01T00:00:00.000Z',
+        },
+      }))
+      const client = createMockApiClient(usageMock)
 
-      expect(fetchMock).toHaveBeenCalledTimes(1)
-      const [url, options] = fetchMock.mock.calls[0]
+      await fetchAndUpdateUsage(createDefaultParams({ apiClient: client }))
 
-      expect(url).toContain('/api/v1/usage')
-      expect(options.method).toBe('POST')
-      expect(options.headers['Content-Type']).toBe('application/json')
-
-      const body = JSON.parse(options.body)
-      expect(body).toEqual({
-        fingerprintId: 'cli-usage',
-        authToken: 'test-auth-token',
-      })
+      expect(usageMock).toHaveBeenCalledTimes(1)
     })
   })
 
@@ -111,73 +159,93 @@ describe('fetchAndUpdateUsage (deprecated)', () => {
       const result = await fetchAndUpdateUsage(createDefaultParams())
 
       expect(result).toBe(false)
-      expect(setIsUsageVisibleMock).not.toHaveBeenCalled()
+      expect(setInputModeMock).not.toHaveBeenCalled()
       expect(loggerMock.debug).toHaveBeenCalled()
     })
 
     test('should not make API call when auth token is missing', async () => {
       getAuthTokenMock.mockReturnValue(null)
+      const usageMock = mock(async () => ({ ok: true, status: 200 }))
+      const client = createMockApiClient(usageMock)
 
-      await fetchAndUpdateUsage(createDefaultParams())
+      await fetchAndUpdateUsage(createDefaultParams({ apiClient: client }))
 
-      expect(fetchMock).not.toHaveBeenCalled()
+      expect(usageMock).not.toHaveBeenCalled()
     })
   })
 
   describe('error handling', () => {
     test('should return false on HTTP error responses', async () => {
-      fetchMock.mockImplementation(async () =>
-        new Response('Internal Server Error', { status: 500 }),
-      )
+      const usageMock = mock(async () => ({
+        ok: false,
+        status: 500,
+        error: 'Internal Server Error',
+      }))
+      const client = createMockApiClient(usageMock)
 
-      const result = await fetchAndUpdateUsage(createDefaultParams())
+      const result = await fetchAndUpdateUsage(
+        createDefaultParams({ apiClient: client }),
+      )
 
       expect(result).toBe(false)
       expect(loggerMock.error).toHaveBeenCalled()
     })
 
     test('should return false on 401 Unauthorized', async () => {
-      fetchMock.mockImplementation(async () =>
-        new Response(null, { status: 401 }),
-      )
+      const usageMock = mock(async () => ({
+        ok: false,
+        status: 401,
+        error: 'Unauthorized',
+      }))
+      const client = createMockApiClient(usageMock)
 
-      const result = await fetchAndUpdateUsage(createDefaultParams())
+      const result = await fetchAndUpdateUsage(
+        createDefaultParams({ apiClient: client }),
+      )
 
       expect(result).toBe(false)
     })
 
     test('should return false on network errors', async () => {
-      fetchMock.mockImplementation(async () => {
+      const usageMock = mock(async () => {
         throw new Error('Network connection failed')
       })
+      const client = createMockApiClient(usageMock)
 
-      const result = await fetchAndUpdateUsage(createDefaultParams())
+      const result = await fetchAndUpdateUsage(
+        createDefaultParams({ apiClient: client }),
+      )
 
       expect(result).toBe(false)
       expect(loggerMock.error).toHaveBeenCalled()
     })
 
     test('should return false on malformed JSON response', async () => {
-      fetchMock.mockImplementation(async () =>
-        new Response('not-valid-json', {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        }),
-      )
+      const usageMock = mock(async () => ({
+        ok: false,
+        status: 200,
+        error: 'Invalid JSON',
+      }))
+      const client = createMockApiClient(usageMock)
 
-      const result = await fetchAndUpdateUsage(createDefaultParams())
+      const result = await fetchAndUpdateUsage(
+        createDefaultParams({ apiClient: client }),
+      )
 
       expect(result).toBe(false)
     })
 
     test('should handle fetch timeout gracefully', async () => {
-      fetchMock.mockImplementation(async () => {
+      const usageMock = mock(async () => {
         const error = new Error('Request timeout')
         error.name = 'TimeoutError'
         throw error
       })
+      const client = createMockApiClient(usageMock)
 
-      const result = await fetchAndUpdateUsage(createDefaultParams())
+      const result = await fetchAndUpdateUsage(
+        createDefaultParams({ apiClient: client }),
+      )
 
       expect(result).toBe(false)
       expect(loggerMock.error).toHaveBeenCalled()
@@ -190,7 +258,7 @@ describe('fetchAndUpdateUsage (deprecated)', () => {
         createDefaultParams({
           getChatStore: () => ({
             sessionCreditsUsed: 250,
-            setIsUsageVisible: setIsUsageVisibleMock,
+            setInputMode: setInputModeMock,
           }),
         }),
       )
@@ -204,7 +272,7 @@ describe('fetchAndUpdateUsage (deprecated)', () => {
         createDefaultParams({
           getChatStore: () => ({
             sessionCreditsUsed: 0,
-            setIsUsageVisible: setIsUsageVisibleMock,
+            setInputMode: setInputModeMock,
           }),
         }),
       )
@@ -216,26 +284,38 @@ describe('fetchAndUpdateUsage (deprecated)', () => {
 
   describe('edge cases', () => {
     test('should handle empty response body gracefully', async () => {
-      fetchMock.mockImplementation(async () =>
-        new Response('', { status: 200 }),
+      const usageMock = mock(async () => ({
+        ok: true,
+        status: 200,
+        data: null,
+      }))
+      const client = createMockApiClient(usageMock)
+
+      // With the new API client, empty/null data is treated as success
+      // since ok: true indicates the request succeeded
+      const result = await fetchAndUpdateUsage(
+        createDefaultParams({ apiClient: client }),
       )
 
-      const result = await fetchAndUpdateUsage(createDefaultParams())
-
-      expect(result).toBe(false)
+      expect(result).toBe(true)
     })
 
     test('should handle missing balanceBreakdown field', async () => {
-      fetchMock.mockImplementation(async () =>
-        createMockResponse({
+      const usageMock = mock(async () => ({
+        ok: true,
+        status: 200,
+        data: {
           type: 'usage-response',
           usage: 50,
           remainingBalance: 450,
           next_quota_reset: '2024-02-01T00:00:00.000Z',
-        }),
-      )
+        },
+      }))
+      const client = createMockApiClient(usageMock)
 
-      const result = await fetchAndUpdateUsage(createDefaultParams())
+      const result = await fetchAndUpdateUsage(
+        createDefaultParams({ apiClient: client }),
+      )
 
       expect(result).toBe(true)
       // Note: setUsageData no longer called - data managed by TanStack Query
@@ -243,26 +323,33 @@ describe('fetchAndUpdateUsage (deprecated)', () => {
 
     test('should handle concurrent calls correctly', async () => {
       let callCount = 0
-      fetchMock.mockImplementation(async () => {
+      const usageMock = mock(async () => {
         callCount++
         await new Promise((resolve) => setTimeout(resolve, 10))
-        return createMockResponse({
-          type: 'usage-response',
-          usage: 100,
-          remainingBalance: 900 - callCount * 10,
-          next_quota_reset: null,
-        })
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            type: 'usage-response',
+            usage: 100,
+            remainingBalance: 900 - callCount * 10,
+            next_quota_reset: null,
+          },
+        }
       })
+      const client = createMockApiClient(usageMock)
 
       const results = await Promise.all([
-        fetchAndUpdateUsage(createDefaultParams()),
-        fetchAndUpdateUsage(createDefaultParams()),
-        fetchAndUpdateUsage(createDefaultParams({ showBanner: true })),
+        fetchAndUpdateUsage(createDefaultParams({ apiClient: client })),
+        fetchAndUpdateUsage(createDefaultParams({ apiClient: client })),
+        fetchAndUpdateUsage(
+          createDefaultParams({ apiClient: client, showBanner: true }),
+        ),
       ])
 
       expect(results).toEqual([true, true, true])
       // Note: setUsageData no longer called - data managed by TanStack Query
-      expect(setIsUsageVisibleMock).toHaveBeenCalledTimes(1)
+      expect(setInputModeMock).toHaveBeenCalledTimes(1)
     })
   })
 })

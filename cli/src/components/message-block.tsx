@@ -4,18 +4,10 @@ import React, { memo, useCallback, useMemo, useState, type ReactNode } from 'rea
 
 import { AgentBranchItem } from './agent-branch-item'
 import { Button } from './button'
-import { CopyIconButton } from './copy-icon-button'
-import { ElapsedTimer } from './elapsed-timer'
-import { FeedbackIconButton } from './feedback-icon-button'
+import { MessageFooter } from './message-footer'
 import { ValidationErrorPopover } from './validation-error-popover'
 import { useTheme } from '../hooks/use-theme'
 import { useWhyDidYouUpdateById } from '../hooks/use-why-did-you-update'
-import {
-  useFeedbackStore,
-  selectIsFeedbackOpenForMessage,
-  selectHasSubmittedFeedback,
-  selectMessageFeedbackCategory,
-} from '../state/feedback-store'
 import { isTextBlock, isToolBlock } from '../types/chat'
 import { shouldRenderAsSimpleText } from '../utils/constants'
 import {
@@ -28,6 +20,7 @@ import { AgentListBranch } from './blocks/agent-list-branch'
 import { ContentWithMarkdown } from './blocks/content-with-markdown'
 import { ThinkingBlock } from './blocks/thinking-block'
 import { ToolBranch } from './blocks/tool-branch'
+import { AskUserBranch } from './blocks/ask-user-branch'
 import { PlanBox } from './renderers/plan-box'
 
 import type {
@@ -36,6 +29,7 @@ import type {
   HtmlContentBlock,
   AgentContentBlock,
 } from '../types/chat'
+import { isAskUserBlock } from '../types/chat'
 import type { ThemeColor } from '../types/theme-system'
 
 interface MessageBlockProps {
@@ -98,7 +92,6 @@ export const MessageBlock: React.FC<MessageBlockProps> = ({
   onOpenFeedback,
 }) => {
   const [showValidationPopover, setShowValidationPopover] = useState(false)
-  const [isErrorButtonHovered, setIsErrorButtonHovered] = useState(false)
   
   useWhyDidYouUpdateById(
     'MessageBlock',
@@ -136,178 +129,7 @@ export const MessageBlock: React.FC<MessageBlockProps> = ({
   )
 
   const theme = useTheme()
-
-  // Memoize selectors to prevent new function references on every render
-  const selectIsFeedbackOpenMemo = useMemo(
-    () => selectIsFeedbackOpenForMessage(messageId),
-    [messageId],
-  )
-  const selectHasSubmittedFeedbackMemo = useMemo(
-    () => selectHasSubmittedFeedback(messageId),
-    [messageId],
-  )
-  const selectMessageFeedbackCategoryMemo = useMemo(
-    () => selectMessageFeedbackCategory(messageId),
-    [messageId],
-  )
-
-  const isFeedbackOpen = useFeedbackStore(selectIsFeedbackOpenMemo)
-  const hasSubmittedFeedback = useFeedbackStore(selectHasSubmittedFeedbackMemo)
-  const selectedFeedbackCategory = useFeedbackStore(
-    selectMessageFeedbackCategoryMemo,
-  )
-
   const resolvedTextColor = textColor ?? theme.foreground
-  const shouldShowLoadingTimer = isAi && isLoading && !isComplete
-  const shouldShowCompletionFooter = isAi && isComplete
-  const canRequestFeedback = shouldShowCompletionFooter && !hasSubmittedFeedback
-  const isGoodOrBadSelection =
-    selectedFeedbackCategory === 'good_result' ||
-    selectedFeedbackCategory === 'bad_result'
-  const shouldShowSubmittedFeedbackState =
-    shouldShowCompletionFooter && hasSubmittedFeedback && isGoodOrBadSelection
-  const shouldRenderFeedbackButton =
-    Boolean(onFeedback) &&
-    (canRequestFeedback || shouldShowSubmittedFeedbackState)
-
-  const handleFeedbackOpen = useCallback(() => {
-    if (!canRequestFeedback || !onFeedback) return
-    onFeedback(messageId)
-  }, [canRequestFeedback, onFeedback, messageId])
-
-  const handleFeedbackClose = useCallback(() => {
-    if (!canRequestFeedback) return
-    onCloseFeedback?.()
-  }, [canRequestFeedback, onCloseFeedback])
-
-  const renderLoadingTimer = () => {
-    if (!shouldShowLoadingTimer) {
-      return null
-    }
-    return (
-      <text
-        attributes={TextAttributes.DIM}
-        style={{
-          wrapMode: 'none',
-          marginTop: 0,
-          marginBottom: 0,
-          alignSelf: 'flex-end',
-        }}
-      >
-        <ElapsedTimer
-          startTime={timerStartTime}
-          attributes={TextAttributes.DIM}
-        />
-      </text>
-    )
-  }
-
-  const renderCompletionFooter = () => {
-    if (!shouldShowCompletionFooter) {
-      return null
-    }
-
-    // Extract full text content from blocks or use content prop
-    const fullTextContent = blocks && blocks.length > 0 
-      ? extractTextFromBlocks(blocks) || content
-      : content
-
-    const footerItems: { key: string; node: React.ReactNode }[] = []
-    
-    // Add copy button first if there's content to copy
-    if (fullTextContent && fullTextContent.trim().length > 0) {
-      footerItems.push({
-        key: 'copy',
-        node: <CopyIconButton textToCopy={fullTextContent} />,
-      })
-    }
-    
-    if (completionTime) {
-      footerItems.push({
-        key: 'time',
-        node: (
-          <text
-            attributes={TextAttributes.DIM}
-            style={{
-              wrapMode: 'none',
-              fg: theme.secondary,
-              marginTop: 0,
-              marginBottom: 0,
-            }}
-          >
-            {completionTime}
-          </text>
-        ),
-      })
-    }
-    if (typeof credits === 'number' && credits > 0) {
-      footerItems.push({
-        key: 'credits',
-        node: (
-          <text
-            attributes={TextAttributes.DIM}
-            style={{
-              wrapMode: 'none',
-              fg: theme.secondary,
-              marginTop: 0,
-              marginBottom: 0,
-            }}
-          >
-            {pluralize(credits, 'credit')}
-          </text>
-        ),
-      })
-    }
-    if (shouldRenderFeedbackButton) {
-      footerItems.push({
-        key: 'feedback',
-        node: (
-          <FeedbackIconButton
-            onClick={handleFeedbackOpen}
-            onClose={handleFeedbackClose}
-            isOpen={canRequestFeedback ? isFeedbackOpen : false}
-            messageId={messageId}
-            selectedCategory={selectedFeedbackCategory}
-            hasSubmittedFeedback={hasSubmittedFeedback}
-          />
-        ),
-      })
-    }
-
-    if (footerItems.length === 0) {
-      return null
-    }
-
-    return (
-      <box
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-          alignSelf: 'flex-end',
-          gap: 1,
-        }}
-      >
-        {footerItems.map((item, idx) => (
-          <React.Fragment key={item.key}>
-            {idx > 0 && (
-              <text
-                attributes={TextAttributes.DIM}
-                style={{
-                  wrapMode: 'none',
-                  fg: theme.muted,
-                  marginTop: 0,
-                  marginBottom: 0,
-                }}
-              >
-                •
-              </text>
-            )}
-            {item.node}
-          </React.Fragment>
-        ))}
-      </box>
-    )
-  }
 
   return (
     <box
@@ -332,8 +154,6 @@ export const MessageBlock: React.FC<MessageBlockProps> = ({
           {validationErrors && validationErrors.length > 0 && (
             <Button
               onClick={() => setShowValidationPopover(!showValidationPopover)}
-              onMouseOver={() => setIsErrorButtonHovered(true)}
-              onMouseOut={() => setIsErrorButtonHovered(false)}
             >
               <text
                 style={{
@@ -389,10 +209,18 @@ export const MessageBlock: React.FC<MessageBlockProps> = ({
         />
       )}
       {isAi && (
-        <>
-          {renderLoadingTimer()}
-          {renderCompletionFooter()}
-        </>
+        <MessageFooter
+          messageId={messageId}
+          blocks={blocks}
+          content={content}
+          isLoading={isLoading}
+          isComplete={isComplete}
+          completionTime={completionTime}
+          credits={credits}
+          timerStartTime={timerStartTime}
+          onFeedback={onFeedback}
+          onCloseFeedback={onCloseFeedback}
+        />
       )}
     </box>
   )
@@ -405,21 +233,7 @@ const sanitizePreview = (value: string): string =>
   value.replace(/[#*_`~\[\]()]/g, '').trim()
 
 // Extract all text content from blocks recursively
-const extractTextFromBlocks = (blocks?: ContentBlock[]): string => {
-  if (!blocks || blocks.length === 0) return ''
-  
-  const textParts: string[] = []
-  
-  for (const block of blocks) {
-    if (block.type === 'text') {
-      textParts.push(block.content)
-    } else if (block.type === 'agent' && block.blocks) {
-      textParts.push(extractTextFromBlocks(block.blocks))
-    }
-  }
-  
-  return textParts.join('\n').trim()
-}
+
 
 const isReasoningTextBlock = (
   b: ContentBlock | null | undefined,
@@ -452,6 +266,7 @@ const isRenderableTimelineBlock = (
     case 'agent-list':
     case 'plan':
     case 'mode-divider':
+    case 'ask-user':
       return true
     default:
       return false
@@ -1066,6 +881,16 @@ const SingleBlock = memo(
       case 'tool': {
         // Handled in BlocksRenderer grouping logic
         return null
+      }
+
+      case 'ask-user': {
+        return (
+          <AskUserBranch
+            key={`${messageId}-ask-user-${idx}`}
+            block={block}
+            availableWidth={availableWidth}
+          />
+        )
       }
 
       case 'agent': {

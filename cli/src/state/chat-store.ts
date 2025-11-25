@@ -3,9 +3,11 @@ import { create } from 'zustand'
 import { immer } from 'zustand/middleware/immer'
 
 import { clamp } from '../utils/math'
+import { loadModePreference, saveModePreference } from '../utils/settings'
 
 import type { ChatMessage } from '../types/chat'
 import type { AgentMode } from '../utils/constants'
+import type { InputMode } from '../utils/input-modes'
 import type { RunState } from '@codebuff/sdk'
 
 export type InputValue = {
@@ -13,6 +15,33 @@ export type InputValue = {
   cursorPosition: number
   lastEditDueToNav: boolean
 }
+
+export type AskUserQuestion = {
+  question: string
+  header?: string
+  options:
+    | string[]
+    | Array<{
+        label: string
+        description?: string
+      }>
+  multiSelect?: boolean
+  validation?: {
+    maxLength?: number
+    minLength?: number
+    pattern?: string
+    patternError?: string
+  }
+}
+
+export type AnswerState = number | number[]
+
+export type AskUserState = {
+  toolCallId: string
+  questions: AskUserQuestion[]
+  selectedAnswers: AnswerState[] // Single-select: number (-1 = not answered), Multi-select: number[]
+  otherTexts: string[] // Custom text input for each question (empty string if not used)
+} | null
 
 export type ChatStoreState = {
   messages: ChatMessage[]
@@ -32,10 +61,10 @@ export type ChatStoreState = {
   lastMessageMode: AgentMode | null
   sessionCreditsUsed: number
   runState: RunState | null
-  isUsageVisible: boolean
   isAnnouncementVisible: boolean
-  isBashMode: boolean
+  inputMode: InputMode
   isRetrying: boolean
+  askUserState: AskUserState
 }
 
 type ChatStoreActions = {
@@ -65,10 +94,12 @@ type ChatStoreActions = {
   setLastMessageMode: (mode: AgentMode | null) => void
   addSessionCredits: (credits: number) => void
   setRunState: (runState: RunState | null) => void
-  setIsUsageVisible: (visible: boolean) => void
   setIsAnnouncementVisible: (visible: boolean) => void
-  setBashMode: (isBashMode: boolean) => void
+  setInputMode: (mode: InputMode) => void
   setIsRetrying: (retrying: boolean) => void
+  setAskUserState: (state: AskUserState) => void
+  updateAskUserAnswer: (questionIndex: number, optionIndex: number) => void
+  updateAskUserOtherText: (questionIndex: number, text: string) => void
   reset: () => void
 }
 
@@ -87,15 +118,15 @@ const initialState: ChatStoreState = {
   isChainInProgress: false,
   slashSelectedIndex: 0,
   agentSelectedIndex: 0,
-  agentMode: 'DEFAULT',
+  agentMode: loadModePreference(),
   hasReceivedPlanResponse: false,
   lastMessageMode: null,
   sessionCreditsUsed: 0,
   runState: null,
-  isUsageVisible: false,
   isAnnouncementVisible: true,
-  isBashMode: false,
+  inputMode: 'default' as InputMode,
   isRetrying: false,
+  askUserState: null,
 }
 
 export const useChatStore = create<ChatStore>()(
@@ -171,6 +202,7 @@ export const useChatStore = create<ChatStore>()(
     setAgentMode: (mode) =>
       set((state) => {
         state.agentMode = mode
+        saveModePreference(mode)
       }),
 
     toggleAgentMode: () =>
@@ -182,6 +214,7 @@ export const useChatStore = create<ChatStore>()(
         } else {
           state.agentMode = 'DEFAULT'
         }
+        saveModePreference(state.agentMode)
       }),
 
     setHasReceivedPlanResponse: (value) =>
@@ -204,24 +237,65 @@ export const useChatStore = create<ChatStore>()(
         state.runState = runState ? castDraft(runState) : null
       }),
 
-    setIsUsageVisible: (visible) =>
-      set((state) => {
-        state.isUsageVisible = visible
-      }),
-
     setIsAnnouncementVisible: (visible) =>
       set((state) => {
         state.isAnnouncementVisible = visible
       }),
 
-    setBashMode: (isBashMode) =>
+    setInputMode: (mode) =>
       set((state) => {
-        state.isBashMode = isBashMode
+        state.inputMode = mode
       }),
 
     setIsRetrying: (retrying) =>
       set((state) => {
         state.isRetrying = retrying
+      }),
+
+    setAskUserState: (askUserState) =>
+      set((state) => {
+        state.askUserState = askUserState
+      }),
+
+    updateAskUserAnswer: (questionIndex, optionIndex) =>
+      set((state) => {
+        if (!state.askUserState) return
+
+        const question = state.askUserState.questions[questionIndex]
+        const currentAnswer = state.askUserState.selectedAnswers[questionIndex]
+
+        if (question?.multiSelect) {
+          // Multi-select: toggle option in array
+          const selected = Array.isArray(currentAnswer) ? currentAnswer : []
+          const newSelected = selected.includes(optionIndex)
+            ? selected.filter((i) => i !== optionIndex) // Remove if already selected
+            : [...selected, optionIndex] // Add if not selected
+
+          state.askUserState.selectedAnswers[questionIndex] = newSelected
+        } else {
+          // Single-select: set option index
+          state.askUserState.selectedAnswers[questionIndex] = optionIndex
+        }
+
+        // Clear other text when any option is selected (mutually exclusive)
+        state.askUserState.otherTexts[questionIndex] = ''
+      }),
+
+    updateAskUserOtherText: (questionIndex, text) =>
+      set((state) => {
+        if (!state.askUserState) return
+
+        state.askUserState.otherTexts[questionIndex] = text
+
+        // Clear selected option(s) when text is entered (mutually exclusive)
+        if (text) {
+          const question = state.askUserState.questions[questionIndex]
+          if (question?.multiSelect) {
+            state.askUserState.selectedAnswers[questionIndex] = []
+          } else {
+            state.askUserState.selectedAnswers[questionIndex] = -1
+          }
+        }
       }),
 
     reset: () =>
@@ -245,10 +319,10 @@ export const useChatStore = create<ChatStore>()(
         state.runState = initialState.runState
           ? castDraft(initialState.runState)
           : null
-        state.isUsageVisible = initialState.isUsageVisible
         state.isAnnouncementVisible = initialState.isAnnouncementVisible
-        state.isBashMode = initialState.isBashMode
+        state.inputMode = initialState.inputMode
         state.isRetrying = initialState.isRetrying
+        state.askUserState = initialState.askUserState
       }),
   })),
 )

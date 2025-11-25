@@ -18,12 +18,13 @@ export function createBase2(
   const isFast = mode === 'fast'
   const isMax = mode === 'max'
 
-  const isSonnet = true
+  const isOpus = isMax
+  const isSonnet = isDefault || isFast
   const isGemini = false
 
   return {
     publisher,
-    model: 'anthropic/claude-sonnet-4.5',
+    model: isOpus ? 'anthropic/claude-opus-4.5' : 'anthropic/claude-sonnet-4.5',
     displayName: 'Buffy the Orchestrator',
     spawnerPrompt:
       'Advanced base agent that orchestrates planning, editing, and reviewing for complex coding tasks',
@@ -51,6 +52,7 @@ export function createBase2(
       !isFast && 'write_todos',
       'str_replace',
       'write_file',
+      'ask_user',
     ),
     spawnableAgents: buildArray(
       'file-picker',
@@ -63,9 +65,9 @@ export function createBase2(
       isDefault && 'editor-best-of-n',
       isMax && 'editor-best-of-n-max',
       isDefault && 'thinker-best-of-n',
-      isMax && 'thinker-best-of-n-gpt-5',
+      isMax && 'thinker-best-of-n-opus',
       isDefault && 'code-reviewer-gemini',
-      isMax && 'code-reviewer-best-of-n-gemini',
+      isMax && 'code-reviewer-opus',
       'context-pruner',
     ),
 
@@ -116,11 +118,11 @@ Use the spawn_agents tool to spawn specialized agents to help you complete the u
   ${buildArray(
     '- Spawn context-gathering agents (file pickers, code-searcher, directory-lister, glob-matcher, and web/docs researchers) before making edits.',
     isMax &&
-      '- Spawn the thinker-best-of-n-gpt-5 after gathering context to solve complex problems.',
+      '- Spawn the thinker-best-of-n-opus after gathering context to solve complex problems.',
     `- Spawn a ${isMax ? 'editor-best-of-n-max' : 'editor-best-of-n'} agent to implement the changes after you have gathered all the context you need. You must spawn this agent for non-trivial changes, since it writes much better code than you would with the str_replace or write_file tools. Don't spawn the editor in parallel with context-gathering agents.`,
     '- Spawn commanders sequentially if the second command depends on the the first.',
     !isFast &&
-      `- Spawn a ${isDefault ? 'code-reviewer-gemini' : 'code-reviewer-best-of-n-gemini'} to review the changes after you have implemented the changes.`,
+      `- Spawn a ${isDefault ? 'code-reviewer-gemini' : 'code-reviewer-opus'} to review the changes after you have implemented the changes.`,
   ).join('\n  ')}
 - **No need to include context:** When prompting an agent, realize that many agents can already see the entire conversation history, so you can be brief in prompting them without needing to include context.
 
@@ -360,7 +362,7 @@ ${buildArray(
   !isFast &&
     `- IMPORTANT: You must spawn the ${isMax ? 'editor-best-of-n-max' : 'editor-best-of-n'} agent to implement non-trivial code changes, since it will generate the best code changes from multiple implementation proposals. This is the best way to make high quality code changes -- strongly prefer using this agent over the str_replace or write_file tools, unless the change is very straightforward and obvious.`,
   !isFast &&
-    `- Spawn a ${isDefault ? 'code-reviewer-gemini' : 'code-reviewer-best-of-n-gemini'} to review the changes after you have implemented the changes. (Skip this step only if the change is extremely straightforward and obvious.)`,
+    `- Spawn a ${isDefault ? 'code-reviewer-gemini' : 'code-reviewer-opus'} to review the changes after you have implemented the changes. (Skip this step only if the change is extremely straightforward and obvious.)`,
   !hasNoValidation &&
     `- Test your changes by running appropriate validation commands for the project (e.g. typechecks, tests, lints, etc.). Try to run all appropriate commands in parallel. ${isMax ? ' Typecheck and test the specific area of the project that you are editing *AND* then typecheck and test the entire project if necessary.' : ' If you can, only test the area of the project that you are editing, rather than the entire project.'} You may have to explore the project to find the appropriate commands. Don't skip this step!`,
   `- Inform the user that you have completed the task in one sentence or a few short bullet points.${isSonnet ? " Don't create any markdown summary files or example documentation files, unless asked by the user." : ''}`,
@@ -383,7 +385,7 @@ function buildImplementationStepPrompt({
       `Keep working until the user's request is completely satisfied${!hasNoValidation ? ' and validated' : ''}, or until you require more information from the user.`,
     !isFast &&
       `You must spawn the ${isMax ? 'editor-best-of-n-max' : 'editor-best-of-n'} agent to implement code changes, since it will generate the best code changes.`,
-    isMax && 'Spawn the thinker-best-of-n-gpt-5 to solve complex problems.',
+    isMax && 'Spawn the thinker-best-of-n-opus to solve complex problems.',
     `After completing the user request, summarize your changes in a sentence${isFast ? '' : ' or a few short bullet points'}.${isSonnet ? " Don't create any summary markdown files or example documentation files, unless asked by the user." : ''}. Don't repeat yourself, especially if you have already concluded and summarized the changes in a previous step -- just end your turn.`,
   ).join('\n')
 }
@@ -391,7 +393,7 @@ function buildImplementationStepPrompt({
 function buildPlanOnlyInstructionsPrompt({}: {}) {
   return `Orchestrate the completion of the user's request using your specialized sub-agents.
 
- You are in plan mode, so you should default to creating a spec/plan based on the user's request. However, creating a plan is not required at all and you should otherwise strive to act as a helpful assistant and answer the user's questions or requests freely.
+ You are in plan mode, so you should default to asking the user a few clarifying questions and then creating a spec/plan based on the user's request. However, creating a plan is not required at all and you should otherwise strive to act as a helpful assistant and answer the user's questions or requests freely.
     
 ## Example response
 
@@ -399,7 +401,15 @@ The user asks you to implement a new feature. You respond in multiple steps:
 
 ${buildArray(
   EXPLORE_PROMPT,
-  `- After exploring the codebase, translate the user request into a clear and concise spec. If the user is just asking a question, you can answer it instead of writing a spec.
+  `- After exploring the codebase, your goal is to translate the user request into a clear and concise spec. If the user is just asking a question, you can answer it instead of writing a spec.
+
+## Asking questions
+
+To clarify the user's intent, or get them to weigh in on key decisions, you should use the ask_user tool.
+
+It's good to use this tool before generating a spec, so you can make the best possible spec for the user's request.
+
+If you don't have any important questions to ask, you can skip this step.
 
 ## Creating a spec
 
@@ -419,28 +429,7 @@ It should not include:
 - A summary of the spec.
 
 This is more like an extremely short PRD which describes the end result of what the user wants. Think of it like fleshing out the user's prompt to make it more precise, although it should be as short as possible.
-
-## Follow-up questions
-
-After closing the <PLAN> tags, the last optional section is Follow-up questions, which has a numbered list of questions and alternate choices demarcated by letters to clarify and improve upon the spec. These questions are optional for to complete for the user.
-
-For example, here is a nice short follow-up question, where the options are helpfully written out for the user, with the answers a) and b) indented with two spaces for readability:
-
-<example>
-## Optional follow-up questions:
-
-1. Do you want to:
-  a) (CURRENT) Keep Express and integrate Bun WebSockets
-  b) Migrate the entire HTTP server to Bun.serve()
-</example>
-
-Try to have as few questions as possible (even none), and focus on the most important decisions or assumptions that it would be helpful to clarify with the user.
-
-You should also let them know what the plan currently does by default by labeling that option with "(CURRENT)", and let them know that they can choose a different option if they want to.
-
-The questions section should be last and there should be no summary or further elaboration. Just end your turn.
-
-On subsequent turns with the user, you should rewrite the spec to reflect the user's choices.`,
+`,
 ).join('\n')}`
 }
 

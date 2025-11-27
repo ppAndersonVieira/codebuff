@@ -15,33 +15,40 @@ import type { ToolSet } from 'ai'
 
 function paramsSection(params: { schema: z.ZodType; endsAgentStep: boolean }) {
   const { schema, endsAgentStep } = params
-  const schemaWithEndsAgentStepParam = z.toJSONSchema(
-    endsAgentStep
-      ? schema.and(
-          z.object({
-            [endsAgentStepParam]: z
-              .literal(endsAgentStep)
-              .describe('Easp flag must be set to true'),
-          }),
-        )
-      : schema,
-    { io: 'input' },
-  )
+  
+  try {
+    const schemaWithEndsAgentStepParam = z.toJSONSchema(
+      endsAgentStep
+        ? schema.and(
+            z.object({
+              [endsAgentStepParam]: z
+                .literal(endsAgentStep)
+                .describe('Easp flag must be set to true'),
+            }),
+          )
+        : schema,
+      { io: 'input' },
+    )
 
-  const jsonSchema = schemaWithEndsAgentStepParam
-  delete jsonSchema.description
-  delete jsonSchema['$schema']
-  const paramsDescription = Object.keys(jsonSchema.properties ?? {}).length
-    ? JSON.stringify(jsonSchema, null, 2)
-    : 'None'
+    const jsonSchema = schemaWithEndsAgentStepParam
+    delete jsonSchema.description
+    delete jsonSchema['$schema']
+    const paramsDescription = Object.keys(jsonSchema.properties ?? {}).length
+      ? JSON.stringify(jsonSchema, null, 2)
+      : 'None'
 
-  let paramsSection = ''
-  if (paramsDescription.length === 1 && paramsDescription[0] === 'None') {
-    paramsSection = 'Params: None'
-  } else if (paramsDescription.length > 0) {
-    paramsSection = `Params: ${paramsDescription}`
+    let paramsSection = ''
+    if (paramsDescription.length === 1 && paramsDescription[0] === 'None') {
+      paramsSection = 'Params: None'
+    } else if (paramsDescription.length > 0) {
+      paramsSection = `Params: ${paramsDescription}`
+    }
+    return paramsSection
+  } catch {
+    // Fall back to 'None' for schemas that can't be converted to JSON Schema
+    // This can happen with MCP tools that have complex schemas (e.g., nested anyOf)
+    return 'Params: None'
   }
-  return paramsSection
 }
 
 // Helper function to build the full tool description markdown

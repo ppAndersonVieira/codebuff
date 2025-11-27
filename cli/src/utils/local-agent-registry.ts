@@ -4,11 +4,13 @@ import path from 'path'
 import { pluralize } from '@codebuff/common/util/string'
 
 import { getProjectRoot } from '../project-files'
+import { clearCodebuffConfigCache, loadCodebuffConfig } from './codebuff-config'
 
 export interface LocalAgentInfo {
   id: string
   displayName: string
   filePath: string
+  isFromConfig?: boolean
 }
 
 const DISPLAY_NAME_REGEX = /displayName\s*:\s*['"`]([^'"`]+)['"`]/i
@@ -205,18 +207,67 @@ export const getLoadedAgentsMessage = (): string | null => {
   return `${header}\n${agentList}`
 }
 
+/**
+ * Parse a store agent ID (e.g., 'codebuff/file-picker@1.0.0') into display info
+ */
+const parseStoreAgentId = (agentId: string): LocalAgentInfo => {
+  // Handle formats like 'codebuff/file-picker@1.0.0' or 'file-picker'
+  let displayName = agentId
+  
+  // Extract name from scoped format: 'org/name@version' -> 'name'
+  if (agentId.includes('/')) {
+    const afterSlash = agentId.split('/')[1] || agentId
+    displayName = afterSlash.split('@')[0] || afterSlash
+  } else {
+    // Simple name, possibly with version
+    displayName = agentId.split('@')[0] || agentId
+  }
+  
+  // Convert kebab-case to Title Case
+  displayName = displayName
+    .split('-')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+  
+  return {
+    id: agentId,
+    displayName,
+    filePath: '',
+    isFromConfig: true,
+  }
+}
+
+/**
+ * Get agents from addedSpawnableAgents in codebuff.json
+ */
+export const getConfiguredAgents = (): LocalAgentInfo[] => {
+  const config = loadCodebuffConfig()
+  const addedAgents = config.addedSpawnableAgents || []
+  
+  return addedAgents.map(parseStoreAgentId)
+}
+
 export const getLoadedAgentsData = (): {
   agents: LocalAgentInfo[]
   agentsDir: string
 } | null => {
-  const agents = loadLocalAgents()
+  const localAgents = loadLocalAgents()
+  const configuredAgents = getConfiguredAgents()
   const agentsDir = findAgentsDirectory()
 
-  if (!agentsDir || !agents.length) {
+  // Combine local agents with configured agents, avoiding duplicates
+  const localIds = new Set(localAgents.map(a => a.id))
+  const uniqueConfiguredAgents = configuredAgents.filter(a => !localIds.has(a.id))
+  const agents = [...localAgents, ...uniqueConfiguredAgents]
+
+  if (!agentsDir && agents.length === 0) {
     return null
   }
 
-  return { agents, agentsDir }
+  return { 
+    agents, 
+    agentsDir: agentsDir || '' 
+  }
 }
 
 /**
@@ -226,4 +277,5 @@ export const getLoadedAgentsData = (): {
 export const __resetLocalAgentRegistryForTests = (): void => {
   cachedAgents = null
   cachedAgentsDir = null
+  clearCodebuffConfigCache()
 }

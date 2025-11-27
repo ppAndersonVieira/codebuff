@@ -1,11 +1,13 @@
 import { MAX_AGENT_STEPS_DEFAULT } from '@codebuff/common/constants/agents'
 import { parseAgentId } from '@codebuff/common/util/agent-id-parsing'
 import { generateCompactId } from '@codebuff/common/util/string'
+import { uniq } from 'lodash'
 
 import { loopAgentSteps } from '../../../run-agent-step'
 import { getAgentTemplate } from '../../../templates/agent-registry'
 
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
+import type { ProjectFileContext } from '@codebuff/common/util/file'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type {
   ParamsExcluding,
@@ -80,6 +82,33 @@ export function getMatchingSpawn(
 }
 
 /**
+ * Apply addedSpawnableAgents and removedSpawnableAgents from codebuff.json to an agent template
+ */
+export function applySpawnableAgentsConfig(
+  agentTemplate: AgentTemplate,
+  fileContext: ProjectFileContext,
+): AgentTemplate {
+  const {
+    addedSpawnableAgents = [],
+    removedSpawnableAgents = [],
+  } = fileContext.codebuffConfig ?? {}
+
+  if (addedSpawnableAgents.length === 0 && removedSpawnableAgents.length === 0) {
+    return agentTemplate
+  }
+
+  const updatedSpawnableAgents = uniq([
+    ...agentTemplate.spawnableAgents,
+    ...addedSpawnableAgents,
+  ]).filter((subagent) => !removedSpawnableAgents.includes(subagent))
+
+  return {
+    ...agentTemplate,
+    spawnableAgents: updatedSpawnableAgents,
+  }
+}
+
+/**
  * Validates agent template and permissions
  */
 export async function validateAndGetAgentTemplate(
@@ -87,11 +116,12 @@ export async function validateAndGetAgentTemplate(
     agentTypeStr: string
     parentAgentTemplate: AgentTemplate
     localAgentTemplates: Record<string, AgentTemplate>
+    fileContext: ProjectFileContext
     logger: Logger
   } & ParamsExcluding<typeof getAgentTemplate, 'agentId'>,
 ): Promise<{ agentTemplate: AgentTemplate; agentType: string }> {
-  const { agentTypeStr, parentAgentTemplate } = params
-  const agentTemplate = await getAgentTemplate({
+  const { agentTypeStr, parentAgentTemplate, fileContext } = params
+  let agentTemplate = await getAgentTemplate({
     ...params,
     agentId: agentTypeStr,
   })
@@ -99,14 +129,21 @@ export async function validateAndGetAgentTemplate(
   if (!agentTemplate) {
     throw new Error(`Agent type ${agentTypeStr} not found.`)
   }
+
+  // Apply addedSpawnableAgents/removedSpawnableAgents from codebuff.json to the child agent
+  agentTemplate = applySpawnableAgentsConfig(agentTemplate, fileContext)
+
   const BASE_AGENTS = ['base', 'base-lite', 'base-max', 'base-experimental']
   // Base agent can spawn any agent
   if (BASE_AGENTS.includes(parentAgentTemplate.id)) {
     return { agentTemplate, agentType: agentTypeStr }
   }
 
+  // Apply addedSpawnableAgents to the parent agent's spawnableAgents for permission check
+  const parentWithConfig = applySpawnableAgentsConfig(parentAgentTemplate, fileContext)
+
   const agentType = getMatchingSpawn(
-    parentAgentTemplate.spawnableAgents,
+    parentWithConfig.spawnableAgents,
     agentTypeStr,
   )
   if (!agentType) {

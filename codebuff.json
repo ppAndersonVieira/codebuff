@@ -90,5 +90,6 @@
     }
   ],
   "maxAgentSteps": 100,
-  "baseAgent": "base"
+  "baseAgent": "base",
+  "addedSpawnableAgents": ["sonarqube-mcp"]
 }

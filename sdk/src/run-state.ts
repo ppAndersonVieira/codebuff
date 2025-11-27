@@ -2,6 +2,7 @@ import * as os from 'os'
 import path from 'path'
 
 import { getFileTokenScores } from '@codebuff/code-map/parse'
+import { loadCodebuffConfig } from '@codebuff/common/json-config/parser'
 import {
   getProjectFileTree,
   getAllFilePaths,
@@ -12,6 +13,7 @@ import { cloneDeep } from 'lodash'
 
 import type { CustomToolDefinition } from './custom-tool'
 import type { AgentDefinition } from '@codebuff/common/templates/initial-agents-dir/types/agent-definition'
+import type { CodebuffConfig } from '@codebuff/common/json-config/constants'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { CodebuffFileSystem } from '@codebuff/common/types/filesystem'
 import type { CodebuffSpawn } from '@codebuff/common/types/spawn'
@@ -37,6 +39,7 @@ export type InitialSessionStateOptions = {
   knowledgeFiles?: Record<string, string>
   agentDefinitions?: AgentDefinition[]
   customToolDefinitions?: CustomToolDefinition[]
+  codebuffConfig?: CodebuffConfig
   maxAgentSteps?: number
   fs?: CodebuffFileSystem
   spawn?: CodebuffSpawn
@@ -323,6 +326,7 @@ export async function initialSessionState(
   let {
     agentDefinitions,
     customToolDefinitions,
+    codebuffConfig,
     projectFiles,
     knowledgeFiles,
     fs,
@@ -386,6 +390,11 @@ export async function initialSessionState(
         lastCommitMessages: '',
       }
 
+  // Load codebuff.json config if not provided and cwd is available
+  if (codebuffConfig === undefined && cwd) {
+    codebuffConfig = loadCodebuffConfig({ projectPath: cwd })
+  }
+
   const initialState = getInitialSessionState({
     projectRoot: cwd ?? process.cwd(),
     cwd: cwd ?? process.cwd(),
@@ -396,6 +405,7 @@ export async function initialSessionState(
     userKnowledgeFiles: {},
     agentTemplates: processedAgentTemplates,
     customToolDefinitions: processedCustomToolDefinitions,
+    codebuffConfig,
     gitChanges,
     changesSinceLastChat: {},
     shellConfigFiles: {},
@@ -495,6 +505,7 @@ export async function applyOverridesToSessionState(
     knowledgeFiles?: Record<string, string>
     agentDefinitions?: AgentDefinition[]
     customToolDefinitions?: CustomToolDefinition[]
+    codebuffConfig?: CodebuffConfig
     maxAgentSteps?: number
   },
 ): Promise<SessionState> {
@@ -556,6 +567,13 @@ export async function applyOverridesToSessionState(
       ...sessionState.fileContext.customToolDefinitions,
       ...processedCustomToolDefinitions,
     }
+  }
+
+  // Apply codebuffConfig override, or load from disk if not in session state
+  if (overrides.codebuffConfig !== undefined) {
+    sessionState.fileContext.codebuffConfig = overrides.codebuffConfig
+  } else if (sessionState.fileContext.codebuffConfig === undefined && cwd) {
+    sessionState.fileContext.codebuffConfig = loadCodebuffConfig({ projectPath: cwd })
   }
 
   return sessionState

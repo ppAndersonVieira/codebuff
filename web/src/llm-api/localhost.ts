@@ -23,7 +23,7 @@ const MODEL_MAPPING: Record<string, string> = {
   'gemini-2.5-flash': 'claude-haiku-4.5',
   'grok-4-fast': 'gclaude-haiku-4.5',
   'gemini-2.0-flash-001': 'claude-haiku-4.5',
-  'gpt-5.1':'gemini-3-pro-preview'
+  'gpt-5.1':'gpt-5'
 }
 
 /**

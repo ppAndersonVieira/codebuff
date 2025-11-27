@@ -6,7 +6,7 @@ import {
   getCancelledAdditionalMessages,
 } from '@codebuff/agent-runtime/util/messages'
 import { MAX_AGENT_STEPS_DEFAULT } from '@codebuff/common/constants/agents'
-import { getMCPClient, listMCPTools } from '@codebuff/common/mcp/client'
+import { callMCPTool, getMCPClient, listMCPTools } from '@codebuff/common/mcp/client'
 import { toOptionalFile } from '@codebuff/common/old-constants'
 import { toolNames } from '@codebuff/common/tools/constants'
 import { clientToolCallSchema } from '@codebuff/common/tools/list'
@@ -43,6 +43,7 @@ import type { CustomToolDefinition } from './custom-tool'
 import type { RunState } from './run-state'
 import type { WebSocketHandler } from './websocket-client'
 import type { ServerAction } from '@codebuff/common/actions'
+import type { CodebuffConfig } from '@codebuff/common/json-config/constants'
 import type { AgentDefinition } from '@codebuff/common/templates/initial-agents-dir/types/agent-definition'
 import type {
   PublishedToolName,
@@ -88,6 +89,7 @@ export type CodebuffClientOptions = {
   projectFiles?: Record<string, string>
   knowledgeFiles?: Record<string, string>
   agentDefinitions?: AgentDefinition[]
+  codebuffConfig?: CodebuffConfig
   maxAgentSteps?: number
   env?: Record<string, string>
 
@@ -489,6 +491,7 @@ export async function runOnce({
   projectFiles,
   knowledgeFiles,
   agentDefinitions,
+  codebuffConfig,
   maxAgentSteps = MAX_AGENT_STEPS_DEFAULT,
   env,
 
@@ -535,6 +538,7 @@ export async function runOnce({
         knowledgeFiles,
         agentDefinitions,
         customToolDefinitions,
+        codebuffConfig,
         projectFiles,
         maxAgentSteps,
       },
@@ -546,6 +550,7 @@ export async function runOnce({
       knowledgeFiles,
       agentDefinitions,
       customToolDefinitions,
+      codebuffConfig,
       projectFiles,
       maxAgentSteps,
       fs,
@@ -909,6 +914,18 @@ async function handleToolCall({
 }): ReturnType<WebSocketHandler['handleToolCall']> {
   const toolName = action.toolName
   const input = action.input
+
+  // Handle MCP tool calls first
+  if (action.mcpConfig) {
+    const mcpClientId = await getMCPClient(action.mcpConfig)
+    const mcpResult = await callMCPTool(mcpClientId, {
+      name: toolName,
+      arguments: input,
+    })
+    return {
+      output: mcpResult,
+    }
+  }
 
   let result: ToolResultOutput[]
   if (toolNames.includes(toolName as ToolName)) {

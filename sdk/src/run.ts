@@ -150,6 +150,7 @@ export type RunOptions = {
   signal?: AbortSignal
   abortController?: AbortController
   retry?: boolean | RetryOptions
+  modelOverride?: string
 }
 
 type NormalizedRetryOptions = {
@@ -482,6 +483,7 @@ export async function runOnce({
   previousRun,
   extraToolResults,
   signal,
+  modelOverride,
 }: RunOnceOptions): Promise<RunState> {
   const fs = await (typeof fsSource === 'function' ? fsSource() : fsSource)
   const spawn: CodebuffSpawn = (
@@ -793,6 +795,7 @@ export async function runOnce({
       toolResults: extraToolResults ?? [],
       agentId,
     },
+    modelOverride,
     repoUrl: undefined,
     repoId: undefined,
     clientSessionId: promptId,

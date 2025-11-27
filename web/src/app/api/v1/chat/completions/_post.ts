@@ -1,18 +1,15 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
-import { BYOK_OPENROUTER_HEADER } from '@codebuff/common/constants/byok'
+
 import { getErrorObject } from '@codebuff/common/util/error'
 import { pluralize } from '@codebuff/common/util/string'
 import { env } from '@codebuff/internal/env'
 import { NextResponse } from 'next/server'
 
+
 import {
-  handleOpenAINonStream,
-  OPENAI_SUPPORTED_MODELS,
-} from '@/llm-api/openai'
-import {
-  handleOpenRouterNonStream,
-  handleOpenRouterStream,
-} from '@/llm-api/openrouter'
+  handleLocalhostNonStream,
+  handleLocalhostStream,
+} from '@/llm-api/localhost'
 import { extractApiKeyFromHeader } from '@/util/auth'
 
 import type { TrackEventFn } from '@codebuff/common/types/contracts/analytics'
@@ -243,17 +240,14 @@ export async function postChatCompletions(params: {
       )
     }
 
-    const openrouterApiKey = req.headers.get(BYOK_OPENROUTER_HEADER)
-
-    // Handle streaming vs non-streaming
+    // Handle streaming vs non-streaming using localhost:4141
     try {
       if (bodyStream) {
         // Streaming request
-        const stream = await handleOpenRouterStream({
+        const stream = await handleLocalhostStream({
           body,
           userId,
           agentId,
-          openrouterApiKey,
           fetch,
           logger,
           insertMessageBigquery,
@@ -278,37 +272,15 @@ export async function postChatCompletions(params: {
           },
         })
       } else {
-        // Non-streaming request
-        const model = (body as any)?.model
-        const shortModelName =
-          typeof model === 'string' ? model.split('/')[1] : undefined
-        const isOpenAIDirectModel =
-          typeof model === 'string' &&
-          model.startsWith('openai/') &&
-          OPENAI_SUPPORTED_MODELS.includes(shortModelName as any)
-        // Only use OpenAI endpoint for OpenAI models with n parameter
-        // All other models (including non-OpenAI with n parameter) should use OpenRouter
-        const shouldUseOpenAIEndpoint =
-          isOpenAIDirectModel && (body as any)?.codebuff_metadata?.n
-
-        const result = await (shouldUseOpenAIEndpoint
-          ? handleOpenAINonStream({
-              body,
-              userId,
-              agentId,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            })
-          : handleOpenRouterNonStream({
-              body,
-              userId,
-              agentId,
-              openrouterApiKey,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            }))
+        // Non-streaming request - use localhost:4141
+        const result = await handleLocalhostNonStream({
+          body,
+          userId,
+          agentId,
+          fetch,
+          logger,
+          insertMessageBigquery,
+        })
 
         trackEvent({
           event: AnalyticsEvent.CHAT_COMPLETIONS_GENERATION_STARTED,
@@ -326,7 +298,7 @@ export async function postChatCompletions(params: {
     } catch (error) {
       logger.error(
         { error: getErrorObject(error), body },
-        'Error with OpenRouter request',
+        'Error with localhost request',
       )
       trackEvent({
         event: AnalyticsEvent.CHAT_COMPLETIONS_ERROR,

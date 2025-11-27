@@ -210,6 +210,7 @@ interface UseSendMessageOptions {
   setCanProcessQueue: (can: boolean) => void
   abortControllerRef: React.MutableRefObject<AbortController | null>
   agentId?: string
+  modelOverride?: string
   onBeforeMessageSend: () => Promise<{
     success: boolean
     errors: Array<{ id: string; message: string }>
@@ -247,6 +248,7 @@ export const useSendMessage = ({
   setCanProcessQueue,
   abortControllerRef,
   agentId,
+  modelOverride,
   onBeforeMessageSend,
   mainAgentTimer,
   scrollToLatest,
@@ -943,6 +945,7 @@ export const useSendMessage = ({
             prompt: content,
             previousRun: previousRunStateRef.current ?? undefined,
             abortController,
+            modelOverride,
             retry: {
               maxRetries: MAX_RETRIES_PER_MESSAGE,
               backoffBaseMs: RETRY_BACKOFF_BASE_DELAY_MS,
@@ -1966,6 +1969,8 @@ export const useSendMessage = ({
       addSessionCredits,
       resumeQueue,
       setIsRetrying,
+      agentId,
+      modelOverride,
     ],
   )
 

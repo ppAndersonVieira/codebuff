@@ -28,6 +28,7 @@ import type { FileTreeNode } from '@codebuff/common/util/file'
 interface AppProps {
   initialPrompt: string | null
   agentId?: string
+  modelOverride?: string
   requireAuth: boolean | null
   hasInvalidCredentials: boolean
   loadedAgentsData: {
@@ -43,6 +44,7 @@ interface AppProps {
 export const App = ({
   initialPrompt,
   agentId,
+  modelOverride,
   requireAuth,
   hasInvalidCredentials,
   loadedAgentsData,
@@ -245,6 +247,7 @@ export const App = ({
       headerContent={headerContent}
       initialPrompt={initialPrompt}
       agentId={agentId}
+      modelOverride={modelOverride}
       loadedAgentsData={loadedAgentsData}
       validationErrors={validationErrors}
       fileTree={fileTree}

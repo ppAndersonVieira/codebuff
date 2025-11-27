@@ -67,6 +67,7 @@ export const Chat = ({
   headerContent,
   initialPrompt,
   agentId,
+  modelOverride,
   loadedAgentsData,
   validationErrors,
   fileTree,
@@ -81,6 +82,7 @@ export const Chat = ({
   headerContent: React.ReactNode
   initialPrompt: string | null
   agentId?: string
+  modelOverride?: string
   loadedAgentsData: {
     agents: Array<{ id: string; displayName: string }>
     agentsDir: string
@@ -591,6 +593,7 @@ export const Chat = ({
     setCanProcessQueue,
     abortControllerRef,
     agentId,
+    modelOverride,
     onBeforeMessageSend: validateAgents,
     mainAgentTimer,
     scrollToLatest,

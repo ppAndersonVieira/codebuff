@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "codebuff-project",
@@ -150,6 +151,7 @@
         "@codebuff/common": "workspace:*",
         "@codebuff/internal": "workspace:*",
         "@codebuff/npm-app": "workspace:*",
+        "@codebuff/sdk": "workspace:*",
         "@oclif/core": "^4.4.0",
         "@oclif/parser": "^3.8.17",
         "async": "^3.2.6",

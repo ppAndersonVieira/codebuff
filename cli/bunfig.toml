@@ -1,0 +1,3 @@
+# Force production JSX runtime for builds
+[build]
+define = { "process.env.NODE_ENV" = '"production"' }

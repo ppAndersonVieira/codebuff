@@ -80,6 +80,7 @@ function createQueryClient(): QueryClient {
 type ParsedArgs = {
   initialPrompt: string | null
   agent?: string
+  model?: string
   clearLogs: boolean
   continue: boolean
   continueId?: string | null
@@ -96,6 +97,10 @@ function parseArgs(): ParsedArgs {
     .option(
       '--agent <agent-id>',
       'Specify which agent to use (e.g., "base", "ask", "file-picker")',
+    )
+    .option(
+      '--model <model>',
+      'Override the model for all agents (e.g., "sonnet-3.7", "gpt-4.1", "gemini-2.5-pro")',
     )
     .option('--clear-logs', 'Remove any existing CLI log files before starting')
     .option(
@@ -119,6 +124,7 @@ function parseArgs(): ParsedArgs {
   return {
     initialPrompt: args.length > 0 ? args.join(' ') : null,
     agent: options.agent,
+    model: options.model,
     clearLogs: options.clearLogs || false,
     continue: Boolean(continueFlag),
     continueId:
@@ -133,6 +139,7 @@ async function main(): Promise<void> {
   const {
     initialPrompt,
     agent,
+    model,
     clearLogs,
     continue: continueChat,
     continueId,
@@ -222,6 +229,7 @@ async function main(): Promise<void> {
       <App
         initialPrompt={initialPrompt}
         agentId={agent}
+        modelOverride={model}
         requireAuth={requireAuth}
         hasInvalidCredentials={hasInvalidCredentials}
         loadedAgentsData={loadedAgentsData}

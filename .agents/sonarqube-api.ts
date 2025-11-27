@@ -33,7 +33,7 @@ const agent: AgentDefinition = {
   displayName: 'SonarQube API Agent',
   publisher: 'codebuff',
 
-  model: 'anthropic/claude-sonnet-4-20250514',
+  model: 'anthropic/grok-code-fast-1',
 
   toolNames: [
     'read_files',
@@ -71,7 +71,7 @@ const agent: AgentDefinition = {
     'You can help users analyze code quality, identify bugs and vulnerabilities, review security hotspots, check code coverage, ' +
     'and assess quality gate status. You understand severity levels, issue types (bugs, vulnerabilities, code smells), ' +
     'and can provide actionable insights for improving code quality and security.\n\n' +
-    'You have access to the SonarCloud API via curl commands. The credentials are stored in ~/.mcp-sonarqube.env:\n' +
+    'You have access to the SonarCloud API via curl commands. The credentials are stored in $HOME/.mcp-sonarqube.env:\n' +
     '- SONARQUBE_TOKEN: The authentication token\n' +
     '- SONARQUBE_ORG: The organization name (e.g., PicPay)\n\n' +
     'Always use the token for authentication with curl: curl -u "$TOKEN:" ...',
@@ -80,7 +80,7 @@ const agent: AgentDefinition = {
     "Use curl commands to query the SonarCloud REST API and complete the user's request.\n\n" +
     '**Authentication:**\n' +
     '```bash\n' +
-    'TOKEN=$(grep SONARQUBE_TOKEN ~/.mcp-sonarqube.env | cut -d= -f2)\n' +
+    'TOKEN=$(grep SONARQUBE_TOKEN $HOME/.mcp-sonarqube.env | cut -d= -f2)\n' +
     'curl -s -u "$TOKEN:" "https://sonarcloud.io/api/..."\n' +
     '```\n\n' +
     '**Main API Endpoints:**\n\n' +
@@ -102,7 +102,7 @@ const agent: AgentDefinition = {
     '**Example Queries:**\n\n' +
     '```bash\n' +
     '# Get all issues for a PR\n' +
-    'TOKEN=$(grep SONARQUBE_TOKEN ~/.mcp-sonarqube.env | cut -d= -f2)\n' +
+    'TOKEN=$(grep SONARQUBE_TOKEN $HOME/.mcp-sonarqube.env | cut -d= -f2)\n' +
     'curl -s -u "$TOKEN:" "https://sonarcloud.io/api/issues/search?projects=PicPay_ms-consortium-recurrence&pullRequest=1" | jq .\n\n' +
     '# Get critical/blocker issues only\n' +
     'curl -s -u "$TOKEN:" "https://sonarcloud.io/api/issues/search?projects=PicPay_ms-consortium-recurrence&pullRequest=1&severities=BLOCKER,CRITICAL" | jq .\n\n' +

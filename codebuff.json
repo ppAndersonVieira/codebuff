@@ -91,5 +91,5 @@
   ],
   "maxAgentSteps": 100,
   "baseAgent": "base",
-  "addedSpawnableAgents": ["sonarqube-mcp"]
+  "addedSpawnableAgents": ["sonarqube-api", "atlassian-mcp"]
 }

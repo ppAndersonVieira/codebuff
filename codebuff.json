@@ -90,5 +90,5 @@
     }
   ],
   "maxAgentSteps": 100,
-  "baseAgent": "base2-opus"
+  "baseAgent": "base"
 }

@@ -117,7 +117,7 @@ describe('context-pruner handleSteps', () => {
   })
 
   test('removes old terminal command results while keeping recent 5', () => {
-    // Create content large enough to exceed 200k token limit (~600k chars)
+    // Create content large enough to exceed 128k token limit (~384k chars)
     const largeContent = 'x'.repeat(150000)
 
     const messages = [
@@ -163,7 +163,7 @@ describe('context-pruner handleSteps', () => {
   })
 
   test('removes large tool results', () => {
-    // Create content large enough to exceed 200k token limit (~600k chars) to trigger terminal pass
+    // Create content large enough to exceed 128k token limit (~384k chars) to trigger terminal pass
     const largeContent = 'z'.repeat(150000)
     const largeToolData = 'x'.repeat(2000) // > 1000 chars when stringified
 
@@ -198,8 +198,8 @@ describe('context-pruner handleSteps', () => {
   })
 
   test('performs message-level pruning when other passes are insufficient', () => {
-    // Create many large messages to exceed token limit
-    const largeContent = 'z'.repeat(50000)
+    // Create many large messages to exceed 128k token limit
+    const largeContent = 'z'.repeat(30000)
 
     const messages = Array.from({ length: 20 }, (_, i) =>
       createMessage(
@@ -219,14 +219,16 @@ describe('context-pruner handleSteps', () => {
     // Should contain replacement messages
     const hasReplacementMessage = resultMessages.some(
       (m: any) =>
-        typeof m.content === 'string' &&
-        m.content.includes('Previous message(s) omitted due to length'),
+        m.role === 'user' &&
+        Array.isArray(m.content) &&
+        m.content.some((c: any) => c.type === 'text' && c.text?.includes('Previous message(s) omitted due to length')),
     )
     expect(hasReplacementMessage).toBe(true)
   })
 
   test('preserves messages with keepDuringTruncation flag', () => {
-    const largeContent = 'w'.repeat(50000)
+    // Large enough to trigger pruning with 128k limit
+    const largeContent = 'w'.repeat(100000)
 
     const messages = [
       createMessage('user', `Message 1: ${largeContent}`),
@@ -245,8 +247,9 @@ describe('context-pruner handleSteps', () => {
     // Important message should be preserved
     const importantMessage = resultMessages.find(
       (m: any) =>
-        typeof m.content === 'string' &&
-        m.content.includes('Important message'),
+        m.role === 'assistant' &&
+        Array.isArray(m.content) &&
+        m.content.some((c: any) => c.type === 'text' && c.text?.includes('Important message')),
     )
     expect(importantMessage).toBeDefined()
   })
@@ -365,9 +368,9 @@ describe('context-pruner edge cases', () => {
   })
 
   test('handles exact token limit boundary', () => {
-    // Create content that when stringified is close to the 200k token limit
-    // 200k tokens ≈ 600k characters (rough approximation used in code)
-    const boundaryContent = 'x'.repeat(599000)
+    // Create content that when stringified is close to the 128k token limit
+    // 128k tokens ≈ 384k characters (rough approximation used in code)
+    const boundaryContent = 'x'.repeat(383000)
 
     const messages = [createMessage('user', boundaryContent)]
 
@@ -430,7 +433,7 @@ describe('context-pruner edge cases', () => {
   })
 
   test('handles tool results with various sizes around 1000 char threshold', () => {
-    // Create content large enough to exceed 200k token limit to trigger pruning
+    // Create content large enough to exceed 128k token limit to trigger pruning
     const largeContent = 'x'.repeat(150000)
 
     const createToolMessage = (

@@ -34,7 +34,7 @@ const definition: AgentDefinition = {
       return Math.ceil(JSON.stringify(obj).length / 3)
     }
 
-    const maxMessageTokens: number = params?.maxContextLength ?? 200_000
+    const maxMessageTokens: number = params?.maxContextLength ?? 128_000
     const numTerminalCommandsToKeep = 5
 
     let currentMessages = [...messages]

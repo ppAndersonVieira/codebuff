@@ -26,6 +26,7 @@ import {
 import type { ErrorCode } from './errors'
 import { getErrorObject } from '@codebuff/common/util/error'
 import { initialSessionState, applyOverridesToSessionState } from './run-state'
+import type { RunState } from './run-state'
 import {
   MAX_RETRIES_PER_MESSAGE,
   RETRY_BACKOFF_BASE_DELAY_MS,
@@ -40,7 +41,6 @@ import { getFiles } from './tools/read-files'
 import { runTerminalCommand } from './tools/run-terminal-command'
 
 import type { CustomToolDefinition } from './custom-tool'
-import type { RunState } from './run-state'
 import type { WebSocketHandler } from './websocket-client'
 import type { ServerAction } from '@codebuff/common/actions'
 import type { CodebuffConfig } from '@codebuff/common/json-config/constants'
@@ -167,6 +167,20 @@ export type RetryOptions = {
     error: unknown
     errorCode?: ErrorCode
   }) => void | Promise<void>
+  /**
+   * Optional callback invoked when a TOKEN_LIMIT_EXCEEDED error is detected.
+   * This allows the caller to modify the previousRun state (e.g., by calling
+   * context-pruner) before the next retry attempt.
+   * 
+   * Return an updated RunState to use for the next attempt, or undefined/null
+   * to proceed with the original state.
+   */
+  onTokenLimitExceeded?: (params: {
+    attempt: number
+    error: unknown
+    previousRun: RunState | null
+    tokenLimit?: number
+  }) => Promise<RunState | null | undefined> | RunState | null | undefined
 }
 
 export type RunOptions = {
@@ -198,6 +212,12 @@ type NormalizedRetryOptions = {
     error: unknown
     errorCode?: ErrorCode
   }) => void | Promise<void>
+  onTokenLimitExceeded?: (params: {
+    attempt: number
+    error: unknown
+    previousRun: RunState | null
+    tokenLimit?: number
+  }) => Promise<RunState | null | undefined> | RunState | null | undefined
 }
 
 const defaultRetryOptions: NormalizedRetryOptions = {
@@ -240,7 +260,26 @@ const normalizeRetryOptions = (
       retry.retryableErrorCodes ?? defaultRetryOptions.retryableErrorCodes,
     onRetry: retry.onRetry,
     onRetryExhausted: retry.onRetryExhausted,
+    onTokenLimitExceeded: retry.onTokenLimitExceeded,
   }
+}
+
+/**
+ * Extracts token limit from error message if present.
+ * E.g., "prompt token count of 154893 exceeds the limit of 128000" -> 128000
+ */
+const extractTokenLimitFromError = (errorMessage: string): number | undefined => {
+  // Try to match patterns like "limit of 128000" or "limit: 128000"
+  const limitMatch = errorMessage.match(/limit\s*(?:of|:)?\s*(\d+)/i)
+  if (limitMatch) {
+    return parseInt(limitMatch[1], 10)
+  }
+  // Try to match patterns like "maximum context length is 128000"
+  const contextMatch = errorMessage.match(/(?:context|token)\s*length\s*(?:is|of)?\s*(\d+)/i)
+  if (contextMatch) {
+    return parseInt(contextMatch[1], 10)
+  }
+  return undefined
 }
 
 const shouldRetry = (
@@ -299,6 +338,9 @@ export async function run(options: RunExecutionOptions): Promise<RunState> {
     abortController ?? (rest.signal ? undefined : new AbortController())
   const signal = rest.signal ?? sharedController?.signal
 
+  // Track mutable previousRun that can be modified by onTokenLimitExceeded
+  let currentPreviousRun = rest.previousRun ?? null
+
   let attemptIndex = 0
   while (true) {
     if (signal?.aborted) {
@@ -316,6 +358,7 @@ export async function run(options: RunExecutionOptions): Promise<RunState> {
     try {
       const result = await runOnce({
         ...rest,
+        previousRun: currentPreviousRun ?? rest.previousRun,
         signal,
       })
 
@@ -346,6 +389,26 @@ export async function run(options: RunExecutionOptions): Promise<RunState> {
               },
               'SDK retrying after error',
             )
+          }
+
+          // Handle TOKEN_LIMIT_EXCEEDED specially - allow caller to modify state
+          if (retryableCode === ErrorCodes.TOKEN_LIMIT_EXCEEDED && retryOptions.onTokenLimitExceeded) {
+            const tokenLimit = extractTokenLimitFromError(result.output.message)
+            const modifiedState = await retryOptions.onTokenLimitExceeded({
+              attempt: attemptIndex + 1,
+              error: new Error(result.output.message),
+              previousRun: currentPreviousRun,
+              tokenLimit,
+            })
+            if (modifiedState) {
+              currentPreviousRun = modifiedState
+              if (rest.logger) {
+                rest.logger.info(
+                  { attempt: attemptIndex + 1, tokenLimit },
+                  'onTokenLimitExceeded modified previousRun state',
+                )
+              }
+            }
           }
 
           await retryOptions.onRetry?.({
@@ -468,6 +531,30 @@ export async function run(options: RunExecutionOptions): Promise<RunState> {
           },
           'SDK retrying after unexpected exception',
         )
+      }
+
+      // Handle TOKEN_LIMIT_EXCEEDED specially - allow caller to modify state
+      if (retryableCode === ErrorCodes.TOKEN_LIMIT_EXCEEDED && retryOptions.onTokenLimitExceeded) {
+        const tokenLimit = extractTokenLimitFromError(errorMessage)
+        const errorRunState: RunState = {
+          sessionState: rest.previousRun?.sessionState,
+          output: { type: 'error', message: errorMessage },
+        }
+        const modifiedState = await retryOptions.onTokenLimitExceeded({
+          attempt: attemptIndex + 1,
+          error: error instanceof Error ? error : new Error(errorMessage),
+          previousRun: currentPreviousRun ?? errorRunState,
+          tokenLimit,
+        })
+        if (modifiedState) {
+          currentPreviousRun = modifiedState
+          if (rest.logger) {
+            rest.logger.info(
+              { attempt: attemptIndex + 1, tokenLimit },
+              'onTokenLimitExceeded modified previousRun state (exception path)',
+            )
+          }
+        }
       }
 
       await retryOptions.onRetry?.({
@@ -1082,6 +1169,16 @@ export const getRetryableErrorCode = (
     lowerMessage.includes('fetch failed')
   ) {
     return ErrorCodes.NETWORK_ERROR
+  }
+
+  // Token limit exceeded errors (e.g., from copilot-api or OpenAI)
+  if (
+    lowerMessage.includes('model_max_prompt_tokens_exceeded') ||
+    (lowerMessage.includes('prompt token count') && lowerMessage.includes('exceeds the limit')) ||
+    lowerMessage.includes('maximum context length') ||
+    lowerMessage.includes('context_length_exceeded')
+  ) {
+    return ErrorCodes.TOKEN_LIMIT_EXCEEDED
   }
 
   return null

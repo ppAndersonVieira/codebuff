@@ -1013,6 +1013,44 @@ export const useSendMessage = ({
                   '❌ SDK exhausted all retries',
                 )
               },
+              onTokenLimitExceeded: async ({ attempt, previousRun, tokenLimit }) => {
+                logger.warn(
+                  { attempt, tokenLimit },
+                  '🔧 Token limit exceeded, calling context-pruner',
+                )
+                
+                if (!previousRun) {
+                  return undefined
+                }
+
+                // Call context-pruner to reduce the context size
+                // Use a smaller limit than the model's max to leave room for response
+                const targetLimit = tokenLimit ? Math.floor(tokenLimit * 0.75) : 100_000
+                
+                try {
+                  const prunerResult = await client.run({
+                    logger,
+                    agent: 'context-pruner',
+                    prompt: '',
+                    params: { maxContextLength: targetLimit },
+                    previousRun,
+                    modelOverride,
+                  })
+                  
+                  logger.info(
+                    { targetLimit },
+                    '✅ Context-pruner completed, retrying with reduced context',
+                  )
+                  
+                  return prunerResult
+                } catch (prunerError) {
+                  logger.error(
+                    { error: prunerError },
+                    '❌ Context-pruner failed, proceeding with original state',
+                  )
+                  return undefined
+                }
+              },
             },
             agentDefinitions: agentDefinitions,
             maxAgentSteps: 40,

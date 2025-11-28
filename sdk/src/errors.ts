@@ -50,6 +50,9 @@ export const ErrorCodes = {
   BAD_REQUEST: 'BAD_REQUEST',
   NOT_FOUND: 'NOT_FOUND',
 
+  // Token/Context errors
+  TOKEN_LIMIT_EXCEEDED: 'TOKEN_LIMIT_EXCEEDED',
+
   // Other errors
   UNKNOWN_ERROR: 'UNKNOWN_ERROR',
 } as const
@@ -66,6 +69,7 @@ export const RETRYABLE_ERROR_CODES = new Set<ErrorCode>([
   ErrorCodes.DNS_FAILURE,
   ErrorCodes.SERVER_ERROR,
   ErrorCodes.SERVICE_UNAVAILABLE,
+  ErrorCodes.TOKEN_LIMIT_EXCEEDED,
 ])
 
 /**

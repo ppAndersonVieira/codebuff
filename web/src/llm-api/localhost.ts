@@ -98,11 +98,32 @@ export async function handleLocalhostNonStream({
 
   if (!response.ok) {
     const errorText = await response.text()
+    
+    // Try to parse the error as JSON to extract the error code/message
+    // The SDK's getRetryableErrorCode checks for 'model_max_prompt_tokens_exceeded' and
+    // 'prompt token count ... exceeds the limit' in the error message
+    let errorMessage = `Localhost API error: ${response.statusText}`
+    try {
+      const errorJson = JSON.parse(errorText)
+      if (errorJson.error?.message) {
+        errorMessage = errorJson.error.message
+        if (errorJson.error.code) {
+          errorMessage = `${errorMessage} (code: ${errorJson.error.code})`
+        }
+      } else if (errorText) {
+        errorMessage = `Localhost API error: ${response.statusText} - ${errorText}`
+      }
+    } catch {
+      if (errorText) {
+        errorMessage = `Localhost API error: ${response.statusText} - ${errorText}`
+      }
+    }
+
     logger.error(
-      { status: response.status, statusText: response.statusText, errorText },
+      { status: response.status, statusText: response.statusText, errorMessage },
       'Localhost API error',
     )
-    throw new Error(`Localhost API error: ${response.statusText} - ${errorText}`)
+    throw new Error(errorMessage)
   }
 
   const data = await response.json()
@@ -166,11 +187,32 @@ export async function handleLocalhostStream({
 
   if (!response.ok) {
     const errorText = await response.text()
+    
+    // Try to parse the error as JSON to extract the error code/message
+    // The SDK's getRetryableErrorCode checks for 'model_max_prompt_tokens_exceeded' and
+    // 'prompt token count ... exceeds the limit' in the error message
+    let errorMessage = `Localhost API error: ${response.statusText}`
+    try {
+      const errorJson = JSON.parse(errorText)
+      if (errorJson.error?.message) {
+        errorMessage = errorJson.error.message
+        if (errorJson.error.code) {
+          errorMessage = `${errorMessage} (code: ${errorJson.error.code})`
+        }
+      } else if (errorText) {
+        errorMessage = `Localhost API error: ${response.statusText} - ${errorText}`
+      }
+    } catch {
+      if (errorText) {
+        errorMessage = `Localhost API error: ${response.statusText} - ${errorText}`
+      }
+    }
+
     logger.error(
-      { status: response.status, statusText: response.statusText, errorText },
+      { status: response.status, statusText: response.statusText, errorMessage },
       'Localhost API error',
     )
-    throw new Error(`Localhost API error: ${response.statusText} - ${errorText}`)
+    throw new Error(errorMessage)
   }
 
   const reader = response.body?.getReader()

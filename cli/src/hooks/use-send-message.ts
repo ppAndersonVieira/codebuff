@@ -1019,7 +1019,7 @@ export const useSendMessage = ({
                   '🔧 Token limit exceeded, calling context-pruner',
                 )
                 
-                if (!previousRun) {
+                if (!previousRun?.sessionState) {
                   return undefined
                 }
 
@@ -1037,12 +1037,42 @@ export const useSendMessage = ({
                     modelOverride,
                   })
                   
-                  logger.info(
-                    { targetLimit },
-                    '✅ Context-pruner completed, retrying with reduced context',
-                  )
+                  // The context-pruner modifies the messageHistory via set_messages tool.
+                  // The pruned messages are in prunerResult.sessionState.mainAgentState.messageHistory.
+                  // We need to apply these pruned messages back to the original previousRun state.
+                  if (prunerResult.sessionState?.mainAgentState?.messageHistory) {
+                    const prunedMessages = prunerResult.sessionState.mainAgentState.messageHistory
+                    const originalMessageCount = previousRun.sessionState.mainAgentState.messageHistory.length
+                    const prunedMessageCount = prunedMessages.length
+                    
+                    logger.info(
+                      { 
+                        targetLimit,
+                        originalMessageCount,
+                        prunedMessageCount,
+                        messagesRemoved: originalMessageCount - prunedMessageCount,
+                      },
+                      '✅ Context-pruner completed, retrying with reduced context',
+                    )
+                    
+                    // Return the original previousRun with the pruned message history
+                    return {
+                      ...previousRun,
+                      sessionState: {
+                        ...previousRun.sessionState,
+                        mainAgentState: {
+                          ...previousRun.sessionState.mainAgentState,
+                          messageHistory: prunedMessages,
+                        },
+                      },
+                    }
+                  }
                   
-                  return prunerResult
+                  logger.warn(
+                    { targetLimit },
+                    '⚠️ Context-pruner completed but no pruned messages found',
+                  )
+                  return undefined
                 } catch (prunerError) {
                   logger.error(
                     { error: prunerError },

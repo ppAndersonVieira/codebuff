@@ -296,6 +296,7 @@ export async function postChatCompletions(params: {
         return NextResponse.json(result)
       }
     } catch (error) {
+      
       logger.error(
         { error: getErrorObject(error), body },
         'Error with localhost request',
@@ -311,6 +312,8 @@ export async function postChatCompletions(params: {
         },
         logger,
       })
+
+
       return NextResponse.json(
         { error: 'Failed to process request' },
         { status: 500 },

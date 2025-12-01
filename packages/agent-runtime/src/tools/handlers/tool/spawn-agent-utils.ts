@@ -5,6 +5,7 @@ import { uniq } from 'lodash'
 
 import { loopAgentSteps } from '../../../run-agent-step'
 import { getAgentTemplate } from '../../../templates/agent-registry'
+import { filterUnfinishedToolCalls } from '../../../util/messages'
 
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
@@ -13,6 +14,7 @@ import type {
   ParamsExcluding,
   OptionalFields,
 } from '@codebuff/common/types/function-params'
+import type { ToolSet } from 'ai'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
 import type {
   AgentState,
@@ -168,7 +170,7 @@ export function validateAgentInput(
 
   // Validate prompt requirement
   if (inputSchema.prompt) {
-    const result = inputSchema.prompt.safeParse(prompt)
+    const result = inputSchema.prompt.safeParse(prompt ?? '')
     if (!result.success) {
       throw new Error(
         `Invalid prompt for agent ${agentType}: ${JSON.stringify(result.error.issues, null, 2)}`,
@@ -198,8 +200,11 @@ export function createAgentState(
 ): AgentState {
   const agentId = generateCompactId()
 
+  // When including message history, filter out any tool calls that don't have
+  // corresponding tool responses. This prevents the spawned agent from seeing
+  // unfinished tool calls which throw errors in the Anthropic API.
   const messageHistory = agentTemplate.includeMessageHistory
-    ? parentAgentState.messageHistory
+    ? filterUnfinishedToolCalls(parentAgentState.messageHistory)
     : []
 
   return {
@@ -264,6 +269,7 @@ export async function executeSubagent(
     {
       agentTemplate: AgentTemplate
       parentAgentState: AgentState
+      parentTools?: ToolSet
       onResponseChunk: (chunk: string | PrintModeEvent) => void
       isOnlyChild?: boolean
       ancestorRunIds: string[]

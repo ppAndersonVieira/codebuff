@@ -279,8 +279,9 @@ ${toolDescriptions.join('\n\n')}
 export async function getToolSet(params: {
   toolNames: string[]
   additionalToolDefinitions: () => Promise<CustomToolDefinitions>
+  agentTools: ToolSet
 }): Promise<ToolSet> {
-  const { toolNames, additionalToolDefinitions } = params
+  const { toolNames, additionalToolDefinitions, agentTools } = params
 
   const toolSet: ToolSet = {}
   for (const toolName of toolNames) {
@@ -294,6 +295,11 @@ export async function getToolSet(params: {
     toolSet[toolName] = cloneDeep(toolDefinition) satisfies {
       inputSchema: { _zod: { input: any } }
     } as Omit<typeof toolDefinition, 'inputSchema'> & { inputSchema: z.ZodType }
+  }
+
+  // Add agent tools (agents as direct tool calls)
+  for (const [toolName, toolDefinition] of Object.entries(agentTools)) {
+    toolSet[toolName] = toolDefinition
   }
 
   return toolSet

@@ -37,7 +37,7 @@ export const createBestOfNImplementor = (options: {
     
 Your task is to write out ALL the code changes needed to complete the user's request in a single comprehensive response.
 
-Important: You can not make any other tool calls besides editing files. You cannot read more files, write todos, or spawn agents.
+Important: You can not make any other tool calls besides editing files. You cannot read more files, write todos, spawn agents, or set output. Do not call any of these tools!
 
 Write out what changes you would make using the tool call format below. Use this exact format for each file change:
 
@@ -72,12 +72,14 @@ ${
   isGpt5 || isGemini
     ? ``
     : `
-You can also use <think> tags interspersed between tool calls to think about the best way to implement the changes. Keep these thoughts very brief. You may not need to use think tags at all.
+IMPORTANT: Before you start writing your implementation, you should use <think> tags to think about the best way to implement the changes. You should think really really hard to make sure you implement the changes in the best way possible. Take as much time as you to think through all the cases to produce the best changes.
+
+You can also use <think> tags interspersed between tool calls to think about the best way to implement the changes.
 
 <example>
 
 <think>
-[ Thoughts about the best way to implement the feature ]
+[ Long think about the best way to implement the changes ]
 </think>
 
 <codebuff_tool_call>
@@ -99,7 +101,7 @@ You can also use <think> tags interspersed between tool calls to think about the
 </example>`
 }
 
-After the edit tool calls, you can optionally mention any follow-up steps to take, like deleting a file, or a sepcific way to validate the changes. There's no need to use the set_output tool as your entire response will be included in the output.
+After the edit tool calls, you can optionally mention any follow-up steps to take, like deleting a file, or a specific way to validate the changes. There's no need to use the set_output tool as your entire response will be included in the output.
 
 Your implementation should:
 - Be complete and comprehensive

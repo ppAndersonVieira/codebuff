@@ -183,11 +183,25 @@ export type RetryOptions = {
   }) => Promise<RunState | null | undefined> | RunState | null | undefined
 }
 
+export type ImageContent = {
+  type: 'image'
+  image: string // base64 encoded
+  mediaType: string
+}
+
+export type TextContent = {
+  type: 'text'
+  text: string
+}
+
+export type MessageContent = TextContent | ImageContent
+
 export type RunOptions = {
   agent: string | AgentDefinition
   prompt: string
+  /** Content array for multimodal messages (text + images) */
+  content?: MessageContent[]
   params?: Record<string, any>
-  content?: (TextPart | ImagePart)[]
   previousRun?: RunState
   extraToolResults?: ToolMessage[]
   signal?: AbortSignal
@@ -594,8 +608,8 @@ export async function runOnce({
 
   agent,
   prompt,
-  params,
   content,
+  params,
   previousRun,
   extraToolResults,
   signal,

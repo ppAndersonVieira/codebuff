@@ -43,6 +43,22 @@ export type AskUserState = {
   otherTexts: string[] // Custom text input for each question (empty string if not used)
 } | null
 
+export type PendingImageStatus = 'processing' | 'ready' | 'error'
+
+export type PendingImage = {
+  path: string
+  filename: string
+  status: PendingImageStatus
+  size?: number
+  width?: number
+  height?: number
+  note?: string // Display note: "compressed" | error message
+  processedImage?: {
+    base64: string
+    mediaType: string
+  }
+}
+
 export type PendingBashMessage = {
   id: string
   command: string
@@ -53,19 +69,8 @@ export type PendingBashMessage = {
   isRunning: boolean
   startTime?: number
   cwd?: string
-}
-
-// Pending tool result stores tool results from user-executed commands to send to AI
-// Note: Using inline type instead of importing ToolMessage to avoid deep type instantiation errors
-export type PendingToolResult = {
-  role: 'tool'
-  toolCallId: string
-  toolName: string
-  content: Array<
-    | { type: 'text'; text: string }
-    | { type: 'json'; value: unknown }
-    | { type: 'media'; data: string; mediaType: string }
-  >
+  /** Whether the message was already added to UI chat history (non-ghost mode) */
+  addedToHistory?: boolean
 }
 
 export type ChatStoreState = {
@@ -90,8 +95,8 @@ export type ChatStoreState = {
   inputMode: InputMode
   isRetrying: boolean
   askUserState: AskUserState
+  pendingImages: PendingImage[]
   pendingBashMessages: PendingBashMessage[]
-  pendingToolResults: PendingToolResult[]
 }
 
 type ChatStoreActions = {
@@ -127,6 +132,9 @@ type ChatStoreActions = {
   setAskUserState: (state: AskUserState) => void
   updateAskUserAnswer: (questionIndex: number, optionIndex: number) => void
   updateAskUserOtherText: (questionIndex: number, text: string) => void
+  addPendingImage: (image: PendingImage) => void
+  removePendingImage: (path: string) => void
+  clearPendingImages: () => void
   addPendingBashMessage: (message: PendingBashMessage) => void
   updatePendingBashMessage: (
     id: string,
@@ -134,8 +142,6 @@ type ChatStoreActions = {
   ) => void
   removePendingBashMessage: (id: string) => void
   clearPendingBashMessages: () => void
-  addPendingToolResult: (result: PendingToolResult) => void
-  clearPendingToolResults: () => void
   reset: () => void
 }
 
@@ -159,12 +165,12 @@ const initialState: ChatStoreState = {
   lastMessageMode: null,
   sessionCreditsUsed: 0,
   runState: null,
-  isAnnouncementVisible: true,
+  isAnnouncementVisible: false,
   inputMode: 'default' as InputMode,
   isRetrying: false,
   askUserState: null,
+  pendingImages: [],
   pendingBashMessages: [],
-  pendingToolResults: [],
 }
 
 export const useChatStore = create<ChatStore>()(
@@ -295,6 +301,24 @@ export const useChatStore = create<ChatStore>()(
         state.askUserState = askUserState
       }),
 
+    addPendingImage: (image) =>
+      set((state) => {
+        // Don't add duplicates
+        if (!state.pendingImages.some((i) => i.path === image.path)) {
+          state.pendingImages.push(image)
+        }
+      }),
+
+    removePendingImage: (path) =>
+      set((state) => {
+        state.pendingImages = state.pendingImages.filter((i) => i.path !== path)
+      }),
+
+    clearPendingImages: () =>
+      set((state) => {
+        state.pendingImages = []
+      }),
+
     updateAskUserAnswer: (questionIndex, optionIndex) =>
       set((state) => {
         if (!state.askUserState) return
@@ -361,16 +385,6 @@ export const useChatStore = create<ChatStore>()(
         state.pendingBashMessages = []
       }),
 
-    addPendingToolResult: (result) =>
-      set((state) => {
-        ;(state.pendingToolResults as PendingToolResult[]).push(result)
-      }),
-
-    clearPendingToolResults: () =>
-      set((state) => {
-        state.pendingToolResults = []
-      }),
-
     reset: () =>
       set((state) => {
         state.messages = initialState.messages.slice()
@@ -396,8 +410,8 @@ export const useChatStore = create<ChatStore>()(
         state.inputMode = initialState.inputMode
         state.isRetrying = initialState.isRetrying
         state.askUserState = initialState.askUserState
+        state.pendingImages = []
         state.pendingBashMessages = []
-        state.pendingToolResults = []
       }),
   })),
 )

@@ -11,7 +11,11 @@ import {
 import { useShallow } from 'zustand/react/shallow'
 
 import { routeUserPrompt, addBashMessageToHistory } from './commands/router'
+import { addClipboardPlaceholder, addPendingImageFromFile } from './utils/add-pending-image'
+import { getProjectRoot } from './project-files'
 import { AnnouncementBanner } from './components/announcement-banner'
+import { hasClipboardImage, readClipboardImage, readClipboardText } from './utils/clipboard-image'
+import { showClipboardMessage } from './utils/clipboard'
 import { ChatInputBar } from './components/chat-input-bar'
 import { MessageWithAgents } from './components/message-with-agents'
 import { PendingBashMessage } from './components/pending-bash-message'
@@ -36,7 +40,7 @@ import {
   type ChatKeyboardState,
   createDefaultChatKeyboardState,
 } from './utils/keyboard-actions'
-import { useMessageQueue } from './hooks/use-message-queue'
+import { useMessageQueue, type QueuedMessage } from './hooks/use-message-queue'
 import { useQueueControls } from './hooks/use-queue-controls'
 import { useQueueUi } from './hooks/use-queue-ui'
 import { useChatScrollbox } from './hooks/use-scroll-management'
@@ -431,6 +435,7 @@ export const Chat = ({
   const inputMode = useChatStore((state) => state.inputMode)
   const setInputMode = useChatStore((state) => state.setInputMode)
   const askUserState = useChatStore((state) => state.askUserState)
+  const pendingImages = useChatStore((state) => state.pendingImages)
 
   const {
     slashContext,
@@ -544,31 +549,12 @@ export const Chat = ({
     clearQueue,
     isQueuePausedRef,
   } = useMessageQueue(
-    (content: string) => {
-      // Route queued messages through the router to handle bash commands, slash commands, etc.
-      return routeUserPrompt({
-        abortControllerRef,
+    (message: QueuedMessage) =>
+      sendMessageRef.current?.({
+        content: message.content,
         agentMode,
-        inputRef,
-        inputValue: content,
-        isChainInProgressRef,
-        isStreaming,
-        logoutMutation,
-        streamMessageIdRef,
-        addToQueue,
-        clearMessages,
-        saveToHistory: () => {}, // Already saved when queued
-        scrollToLatest,
-        sendMessage,
-        setCanProcessQueue,
-        setInputFocused,
-        setInputValue: () => {}, // Input already cleared when queued
-        setIsAuthenticated,
-        setMessages,
-        setUser,
-        stopStreaming,
-      })
-    },
+        images: message.images,
+      }) ?? Promise.resolve(),
     isChainInProgressRef,
     activeAgentStreamsRef,
   )
@@ -604,7 +590,8 @@ export const Chat = ({
   const isWaitingForResponse = streamStatus === 'waiting'
   const isStreaming = streamStatus !== 'idle'
 
-  // When streaming completes, flush any pending bash commands into history
+  // When streaming completes, flush any pending bash commands into history (ghost mode only)
+  // Non-ghost mode commands are already in history and will be cleared when user sends next message
   useEffect(() => {
     if (
       !isStreaming &&
@@ -612,14 +599,13 @@ export const Chat = ({
       !isChainInProgressRef.current &&
       pendingBashMessages.length > 0
     ) {
-      // Collect completed messages to flush
-      const completedMessages = pendingBashMessages.filter(
-        (msg) => !msg.isRunning,
+      // Only flush ghost mode commands (those not already added to history) to UI
+      const ghostModeMessages = pendingBashMessages.filter(
+        (msg) => !msg.isRunning && !msg.addedToHistory,
       )
-      if (completedMessages.length === 0) return
-
-      // Batch: add all to history, then clear all completed
-      for (const msg of completedMessages) {
+      
+      // Add ghost mode messages to UI history
+      for (const msg of ghostModeMessages) {
         addBashMessageToHistory({
           command: msg.command,
           stdout: msg.stdout,
@@ -629,13 +615,17 @@ export const Chat = ({
           setMessages,
         })
       }
-      // Batch remove all completed messages at once
-      const completedIds = new Set(completedMessages.map((m) => m.id))
-      useChatStore.setState((state) => ({
-        pendingBashMessages: state.pendingBashMessages.filter(
-          (m) => !completedIds.has(m.id),
-        ),
-      }))
+      
+      // Mark ghost mode messages as added to history (so they don't show as ghost UI)
+      // but keep them in pendingBashMessages so they get sent to LLM with next user message
+      if (ghostModeMessages.length > 0) {
+        const ghostIds = new Set(ghostModeMessages.map((m) => m.id))
+        useChatStore.setState((state) => ({
+          pendingBashMessages: state.pendingBashMessages.map((m) =>
+            ghostIds.has(m.id) ? { ...m, addedToHistory: true } : m,
+          ),
+        }))
+      }
     }
   }, [isStreaming, pendingBashMessages, setMessages])
 
@@ -1031,8 +1021,42 @@ export const Chat = ({
       onExitApp: () => handleCtrlC(),
       onBashHistoryUp: navigateUp,
       onBashHistoryDown: navigateDown,
-      onDismissBashOverlay: () => {},
-      onCancelBashCommand: () => {},
+      onPasteImage: () => {
+        const placeholderPath = addClipboardPlaceholder()
+
+        setTimeout(() => {
+          if (!hasClipboardImage()) {
+            useChatStore.getState().removePendingImage(placeholderPath)
+            const text = readClipboardText()
+            if (text) {
+              setInputValue((prev) => {
+                const before = prev.text.slice(0, prev.cursorPosition)
+                const after = prev.text.slice(prev.cursorPosition)
+                return {
+                  text: before + text + after,
+                  cursorPosition: before.length + text.length,
+                  lastEditDueToNav: false,
+                }
+              })
+            }
+            return
+          }
+
+          const result = readClipboardImage()
+          if (!result.success || !result.imagePath) {
+            useChatStore.getState().removePendingImage(placeholderPath)
+            showClipboardMessage(result.error || 'Failed to paste image', {
+              durationMs: 3000,
+            })
+            return
+          }
+
+          const cwd = getProjectRoot() ?? process.cwd()
+          void addPendingImageFromFile(result.imagePath, cwd, placeholderPath)
+        }, 0)
+
+        return true
+      },
     }),
     [
       setInputMode,
@@ -1217,14 +1241,16 @@ export const Chat = ({
             />
           )
         })}
-        {/* Pending bash messages as ghost messages */}
-        {pendingBashMessages.map((msg) => (
-          <PendingBashMessage
-            key={`pending-bash-${msg.id}`}
-            message={msg}
-            width={separatorWidth - 4}
-          />
-        ))}
+        {/* Pending bash messages as ghost messages (only show those not already in history) */}
+        {pendingBashMessages
+          .filter((msg) => !msg.addedToHistory)
+          .map((msg) => (
+            <PendingBashMessage
+              key={`pending-bash-${msg.id}`}
+              message={msg}
+              width={separatorWidth - 4}
+            />
+          ))}
       </scrollbox>
 
       <box

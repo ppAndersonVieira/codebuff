@@ -1,7 +1,8 @@
 import { useKeyboard } from '@opentui/react'
 import { useCallback } from 'react'
 
-import { hasClipboardImage, readClipboardText } from '../utils/clipboard-image'
+import { hasClipboardImage, readClipboardText, readClipboardImageFilePath, getImageFilePathFromText } from '../utils/clipboard-image'
+import { getProjectRoot } from '../project-files'
 import {
   resolveChatKeyboardAction,
   type ChatKeyboardState,
@@ -66,6 +67,7 @@ export type ChatKeyboardHandlers = {
 
   // Clipboard handlers
   onPasteImage: () => void
+  onPasteImagePath: (imagePath: string) => void
   onPasteText: (text: string) => void
 }
 
@@ -171,14 +173,37 @@ function dispatchAction(
       handlers.onBashHistoryDown()
       return true
     case 'paste': {
-      // Check for image FIRST - many apps put both text and image on clipboard
-      // when copying an image (e.g., Chrome, Slack, Finder), so we prioritize image
+      const cwd = getProjectRoot() ?? process.cwd()
+      
+      // First, check if clipboard contains a copied image file (e.g., from Finder)
+      // This is different from text - it's when you Cmd+C a file in Finder
+      const copiedImagePath = readClipboardImageFilePath()
+      if (copiedImagePath) {
+        handlers.onPasteImagePath(copiedImagePath)
+        return true
+      }
+      
+      // Next, read clipboard text to check if it's a file path
+      // This handles the case where a file is dragged/dropped - we want to use
+      // the file path, not any stale image data that might be in the clipboard
+      const text = readClipboardText()
+      if (text) {
+        // Check if the text is a path to an image file
+        const imagePath = getImageFilePathFromText(text, cwd)
+        if (imagePath) {
+          handlers.onPasteImagePath(imagePath)
+          return true
+        }
+      }
+      
+      // Check for actual image data in clipboard (screenshots, copied images)
+      // This comes AFTER the file path check so dragged files take priority
       if (hasClipboardImage()) {
         handlers.onPasteImage()
         return true
       }
-      // No image - try text
-      const text = readClipboardText()
+      
+      // Regular text paste
       if (text) {
         handlers.onPasteText(text)
         return true

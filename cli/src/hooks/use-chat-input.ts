@@ -13,6 +13,8 @@ interface UseChatInputOptions {
   separatorWidth: number
   initialPrompt: string | null
   onSubmitPrompt: (content: string, mode: AgentMode) => void | Promise<unknown>
+  isCompactHeight: boolean
+  isNarrowWidth: boolean
 }
 
 const BUILD_IT_TEXT = 'Build it!'
@@ -24,13 +26,15 @@ export const useChatInput = ({
   separatorWidth,
   initialPrompt,
   onSubmitPrompt,
+  isCompactHeight,
+  isNarrowWidth,
 }: UseChatInputOptions) => {
   const hasAutoSubmittedRef = useRef(false)
   const inputMode = useChatStore((state) => state.inputMode)
 
   // Estimate the collapsed toggle width as rendered by AgentModeToggle.
-  // In bash mode, we don't show the toggle, so no width needed.
-  const estimatedToggleWidth = inputMode !== 'default'
+  // In bash mode, compact height, or narrow width, we don't show the toggle, so no width needed.
+  const estimatedToggleWidth = inputMode !== 'default' || isCompactHeight || isNarrowWidth
     ? 0
     : stringWidth(`< ${agentMode}`) + 6 // 2 padding + 2 borders + 2 gap
 

@@ -38,6 +38,7 @@ import { useChatScrollbox } from './hooks/use-scroll-management'
 import { useSendMessage } from './hooks/use-send-message'
 import { useSuggestionEngine } from './hooks/use-suggestion-engine'
 import { useTerminalDimensions } from './hooks/use-terminal-dimensions'
+import { useTerminalLayout } from './hooks/use-terminal-layout'
 import { useTheme } from './hooks/use-theme'
 import { useTimeout } from './hooks/use-timeout'
 import { useUsageMonitor } from './hooks/use-usage-monitor'
@@ -48,6 +49,7 @@ import { addClipboardPlaceholder, addPendingImageFromFile } from './utils/add-pe
 import { createChatScrollAcceleration } from './utils/chat-scroll-accel'
 import { showClipboardMessage } from './utils/clipboard'
 import { readClipboardImage } from './utils/clipboard-image'
+import { createPasteHandler } from './utils/strings'
 import { getInputModeConfig } from './utils/input-modes'
 import {
   type ChatKeyboardState,
@@ -112,6 +114,9 @@ export const Chat = ({
 
   const { separatorWidth, terminalWidth, terminalHeight } =
     useTerminalDimensions()
+  const { height: heightLayout, width: widthLayout } = useTerminalLayout()
+  const isCompactHeight = heightLayout.is('xs')
+  const isNarrowWidth = widthLayout.is('xs')
   const messageAvailableWidth = separatorWidth
 
   const theme = useTheme()
@@ -406,6 +411,7 @@ export const Chat = ({
     slashCommands: SLASH_COMMANDS,
     localAgents,
     fileTree,
+    currentAgentMode: agentMode,
   })
 
   useEffect(() => {
@@ -636,6 +642,8 @@ export const Chat = ({
     separatorWidth,
     initialPrompt,
     onSubmitPrompt,
+    isCompactHeight,
+    isNarrowWidth,
   })
 
   const {
@@ -709,7 +717,16 @@ export const Chat = ({
     handleExitFeedback()
   }, [closeFeedback, handleExitFeedback])
 
-
+  // Ensure bracketed paste events target the active chat input
+  useEffect(() => {
+    if (feedbackMode) {
+      inputRef.current?.focus()
+      return
+    }
+    if (!askUserState) {
+      inputRef.current?.focus()
+    }
+  }, [feedbackMode, askUserState, inputRef])
 
   const handleSubmit = useCallback(async () => {
     ensureQueueActiveBeforeSubmit()
@@ -1213,9 +1230,17 @@ export const Chat = ({
           separatorWidth={separatorWidth}
           shouldCenterInputVertically={shouldCenterInputVertically}
           inputBoxTitle={inputBoxTitle}
+          isCompactHeight={isCompactHeight}
+          isNarrowWidth={isNarrowWidth}
           feedbackMode={feedbackMode}
           handleExitFeedback={handleExitFeedback}
           handleSubmit={handleSubmit}
+          onPaste={createPasteHandler({
+            text: inputValue,
+            cursorPosition,
+            onChange: setInputValue,
+            onPasteImage: chatKeyboardHandlers.onPasteImage,
+          })}
         />
       </box>
     </box>

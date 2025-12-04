@@ -14,6 +14,7 @@ import { BORDER_CHARS } from '../utils/ui-constants'
 import type { useTheme } from '../hooks/use-theme'
 import type { InputValue } from '../state/chat-store'
 import type { AgentMode } from '../utils/constants'
+import { useEvent } from '../hooks/use-event'
 
 type Theme = ReturnType<typeof useTheme>
 
@@ -51,11 +52,16 @@ interface ChatInputBarProps {
   separatorWidth: number
   shouldCenterInputVertically: boolean
   inputBoxTitle: string | undefined
+  isCompactHeight: boolean
+  isNarrowWidth: boolean
 
   // Feedback mode
   feedbackMode: boolean
-  handleExitFeedback: () => void // Handlers
+  handleExitFeedback: () => void
+
+  // Handlers
   handleSubmit: () => Promise<void>
+  onPaste: (fallbackText?: string) => void
 }
 
 export const ChatInputBar = ({
@@ -83,9 +89,12 @@ export const ChatInputBar = ({
   separatorWidth,
   shouldCenterInputVertically,
   inputBoxTitle,
+  isCompactHeight,
+  isNarrowWidth,
   feedbackMode,
   handleExitFeedback,
   handleSubmit,
+  onPaste,
 }: ChatInputBarProps) => {
   const inputMode = useChatStore((state) => state.inputMode)
   const setInputMode = useChatStore((state) => state.setInputMode)
@@ -99,6 +108,45 @@ export const ChatInputBar = ({
   )
   const { submitAnswers } = useAskUserBridge()
   const [askUserTitle, setAskUserTitle] = React.useState(' Action Required ')
+
+  // Shared key intercept handler for suggestion menu navigation
+  const handleKeyIntercept = useEvent(
+    (key: {
+      name?: string
+      shift?: boolean
+      ctrl?: boolean
+      meta?: boolean
+      option?: boolean
+    }) => {
+      // Intercept navigation keys when suggestion menu is active
+      // The useChatKeyboard hook will handle menu selection/navigation
+      const hasSuggestions = hasSlashSuggestions || hasMentionSuggestions
+      if (!hasSuggestions) return false
+
+      const isPlainEnter =
+        (key.name === 'return' || key.name === 'enter') &&
+        !key.shift &&
+        !key.ctrl &&
+        !key.meta &&
+        !key.option
+      const isTab = key.name === 'tab' && !key.ctrl && !key.meta && !key.option
+      const isUpDown =
+        (key.name === 'up' || key.name === 'down') &&
+        !key.ctrl &&
+        !key.meta &&
+        !key.option
+
+      // Don't intercept Up/Down when user is navigating history
+      if (isUpDown && lastEditDueToNav) {
+        return false
+      }
+
+      if (isPlainEnter || isTab || isUpDown) {
+        return true
+      }
+      return false
+    },
+  )
 
   if (feedbackMode) {
     return (
@@ -233,6 +281,68 @@ export const ChatInputBar = ({
     )
   }
 
+  // Compact mode: no border, minimal chrome, supports menus and multiline
+  if (isCompactHeight) {
+    const compactMaxHeight = Math.floor(terminalHeight / 2)
+    return (
+      <>
+        {hasSlashSuggestions ? (
+          <SuggestionMenu
+            items={slashSuggestionItems}
+            selectedIndex={slashSelectedIndex}
+            maxVisible={5}
+            prefix="/"
+          />
+        ) : null}
+        {hasMentionSuggestions ? (
+          <SuggestionMenu
+            items={[...agentSuggestionItems, ...fileSuggestionItems]}
+            selectedIndex={agentSelectedIndex}
+            maxVisible={5}
+            prefix="@"
+          />
+        ) : null}
+        <box
+          style={{
+            flexDirection: 'row',
+            alignItems: 'flex-start',
+            width: '100%',
+            paddingLeft: 1,
+            paddingRight: 1,
+            backgroundColor: theme.surface,
+          }}
+        >
+          {modeConfig.icon && (
+            <box
+              style={{
+                flexShrink: 0,
+                paddingRight: 1,
+              }}
+            >
+              <text style={{ fg: theme[modeConfig.color] }}>
+                {modeConfig.icon}
+              </text>
+            </box>
+          )}
+          <MultilineInput
+            value={inputValue}
+            onChange={handleInputChange}
+            onSubmit={handleSubmit}
+            onPaste={onPaste}
+            onKeyIntercept={handleKeyIntercept}
+            placeholder={effectivePlaceholder}
+            focused={inputFocused && !feedbackMode}
+            maxHeight={compactMaxHeight}
+            width={adjustedInputWidth}
+            ref={inputRef}
+            cursorPosition={cursorPosition}
+          />
+        </box>
+        <InputModeBanner />
+      </>
+    )
+  }
+
   return (
     <>
       <box
@@ -301,48 +411,17 @@ export const ChatInputBar = ({
                 value={inputValue}
                 onChange={handleInputChange}
                 onSubmit={handleSubmit}
-                onKeyIntercept={(key) => {
-                  // Intercept navigation keys when suggestion menu is active
-                  // The useChatKeyboard hook will handle menu selection/navigation
-                  const hasSuggestions =
-                    hasSlashSuggestions || hasMentionSuggestions
-                  if (!hasSuggestions) return false
-
-                  const isPlainEnter =
-                    (key.name === 'return' || key.name === 'enter') &&
-                    !key.shift &&
-                    !key.ctrl &&
-                    !key.meta &&
-                    !key.option
-                  const isTab =
-                    key.name === 'tab' && !key.ctrl && !key.meta && !key.option
-                  const isUpDown =
-                    (key.name === 'up' || key.name === 'down') &&
-                    !key.ctrl &&
-                    !key.meta &&
-                    !key.option
-
-                  // Don't intercept Up/Down when user is navigating history
-                  // (lastEditDueToNav is true), let them continue paging through
-                  if (isUpDown && lastEditDueToNav) {
-                    return false
-                  }
-
-                  if (isPlainEnter || isTab || isUpDown) {
-                    return true // Prevent default, let useChatKeyboard handle it
-                  }
-                  return false
-                }}
+                onPaste={onPaste}
+                onKeyIntercept={handleKeyIntercept}
                 placeholder={effectivePlaceholder}
                 focused={inputFocused && !feedbackMode}
                 maxHeight={Math.floor(terminalHeight / 2)}
                 width={adjustedInputWidth}
-
                 ref={inputRef}
                 cursorPosition={cursorPosition}
               />
             </box>
-            {modeConfig.showAgentModeToggle && (
+            {modeConfig.showAgentModeToggle && !isNarrowWidth && (
               <box
                 style={{
                   flexShrink: 0,

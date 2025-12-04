@@ -14,7 +14,6 @@ import {
   detectPlatformTheme,
   detectTerminalOverrides,
   getOscDetectedTheme,
-  initializeOSCDetection,
   initializeThemeWatcher,
   setThemeResolver,
   setLastDetectedTheme,
@@ -93,7 +92,6 @@ export function initializeThemeStore() {
 
   setThemeResolver(detectSystemTheme)
   setupFileWatchers()
-  initializeOSCDetection()
 
   const initialThemeName = detectSystemTheme()
   setLastDetectedTheme(initialThemeName)
@@ -104,10 +102,17 @@ export function initializeThemeStore() {
     themeConfig.plugins,
   )
 
-  useThemeStore = create<ThemeStore>((set) => ({
+  useThemeStore = create<ThemeStore>((set, get) => ({
     theme: initialTheme,
 
     setThemeName: (name: ThemeName) => {
+      const currentTheme = get().theme
+      
+      // Skip if theme name hasn't changed
+      if (currentTheme.name === name) {
+        return
+      }
+
       const baseTheme = cloneChatTheme(chatThemes[name])
       const theme = buildTheme(
         baseTheme,
@@ -119,9 +124,13 @@ export function initializeThemeStore() {
     },
   }))
 
+  // Set up the theme watcher for reactive updates when system theme changes
   initializeThemeWatcher((name: ThemeName) => {
     useThemeStore.getState().setThemeName(name)
   })
+
+  // Note: OSC detection is done earlier in index.tsx before OpenTUI starts,
+  // so the result is already available via getOscDetectedTheme()
 }
 
 export const useTheme = (): ChatTheme => {

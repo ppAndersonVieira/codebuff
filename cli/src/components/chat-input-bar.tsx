@@ -4,6 +4,7 @@ import { AgentModeToggle } from './agent-mode-toggle'
 import { MultipleChoiceForm } from './ask-user'
 import { FeedbackContainer } from './feedback-container'
 import { InputModeBanner } from './input-mode-banner'
+import { PublishContainer } from './publish-container'
 import { MultilineInput, type MultilineInputHandle } from './multiline-input'
 import { SuggestionMenu, type SuggestionItem } from './suggestion-menu'
 import { useAskUserBridge } from '../hooks/use-ask-user-bridge'
@@ -44,6 +45,8 @@ interface ChatInputBarProps {
   fileSuggestionItems: SuggestionItem[]
   slashSelectedIndex: number
   agentSelectedIndex: number
+  onSlashItemClick?: (index: number) => void
+  onMentionItemClick?: (index: number) => void
 
   // Layout
   theme: Theme
@@ -57,6 +60,11 @@ interface ChatInputBarProps {
   // Feedback mode
   feedbackMode: boolean
   handleExitFeedback: () => void
+
+  // Publish mode
+  publishMode: boolean
+  handleExitPublish: () => void
+  handlePublish: (agentIds: string[]) => Promise<void>
 
   // Handlers
   handleSubmit: () => Promise<void>
@@ -82,6 +90,8 @@ export const ChatInputBar = ({
   fileSuggestionItems,
   slashSelectedIndex,
   agentSelectedIndex,
+  onSlashItemClick,
+  onMentionItemClick,
   theme,
   terminalHeight,
   separatorWidth,
@@ -91,6 +101,9 @@ export const ChatInputBar = ({
   isNarrowWidth,
   feedbackMode,
   handleExitFeedback,
+  publishMode,
+  handleExitPublish,
+  handlePublish,
   handleSubmit,
   onPaste,
 }: ChatInputBarProps) => {
@@ -151,6 +164,17 @@ export const ChatInputBar = ({
       <FeedbackContainer
         inputRef={inputRef}
         onExitFeedback={handleExitFeedback}
+        width={separatorWidth}
+      />
+    )
+  }
+
+  if (publishMode) {
+    return (
+      <PublishContainer
+        inputRef={inputRef}
+        onExitPublish={handleExitPublish}
+        onPublish={handlePublish}
         width={separatorWidth}
       />
     )
@@ -287,6 +311,7 @@ export const ChatInputBar = ({
             selectedIndex={slashSelectedIndex}
             maxVisible={5}
             prefix="/"
+            onItemClick={onSlashItemClick}
           />
         ) : null}
         {hasMentionSuggestions ? (
@@ -295,6 +320,7 @@ export const ChatInputBar = ({
             selectedIndex={agentSelectedIndex}
             maxVisible={5}
             prefix="@"
+            onItemClick={onMentionItemClick}
           />
         ) : null}
         <box
@@ -361,6 +387,7 @@ export const ChatInputBar = ({
             selectedIndex={slashSelectedIndex}
             maxVisible={10}
             prefix="/"
+            onItemClick={onSlashItemClick}
           />
         ) : null}
         {hasMentionSuggestions ? (
@@ -369,6 +396,7 @@ export const ChatInputBar = ({
             selectedIndex={agentSelectedIndex}
             maxVisible={10}
             prefix="@"
+            onItemClick={onMentionItemClick}
           />
         ) : null}
         <box

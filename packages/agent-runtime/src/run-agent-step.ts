@@ -59,7 +59,7 @@ import type {
   CustomToolDefinitions,
   ProjectFileContext,
 } from '@codebuff/common/util/file'
-import type { ToolSet } from 'ai'
+import { APICallError, type ToolSet } from 'ai'
 
 async function additionalToolDefinitions(
   params: {
@@ -921,8 +921,24 @@ export async function loopAgentSteps(
       throw error
     }
 
-    // Extract clean error message (just the message, not name:message format)
-    const errorMessage = error instanceof Error ? error.message : String(error)
+    let errorMessage = ''
+    if (error instanceof APICallError) {
+      const {
+        url,
+        requestBodyValues,
+        statusCode,
+        responseHeaders,
+        responseBody,
+        isRetryable,
+      } = error
+      errorMessage = `API call error: ${error.message}\n\n ${error.stack}\n\nURL: ${url}\nRequest body values: ${JSON.stringify(requestBodyValues)}\nStatus code: ${statusCode}\nResponse headers: ${JSON.stringify(responseHeaders)}\nResponse body: ${responseBody}\nIs retryable: ${isRetryable}\nData: ${JSON.stringify(error.data)}`
+    } else {
+      // Extract clean error message (just the message, not name:message format)
+      errorMessage =
+        error instanceof Error
+          ? error.message + (error.stack ? `\n\n${error.stack}` : '')
+          : String(error)
+    }
 
     const status = checkLiveUserInput(params) ? 'failed' : 'cancelled'
     await finishAgentRun({
@@ -939,7 +955,7 @@ export async function loopAgentSteps(
       agentState: currentAgentState,
       output: {
         type: 'error',
-        message: errorMessage,
+        message: 'Agent run error: ' + errorMessage,
       },
     }
   }

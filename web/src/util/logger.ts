@@ -2,7 +2,9 @@ import fs, { appendFileSync } from 'fs'
 import path from 'path'
 import { format } from 'util'
 
-import { env } from '@codebuff/common/env'
+import { trackEvent } from '@codebuff/common/analytics'
+import { env, IS_DEV, IS_CI } from '@codebuff/common/env'
+import { createAnalyticsDispatcher } from '@codebuff/common/util/analytics-dispatcher'
 import { splitData } from '@codebuff/common/util/split-data'
 import pino from 'pino'
 
@@ -34,10 +36,7 @@ function getDebugDir(): string | null {
 }
 
 // Initialize debug directory in dev environment
-if (
-  env.NEXT_PUBLIC_CB_ENVIRONMENT === 'dev' &&
-  process.env.CODEBUFF_GITHUB_ACTIONS !== 'true'
-) {
+if (IS_DEV && !IS_CI) {
   const dir = getDebugDir()
   if (dir) {
     try {
@@ -69,6 +68,9 @@ const pinoLogger = pino(
 
 const loggingLevels = ['info', 'debug', 'warn', 'error', 'fatal'] as const
 type LogLevel = (typeof loggingLevels)[number]
+const analyticsDispatcher = createAnalyticsDispatcher({
+  envName: env.NEXT_PUBLIC_CB_ENVIRONMENT,
+})
 
 function splitAndLog(
   level: LogLevel,
@@ -102,8 +104,7 @@ function splitAndLog(
 // Also output to console via pinoLogger so logs remain visible in the terminal
 function logWithSync(level: LogLevel, data: any, msg?: string, ...args: any[]): void {
   const formattedMsg = format(msg ?? '', ...args)
-  
-  if (env.NEXT_PUBLIC_CB_ENVIRONMENT === 'dev') {
+  if (IS_DEV) {
     // Write to file for real-time logging
     if (debugDir) {
       const logEntry = JSON.stringify({
@@ -121,6 +122,21 @@ function logWithSync(level: LogLevel, data: any, msg?: string, ...args: any[]): 
     // Also output to console for interactive debugging
     pinoLogger[level](data, msg, ...args)
   } else {
+    const analyticsPayloads = analyticsDispatcher.process({
+      data,
+      level,
+      msg: formattedMsg,
+    })
+
+    analyticsPayloads.forEach((payload) => {
+      trackEvent({
+        event: payload.event,
+        userId: payload.userId,
+        properties: payload.properties,
+        logger: logger as any,
+      })
+    })
+
     // In prod, use pino with splitAndLog for large payloads
     splitAndLog(level, data, msg, ...args)
   }

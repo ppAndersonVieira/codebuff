@@ -2,11 +2,16 @@ import { appendFileSync, existsSync, mkdirSync, unlinkSync } from 'fs'
 import path, { dirname } from 'path'
 import { format as stringFormat } from 'util'
 
-import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
-import { env } from '@codebuff/common/env'
+import { env, IS_DEV, IS_TEST, IS_CI } from '@codebuff/common/env'
+import { createAnalyticsDispatcher } from '@codebuff/common/util/analytics-dispatcher'
 import { pino } from 'pino'
 
-import { flushAnalytics, logError, trackEvent } from './analytics'
+import {
+  flushAnalytics,
+  logError,
+  setAnalyticsErrorLogger,
+  trackEvent,
+} from './analytics'
 import { getCurrentChatDir, getProjectRoot } from '../project-files'
 
 export interface LoggerContext {
@@ -20,13 +25,15 @@ export interface LoggerContext {
 
 export const loggerContext: LoggerContext = {}
 
-const analyticsBuffer: { analyticsEventId: AnalyticsEvent; toTrack: any }[] = []
-
 let logPath: string | undefined = undefined
 let pinoLogger: any = undefined
 
 const loggingLevels = ['info', 'debug', 'warn', 'error', 'fatal'] as const
 type LogLevel = (typeof loggingLevels)[number]
+const analyticsDispatcher = createAnalyticsDispatcher({
+  envName: env.NEXT_PUBLIC_CB_ENVIRONMENT,
+  bufferWhenNoUser: true,
+})
 
 function isEmptyObject(value: any): boolean {
   return (
@@ -94,14 +101,11 @@ function sendAnalyticsAndLog(
   msg?: string,
   ...args: any[]
 ): void {
-  if (
-    process.env.CODEBUFF_GITHUB_ACTIONS !== 'true' &&
-    env.NEXT_PUBLIC_CB_ENVIRONMENT !== 'test'
-  ) {
+  if (!IS_CI && !IS_TEST) {
     const projectRoot = getProjectRoot()
 
     const logTarget =
-      env.NEXT_PUBLIC_CB_ENVIRONMENT === 'dev'
+      IS_DEV
         ? path.join(projectRoot, 'debug', 'cli.jsonl')
         : path.join(getCurrentChatDir(), 'log.jsonl')
 
@@ -122,30 +126,22 @@ function sendAnalyticsAndLog(
 
   logAsErrorIfNeeded(toTrack)
 
-  logOrStore: if (
-    env.NEXT_PUBLIC_CB_ENVIRONMENT !== 'dev' &&
-    normalizedData &&
-    typeof normalizedData === 'object' &&
-    'eventId' in normalizedData &&
-    Object.values(AnalyticsEvent).includes((normalizedData as any).eventId)
-  ) {
-    const analyticsEventId = data.eventId as AnalyticsEvent
-    // Not accurate for anonymous users
-    if (!loggerContext.userId) {
-      analyticsBuffer.push({ analyticsEventId, toTrack })
-      break logOrStore
-    }
+  if (!IS_DEV && includeData && typeof normalizedData === 'object') {
+    const analyticsPayloads = analyticsDispatcher.process({
+      data: normalizedData,
+      level,
+      msg: stringFormat(normalizedMsg ?? '', ...args),
+      fallbackUserId: loggerContext.userId,
+    })
 
-    for (const item of analyticsBuffer) {
-      trackEvent(item.analyticsEventId, item.toTrack)
-    }
-    analyticsBuffer.length = 0
-    trackEvent(analyticsEventId, toTrack)
+    analyticsPayloads.forEach((payload) => {
+      trackEvent(payload.event, payload.properties)
+    })
   }
 
   // In dev mode, use appendFileSync for real-time logging (Bun has issues with pino sync)
   // In prod mode, use pino for better performance
-  if (env.NEXT_PUBLIC_CB_ENVIRONMENT === 'dev' && logPath) {
+  if (IS_DEV && logPath) {
     const logEntry = JSON.stringify({
       level: level.toUpperCase(),
       timestamp: new Date().toISOString(),
@@ -197,3 +193,21 @@ export const logger: Record<LogLevel, pino.LogFn> = Object.fromEntries(
     ]
   }),
 ) as Record<LogLevel, pino.LogFn>
+
+setAnalyticsErrorLogger((error, context) => {
+  const err =
+    error instanceof Error ? error : new Error(typeof error === 'string' ? error : 'Unknown analytics error')
+
+  logger.warn(
+    {
+      analyticsError: true,
+      error: {
+        name: err.name,
+        message: err.message,
+        stack: err.stack,
+      },
+      context,
+    },
+    '[analytics] error',
+  )
+})

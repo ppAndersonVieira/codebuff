@@ -496,6 +496,7 @@ export async function loopAgentSteps(
     startAgentRun: StartAgentRunFn
     userId: string | undefined
     userInputId: string
+    agentTemplate?: AgentTemplate
   } & ParamsExcluding<typeof additionalToolDefinitions, 'agentTemplate'> &
     ParamsExcluding<
       typeof runProgrammaticStep,
@@ -572,10 +573,12 @@ export async function loopAgentSteps(
     userInputId,
   } = params
 
-  const agentTemplate = await getAgentTemplate({
-    ...params,
-    agentId: agentType,
-  })
+  const agentTemplate =
+    params.agentTemplate ??
+    (await getAgentTemplate({
+      ...params,
+      agentId: agentType,
+    }))
   if (!agentTemplate) {
     throw new Error(`Agent template not found for type: ${agentType}`)
   }
@@ -770,6 +773,7 @@ export async function loopAgentSteps(
           stepNumber: totalSteps,
           stepsComplete: shouldEndTurn,
           system,
+          tools,
           template: agentTemplate,
           toolCallParams: currentParams,
         })

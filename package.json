@@ -12,7 +12,9 @@
     "evals",
     "sdk",
     ".agents",
-    "cli"
+    "cli",
+    "backend",
+    "npm-app"
   ],
   "scripts": {
     "dev": "bun scripts/dev.ts",

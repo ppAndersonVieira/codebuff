@@ -53,18 +53,11 @@ const definition: AgentDefinition = {
   id: "security-coordinator",
   version: "1.0.0",
 
-<<<<<<< HEAD
-  displayName: "Security Coordinator",
-  spawnerPrompt: "Spawn this agent to coordinate security-focused development workflows and ensure secure coding practices",
-  model: "anthropic/claude-4-sonnet-20250522",
-  outputMode: "last_message",
-=======
   displayName: 'Security Coordinator',
   spawnerPrompt:
     'Spawn this agent to coordinate security-focused development workflows',
   model: 'anthropic/claude-sonnet-4.5',
   outputMode: 'last_message',
->>>>>>> upstream/main
   includeMessageHistory: true,
 
   toolNames: ["read_files", "spawn_agents", "code_search", "end_turn"],
@@ -77,18 +70,12 @@ const definition: AgentDefinition = {
     }
   },
 
-<<<<<<< HEAD
-  systemPrompt: "You are a security coordinator responsible for ensuring secure development practices.",
-  instructionsPrompt: "Analyze the security implications of the request and coordinate appropriate security-focused agents.",
-  stepPrompt: "Continue analyzing security requirements and coordinating the workflow. Use end_turn when complete."
-=======
   systemPrompt:
     'You are a security coordinator responsible for secure development practices.',
   instructionsPrompt:
     'Analyze the security implications of the request and coordinate security-focused agents.',
   stepPrompt:
     'Continue analyzing security requirements and coordinating the workflow. Use end_turn when complete.',
->>>>>>> upstream/main
 }
 
 export default definition
@@ -131,18 +118,11 @@ const definition: AgentDefinition = {
 ```
 
 With `handleSteps`, your agent can:
-<<<<<<< HEAD
-- Make decisions based on actual code analysis
-- Orchestrate multiple tools in sequence
-- Handle errors gracefully
-- Implement complex conditional logic
-=======
 
 - Make decisions from tool output
 - Orchestrate tools in sequence
 - Handle errors
 - Run conditional logic
->>>>>>> upstream/main
 
 ## Available Fields
 

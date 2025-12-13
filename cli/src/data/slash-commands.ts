@@ -63,7 +63,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     id: 'new',
     label: 'new',
     description: 'Start a fresh conversation session',
-    aliases: ['reset', 'clear'],
+    aliases: ['n', 'clear', 'c', 'reset'],
   },
   {
     id: 'feedback',

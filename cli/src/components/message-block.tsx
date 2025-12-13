@@ -9,6 +9,7 @@ import React, {
 
 import { AgentBranchItem } from './agent-branch-item'
 import { Button } from './button'
+import { CopyIconButton } from './copy-icon-button'
 import { ImageCard } from './image-card'
 import { MessageFooter } from './message-footer'
 import { ValidationErrorPopover } from './validation-error-popover'
@@ -73,6 +74,7 @@ interface MessageBlockProps {
   }) => void
   attachments?: ImageAttachment[]
   metadata?: ChatMessageMetadata
+  isLastMessage?: boolean
 }
 
 const MessageAttachments = ({
@@ -134,6 +136,7 @@ export const MessageBlock: React.FC<MessageBlockProps> = ({
   onOpenFeedback,
   attachments,
   metadata,
+  isLastMessage,
 }) => {
   const [showValidationPopover, setShowValidationPopover] = useState(false)
 
@@ -168,6 +171,7 @@ export const MessageBlock: React.FC<MessageBlockProps> = ({
       validationErrors,
       onOpenFeedback,
       metadata,
+      isLastMessage,
     },
     {
       logLevel: 'debug',
@@ -185,7 +189,7 @@ export const MessageBlock: React.FC<MessageBlockProps> = ({
         width: '100%',
       }}
     >
-      {/* User message timestamp with error indicator button (non-bash commands) */}
+      {/* User message timestamp with copy button and error indicator (non-bash commands) */}
       {isUser && !bashCwd && (
         <box style={{ flexDirection: 'row', alignItems: 'center', gap: 1 }}>
           <text
@@ -197,6 +201,8 @@ export const MessageBlock: React.FC<MessageBlockProps> = ({
           >
             {`[${timestamp}]`}
           </text>
+
+          <CopyIconButton textToCopy={content} />
 
           {validationErrors && validationErrors.length > 0 && (
             <Button
@@ -215,7 +221,7 @@ export const MessageBlock: React.FC<MessageBlockProps> = ({
         </box>
       )}
 
-      {/* Bash command metadata header (timestamp + cwd) - now for user messages with bashCwd */}
+      {/* Bash command metadata header (timestamp + copy button + cwd) */}
       {bashCwd && (
         <box style={{ flexDirection: 'row', alignItems: 'center', gap: 1 }}>
           <text
@@ -227,6 +233,7 @@ export const MessageBlock: React.FC<MessageBlockProps> = ({
           >
             {`[${timestamp}]`}
           </text>
+          <CopyIconButton textToCopy={content} />
           <text
             attributes={TextAttributes.DIM}
             style={{
@@ -285,6 +292,7 @@ export const MessageBlock: React.FC<MessageBlockProps> = ({
             onToggleCollapsed={onToggleCollapsed}
             onBuildFast={onBuildFast}
             onBuildMax={onBuildMax}
+            isLastMessage={isLastMessage}
           />
         </box>
       ) : (
@@ -380,6 +388,7 @@ interface AgentBodyProps {
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
+  isLastMessage?: boolean
 }
 
 const AgentBody = memo(
@@ -394,6 +403,7 @@ const AgentBody = memo(
     onToggleCollapsed,
     onBuildFast,
     onBuildMax,
+    isLastMessage,
   }: AgentBodyProps): ReactNode[] => {
     const theme = useTheme()
     const nestedBlocks = agentBlock.blocks ?? []
@@ -571,6 +581,7 @@ const AgentBody = memo(
               onBuildFast={onBuildFast}
               onBuildMax={onBuildMax}
               siblingBlocks={nestedBlocks}
+              isLastMessage={isLastMessage}
             />,
           )
           nestedIdx++
@@ -594,6 +605,7 @@ interface AgentBranchWrapperProps {
   onBuildFast: () => void
   onBuildMax: () => void
   siblingBlocks?: ContentBlock[]
+  isLastMessage?: boolean
 }
 
 const AgentBranchWrapper = memo(
@@ -608,6 +620,7 @@ const AgentBranchWrapper = memo(
     onBuildFast,
     onBuildMax,
     siblingBlocks,
+    isLastMessage,
   }: AgentBranchWrapperProps) => {
     const theme = useTheme()
 
@@ -812,6 +825,7 @@ const AgentBranchWrapper = memo(
             onToggleCollapsed={onToggleCollapsed}
             onBuildFast={onBuildFast}
             onBuildMax={onBuildMax}
+            isLastMessage={isLastMessage}
           />
         </AgentBranchItem>
       </box>
@@ -878,6 +892,7 @@ interface SingleBlockProps {
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
+  isLastMessage?: boolean
 }
 
 const SingleBlock = memo(
@@ -896,6 +911,7 @@ const SingleBlock = memo(
     onToggleCollapsed,
     onBuildFast,
     onBuildMax,
+    isLastMessage,
   }: SingleBlockProps): ReactNode => {
     const theme = useTheme()
     const codeBlockWidth = Math.max(10, availableWidth - 8)
@@ -1013,6 +1029,7 @@ const SingleBlock = memo(
             onBuildFast={onBuildFast}
             onBuildMax={onBuildMax}
             siblingBlocks={blocks}
+            isLastMessage={isLastMessage}
           />
         )
       }
@@ -1047,6 +1064,7 @@ interface BlocksRendererProps {
   onToggleCollapsed: (id: string) => void
   onBuildFast: () => void
   onBuildMax: () => void
+  isLastMessage?: boolean
 }
 
 const BlocksRenderer = memo(
@@ -1063,6 +1081,7 @@ const BlocksRenderer = memo(
     onToggleCollapsed,
     onBuildFast,
     onBuildMax,
+    isLastMessage,
   }: BlocksRendererProps) => {
     const nodes: React.ReactNode[] = []
 
@@ -1176,6 +1195,7 @@ const BlocksRenderer = memo(
           onToggleCollapsed={onToggleCollapsed}
           onBuildFast={onBuildFast}
           onBuildMax={onBuildMax}
+          isLastMessage={isLastMessage}
         />,
       )
       i++

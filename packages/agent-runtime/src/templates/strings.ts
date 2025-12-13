@@ -61,12 +61,16 @@ export async function formatPrompt(
   let { prompt } = params
 
   const { messageHistory } = agentState
-  function isUserMessage(message: Message): message is UserMessage & {
+  function isUserInputMessage(message: Message): message is UserMessage & {
     content: [TextPart, ...any[]]
   } {
-    return message.role === 'user' && message.content[0].type === 'text'
+    return (
+      message.role === 'user' &&
+      message.content[0].type === 'text' &&
+      parseUserMessage(message.content[0].text) !== undefined
+    )
   }
-  const lastUserMessage = messageHistory.findLast(isUserMessage)
+  const lastUserMessage = messageHistory.findLast(isUserInputMessage)
   const lastUserInput = lastUserMessage
     ? parseUserMessage(lastUserMessage.content[0].text)
     : undefined
@@ -170,13 +174,14 @@ export async function getAgentPrompt<T extends StringField>(
     useParentTools,
   } = params
 
-  let promptValue = agentTemplate[promptType.type]
+  const { toolNames, spawnableAgents, outputSchema } = agentTemplate
+  const promptValue = agentTemplate[promptType.type]
 
   let prompt = await formatPrompt({
     ...params,
     prompt: promptValue,
-    tools: agentTemplate.toolNames,
-    spawnableAgents: agentTemplate.spawnableAgents,
+    tools: toolNames,
+    spawnableAgents,
   })
 
   let addendum = ''
@@ -190,34 +195,34 @@ export async function getAgentPrompt<T extends StringField>(
   if (promptType.type === 'instructionsPrompt' && agentState.agentType) {
     // Add subagent tools message when using parent's tools for prompt caching
     if (useParentTools) {
-      addendum += `\n\nYou are a subagent that only has access to the following tools: ${agentTemplate.toolNames.join(', ')}. Do not attempt to use any other tools.`
+      addendum += `\n\nYou are a subagent that only has access to the following tools: ${toolNames.length > 0 ? toolNames.join(', ') : 'none'}. Previously referenced tools in the conversation may have only been available to the parent agent. Do not attempt to use any other tools besides these listed here. You will only get tool errors if you do.`
 
       // For subagents with inheritSystemPrompt, include full spawnable agents spec
       // since the parent's system prompt may not have these agents listed
-      if (agentTemplate.spawnableAgents.length > 0) {
+      if (spawnableAgents.length > 0) {
         addendum +=
           '\n\n' +
           (await buildFullSpawnableAgentsSpec({
             ...params,
-            spawnableAgents: agentTemplate.spawnableAgents,
+            spawnableAgents,
             agentTemplates,
           }))
       }
-    } else if (agentTemplate.spawnableAgents.length > 0) {
+    } else if (spawnableAgents.length > 0) {
       // For non-inherited tools, agents are already defined as tools with full schemas,
       // so we just list the available agent IDs here
-      addendum += `\n\nYou can spawn the following agents: ${agentTemplate.spawnableAgents.join(', ')}.`
+      addendum += `\n\nYou can spawn the following agents: ${spawnableAgents.join(', ')}.`
     }
 
     // Add output schema information if defined
-    if (agentTemplate.outputSchema) {
+    if (outputSchema) {
       addendum += '\n\n## Output Schema\n\n'
       addendum +=
         'When using the set_output tool, your output must conform to this schema:\n\n'
       addendum += '```json\n'
       try {
         // Convert Zod schema to JSON schema for display
-        const jsonSchema = z.toJSONSchema(agentTemplate.outputSchema, {
+        const jsonSchema = z.toJSONSchema(outputSchema, {
           io: 'input',
         })
         delete jsonSchema['$schema'] // Remove the $schema field for cleaner display

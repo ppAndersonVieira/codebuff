@@ -27,6 +27,7 @@ import { detectTerminalTheme } from './utils/terminal-color-detection'
 import { setOscDetectedTheme } from './utils/theme-system'
 
 import type { FileTreeNode } from '@codebuff/common/util/file'
+import type { AgentMode } from './utils/constants'
 
 const require = createRequire(import.meta.url)
 
@@ -82,6 +83,7 @@ type ParsedArgs = {
   continue: boolean
   continueId?: string | null
   cwd?: string
+  initialMode?: AgentMode
 }
 
 function parseArgs(): ParsedArgs {
@@ -108,6 +110,9 @@ function parseArgs(): ParsedArgs {
       '--cwd <directory>',
       'Set the working directory (default: current directory)',
     )
+    .option('--lite', 'Start in LITE mode')
+    .option('--max', 'Start in MAX mode')
+    .option('--plan', 'Start in PLAN mode')
     .helpOption('-h, --help', 'Show this help message')
     .argument('[prompt...]', 'Initial prompt to send to the agent')
     .allowExcessArguments(true)
@@ -117,6 +122,12 @@ function parseArgs(): ParsedArgs {
   const args = program.args
 
   const continueFlag = options.continue
+
+  // Determine initial mode from flags (last flag wins if multiple specified)
+  let initialMode: AgentMode | undefined
+  if (options.lite) initialMode = 'LITE'
+  if (options.max) initialMode = 'MAX'
+  if (options.plan) initialMode = 'PLAN'
 
   return {
     initialPrompt: args.length > 0 ? args.join(' ') : null,
@@ -129,6 +140,7 @@ function parseArgs(): ParsedArgs {
         ? continueFlag.trim()
         : null,
     cwd: options.cwd,
+    initialMode,
   }
 }
 
@@ -155,6 +167,7 @@ async function main(): Promise<void> {
     continue: continueChat,
     continueId,
     cwd,
+    initialMode,
   } = parseArgs()
 
   await initializeApp({ cwd })
@@ -249,6 +262,7 @@ async function main(): Promise<void> {
         fileTree={fileTree}
         continueChat={continueChat}
         continueChatId={continueId ?? undefined}
+        initialMode={initialMode}
       />
     )
   }

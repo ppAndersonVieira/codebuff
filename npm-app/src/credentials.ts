@@ -2,12 +2,11 @@ import fs from 'fs'
 import path from 'node:path'
 import os from 'os'
 
+import { env } from '@codebuff/common/env'
 import { userSchema } from '@codebuff/common/util/credentials'
 import { z } from 'zod/v4'
 
-import { ensureDirectoryExistsSync } from './project-files'
-import { logger } from './utils/logger'
-
+import type { ClientEnv } from '@codebuff/common/types/contracts/env'
 import type { User } from '@codebuff/common/util/credentials'
 
 const credentialsSchema = z
@@ -15,6 +14,12 @@ const credentialsSchema = z
     default: userSchema,
   })
   .catchall(userSchema)
+
+const ensureDirectoryExistsSync = (dir: string) => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+}
 
 export const userFromJson = (
   json: string,
@@ -26,54 +31,47 @@ export const userFromJson = (
     return profile
   } catch (error) {
     console.error('Error parsing user JSON:', error)
-    logger.error(
-      {
-        errorMessage: error instanceof Error ? error.message : String(error),
-        errorStack: error instanceof Error ? error.stack : undefined,
-        profileName,
-      },
-      'Error parsing user JSON',
-    )
     return
   }
 }
 
-export const CONFIG_DIR = path.join(
-  os.homedir(),
-  '.config',
-  'manicode' +
-    // on a development stack?
-    (process.env.NEXT_PUBLIC_CB_ENVIRONMENT &&
-    process.env.NEXT_PUBLIC_CB_ENVIRONMENT !== 'prod'
-      ? `-${process.env.NEXT_PUBLIC_CB_ENVIRONMENT}`
-      : ''),
-)
-
-// Ensure config directory exists
-ensureDirectoryExistsSync(CONFIG_DIR)
-export const CREDENTIALS_PATH = path.join(CONFIG_DIR, 'credentials.json')
+/**
+ * Get the config directory path based on the environment.
+ * Uses the clientEnv to determine the environment suffix.
+ */
+export const getConfigDir = (clientEnv: ClientEnv = env): string => {
+  const envSuffix =
+    clientEnv.NEXT_PUBLIC_CB_ENVIRONMENT &&
+    clientEnv.NEXT_PUBLIC_CB_ENVIRONMENT !== 'prod'
+      ? `-${clientEnv.NEXT_PUBLIC_CB_ENVIRONMENT}`
+      : ''
+  return path.join(os.homedir(), '.config', `manicode${envSuffix}`)
+}
 
 /**
- * Get user credentials from file system
- * @returns User object or null if not found/authenticated
+ * Get the credentials file path based on the environment.
  */
-export const getUserCredentials = (): User | null => {
-  // Read user credentials directly from file
-  if (!fs.existsSync(CREDENTIALS_PATH)) {
+export const getCredentialsPath = (clientEnv: ClientEnv = env): string => {
+  return path.join(getConfigDir(clientEnv), 'credentials.json')
+}
+
+// Legacy exports for backward compatibility - use getConfigDir() and getCredentialsPath() for testability
+export const CONFIG_DIR = getConfigDir()
+ensureDirectoryExistsSync(CONFIG_DIR)
+export const CREDENTIALS_PATH = getCredentialsPath()
+
+export const getUserCredentials = (clientEnv: ClientEnv = env): User | null => {
+  const credentialsPath = getCredentialsPath(clientEnv)
+  if (!fs.existsSync(credentialsPath)) {
     return null
   }
 
   try {
-    const credentialsFile = fs.readFileSync(CREDENTIALS_PATH, 'utf8')
+    const credentialsFile = fs.readFileSync(credentialsPath, 'utf8')
     const user = userFromJson(credentialsFile)
     return user || null
   } catch (error) {
-    logger.error(
-      {
-        error: error instanceof Error ? error.message : String(error),
-      },
-      'Error reading credentials',
-    )
+    console.error('Error reading credentials', error)
     return null
   }
 }

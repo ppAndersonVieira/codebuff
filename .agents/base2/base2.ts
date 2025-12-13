@@ -51,6 +51,7 @@ export function createBase2(
       'read_files',
       'read_subtree',
       !isFast && !isLite && 'write_todos',
+      !isFast && 'suggest_followups',
       'str_replace',
       'write_file',
       'ask_user',
@@ -67,9 +68,9 @@ export function createBase2(
       isDefault && 'thinker',
       isLite && 'editor-gpt-5',
       isDefault && 'editor',
-      isMax && 'editor-best-of-n-opus',
+      isMax && 'editor-multi-prompt',
       isMax && 'thinker-best-of-n-opus',
-      !isLite && 'code-reviewer-opus',
+      !isLite && 'code-reviewer',
       'context-pruner',
     ),
 
@@ -126,11 +127,11 @@ Use the spawn_agents tool to spawn specialized agents to help you complete the u
     (isDefault || isMax) &&
       `- Spawn the ${isDefault ? 'thinker' : 'thinker-best-of-n-opus'} after gathering context to solve complex problems or when the user asks you to think about a problem.`,
     isMax &&
-      `- Spawn the editor-best-of-n-opus agent to implement the changes after you have gathered all the context you need. You must spawn this agent for non-trivial changes, since it writes much better code than you would with the str_replace or write_file tools. Don't spawn the editor in parallel with context-gathering agents.`,
+      `- Spawn the editor-multi-prompt agent to implement the changes after you have gathered all the context you need. You must spawn this agent for non-trivial changes, since it writes much better code than you would with the str_replace or write_file tools. Don't spawn the editor in parallel with context-gathering agents.`,
     '- Spawn commanders sequentially if the second command depends on the the first.',
     !isFast &&
       !isLite &&
-      '- Spawn a code-reviewer-opus to review the changes after you have implemented the changes.',
+      '- Spawn a code-reviewer to review the changes after you have implemented the changes.',
   ).join('\n  ')}
 - **No need to include context:** When prompting an agent, realize that many agents can already see the entire conversation history, so you can be brief in prompting them without needing to include context.
 
@@ -172,7 +173,7 @@ ${buildArray(
 
 [ You spawn one more code-searcher and file-picker ]
 
-[ You read a few other relevant files using the read_files tool ]${isMax ? `\n\n[ You spawn the thinker-best-of-n-opus to help solve a tricky part of the feature ]` : ``}
+[ You read a few other relevant files using the read_files tool ]
 ${
   isDefault
     ? `[ You implement the changes using the editor agent ]`
@@ -180,7 +181,7 @@ ${
       ? '[ You implement the changes using the str_replace or write_file tools ]'
       : isLite
         ? '[ You implement the changes using the editor-gpt-5 agent ]'
-        : '[ You implement the changes using the editor-best-of-n-opus agent ]'
+        : '[ You implement the changes using the editor-multi-prompt agent ]'
 }
 
 ${
@@ -239,6 +240,7 @@ ${PLACEHOLDER.GIT_CHANGES_PROMPT}
           isMax,
           hasNoValidation,
           isSonnet,
+          isLite,
         }),
 
     handleSteps: function* ({ params }) {
@@ -293,23 +295,23 @@ ${buildArray(
     `- For any task requiring 3+ steps, use the write_todos tool to write out your step-by-step implementation plan. Include ALL of the applicable tasks in the list.${isFast ? '' : ' You should include a step to review the changes after you have implemented the changes.'}:${hasNoValidation ? '' : ' You should include at least one step to validate/test your changes: be specific about whether to typecheck, run tests, run lints, etc.'} You may be able to do reviewing and validation in parallel in the same step. Skip write_todos for simple tasks like quick edits or answering questions.`,
   isDefault &&
     `- For complex problems, spawn the thinker agent to help find the best solution, or when the user asks you to think about a problem.`,
-  isMax &&
-    `- Important: Spawn the thinker-best-of-n-opus to help find the best solution before implementing changes, or especially when the user asks you to think about a problem.`,
   isLite &&
     '- IMPORTANT: You must spawn the editor-gpt-5 agent to implement the changes after you have gathered all the context you need. This agent will do the best job of implementing the changes so you must spawn it for all changes. Do not pass any prompt or params to the editor agent when spawning it. It will make its own best choices of what to do.',
   isDefault &&
     '- IMPORTANT: You must spawn the editor agent to implement the changes after you have gathered all the context you need. This agent will do the best job of implementing the changes so you must spawn it for all non-trivial changes. Do not pass any prompt or params to the editor agent when spawning it. It will make its own best choices of what to do.',
   isMax &&
-    `- IMPORTANT: You must spawn the editor-best-of-n-opus agent to implement non-trivial code changes, since it will generate the best code changes from multiple implementation proposals. This is the best way to make high quality code changes -- strongly prefer using this agent over the str_replace or write_file tools, unless the change is very straightforward and obvious. Do not pass any prompt or params to the editor agent when spawning it. It will make its own best choices of what to do.`,
+    `- IMPORTANT: You must spawn the editor-multi-prompt agent to implement non-trivial code changes, since it will generate the best code changes from multiple implementation proposals. This is the best way to make high quality code changes -- strongly prefer using this agent over the str_replace or write_file tools, unless the change is very straightforward and obvious.`,
   isFast &&
     '- Implement the changes using the str_replace or write_file tools. Implement all the changes in one go.',
   isFast &&
     '- Do a single typecheck targeted for your changes at most (if applicable for the project). Or skip this step if the change was small.',
   (isDefault || isMax) &&
-    '- Spawn a code-reviewer-opus to review the changes after you have implemented the changes. (Skip this step only if the change is extremely straightforward and obvious.)',
+    '- Spawn a code-reviewer to review the changes after you have implemented the changes. (Skip this step only if the change is extremely straightforward and obvious.)',
   !hasNoValidation &&
     `- Test your changes by running appropriate validation commands for the project (e.g. typechecks, tests, lints, etc.). Try to run all appropriate commands in parallel. ${isMax ? ' Typecheck and test the specific area of the project that you are editing *AND* then typecheck and test the entire project if necessary.' : ' If you can, only test the area of the project that you are editing, rather than the entire project.'} You may have to explore the project to find the appropriate commands. Don't skip this step!`,
   `- Inform the user that you have completed the task in one sentence or a few short bullet points.${isSonnet ? " Don't create any markdown summary files or example documentation files, unless asked by the user." : ''}`,
+  !isFast &&
+    `- After successfully completing an implementation, use the suggest_followups tool to suggest ~3 next steps the user might want to take (e.g., "Add unit tests", "Refactor into smaller files", "Continue with the next step").`,
 ).join('\n')}`
 }
 
@@ -319,22 +321,25 @@ function buildImplementationStepPrompt({
   isMax,
   hasNoValidation,
   isSonnet,
+  isLite,
 }: {
   isDefault: boolean
   isFast: boolean
   isMax: boolean
   hasNoValidation: boolean
   isSonnet: boolean
+  isLite: boolean
 }) {
   return buildArray(
     isMax &&
       `Keep working until the user's request is completely satisfied${!hasNoValidation ? ' and validated' : ''}, or until you require more information from the user.`,
     isMax &&
-      `You must spawn the 'editor-best-of-n-opus' agent to implement code changes, since it will generate the best code changes.`,
-    isMax && 'Spawn the thinker-best-of-n-opus to solve complex problems.',
+      `You must spawn the 'editor-multi-prompt' agent to implement code changes, since it will generate the best code changes.`,
     (isDefault || isMax) &&
-      'Spawn code-reviewer-opus to review the changes after you have implemented the changes and in parallel with typechecking or testing.',
+      'Spawn code-reviewer to review the changes after you have implemented the changes and in parallel with typechecking or testing.',
     `After completing the user request, summarize your changes in a sentence${isFast ? '' : ' or a few short bullet points'}.${isSonnet ? " Don't create any summary markdown files or example documentation files, unless asked by the user." : ''} Don't repeat yourself, especially if you have already concluded and summarized the changes in a previous step -- just end your turn.`,
+    !isFast &&
+      `After a successful implementation, use the suggest_followups tool to suggest around 3 next steps the user might want to take.`,
   ).join('\n')
 }
 

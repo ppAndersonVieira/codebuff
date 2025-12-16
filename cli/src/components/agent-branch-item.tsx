@@ -188,7 +188,7 @@ export const AgentBranchItem = memo((props: AgentBranchItemProps) => {
             paddingLeft: 1,
             paddingRight: 1,
             paddingTop: 0,
-            paddingBottom: isCollapsed ? 0 : 1,
+            paddingBottom: 0,
             width: '100%',
           }}
           onClick={onToggle}
@@ -219,13 +219,14 @@ export const AgentBranchItem = memo((props: AgentBranchItemProps) => {
 
         {isCollapsed ? (
           showCollapsedPreview ? (
-            <box
+            <Button
               style={{
                 paddingLeft: 1,
                 paddingRight: 1,
                 paddingTop: 0,
                 paddingBottom: 0,
               }}
+              onClick={onToggle}
             >
               <text
                 fg={isStreaming ? theme.foreground : theme.muted}
@@ -233,7 +234,7 @@ export const AgentBranchItem = memo((props: AgentBranchItemProps) => {
               >
                 {isStreaming ? streamingPreview : finishedPreview}
               </text>
-            </box>
+            </Button>
           ) : null
         ) : (
           <box
@@ -284,7 +285,7 @@ export const AgentBranchItem = memo((props: AgentBranchItemProps) => {
               <Button
                 style={{
                   alignSelf: 'flex-end',
-                  marginTop: 1,
+                  marginTop: 0,
                 }}
                 onClick={onToggle}
               >

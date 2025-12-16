@@ -1,29 +1,16 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
-import { BYOK_OPENROUTER_HEADER } from '@codebuff/common/constants/byok'
+
 import { getErrorObject } from '@codebuff/common/util/error'
 import { pluralize } from '@codebuff/common/util/string'
 import { env } from '@codebuff/internal/env'
 import { NextResponse } from 'next/server'
 
-import {
-  handleOpenAINonStream,
-  OPENAI_SUPPORTED_MODELS,
-} from '@/llm-api/openai'
-import {
-  handleOpenRouterNonStream,
-  handleOpenRouterStream,
-  OpenRouterError,
-} from '@/llm-api/openrouter'
-import { extractApiKeyFromHeader } from '@/util/auth'
 
-/**
- * User IDs that are blocked from using the chat completions API.
- * Returns a cryptic error to avoid revealing the block.
- */
-const BLOCKED_USER_IDS: string[] = [
-  '5e5aa538-92c8-4051-b0ec-5f75dbd69767',
-  '5972546e-648d-4da6-991f-17c42b037329',
-]
+import {
+  handleLocalhostNonStream,
+  handleLocalhostStream,
+} from '@/llm-api/localhost'
+import { extractApiKeyFromHeader } from '@/util/auth'
 
 import type { TrackEventFn } from '@codebuff/common/types/contracts/analytics'
 import type { InsertMessageBigqueryFn } from '@codebuff/common/types/contracts/bigquery'
@@ -99,7 +86,7 @@ export async function postChatCompletions(params: {
 
   try {
     // Parse request body
-    let body: Record<string, unknown>
+    let body: {}
     try {
       body = await req.json()
     } catch (error) {
@@ -157,17 +144,6 @@ export async function postChatCompletions(params: {
     logger = loggerWithContext({ userInfo })
 
     const userId = userInfo.id
-
-    // Check if user is blocked. Return fake overloaded error to avoid revealing the block.
-    if (BLOCKED_USER_IDS.includes(userId)) {
-      return NextResponse.json(
-        {
-          error: 'upstream_timeout',
-          message: 'Overloaded. Request could not be processed',
-        },
-        { status: 503 },
-      )
-    }
 
     // Track API request
     trackEvent({
@@ -264,17 +240,14 @@ export async function postChatCompletions(params: {
       )
     }
 
-    const openrouterApiKey = req.headers.get(BYOK_OPENROUTER_HEADER)
-
-    // Handle streaming vs non-streaming
+    // Handle streaming vs non-streaming using localhost:4141
     try {
       if (bodyStream) {
         // Streaming request
-        const stream = await handleOpenRouterStream({
+        const stream = await handleLocalhostStream({
           body,
           userId,
           agentId,
-          openrouterApiKey,
           fetch,
           logger,
           insertMessageBigquery,
@@ -299,37 +272,15 @@ export async function postChatCompletions(params: {
           },
         })
       } else {
-        // Non-streaming request
-        const model = (body as any)?.model
-        const shortModelName =
-          typeof model === 'string' ? model.split('/')[1] : undefined
-        const isOpenAIDirectModel =
-          typeof model === 'string' &&
-          model.startsWith('openai/') &&
-          OPENAI_SUPPORTED_MODELS.includes(shortModelName as any)
-        // Only use OpenAI endpoint for OpenAI models with n parameter
-        // All other models (including non-OpenAI with n parameter) should use OpenRouter
-        const shouldUseOpenAIEndpoint =
-          isOpenAIDirectModel && (body as any)?.codebuff_metadata?.n
-
-        const result = await (shouldUseOpenAIEndpoint
-          ? handleOpenAINonStream({
-              body,
-              userId,
-              agentId,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            })
-          : handleOpenRouterNonStream({
-              body,
-              userId,
-              agentId,
-              openrouterApiKey,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            }))
+        // Non-streaming request - use localhost:4141
+        const result = await handleLocalhostNonStream({
+          body,
+          userId,
+          agentId,
+          fetch,
+          logger,
+          insertMessageBigquery,
+        })
 
         trackEvent({
           event: AnalyticsEvent.CHAT_COMPLETIONS_GENERATION_STARTED,
@@ -345,34 +296,10 @@ export async function postChatCompletions(params: {
         return NextResponse.json(result)
       }
     } catch (error) {
-      let openrouterError: OpenRouterError | undefined
-      if (error instanceof OpenRouterError) {
-        openrouterError = error
-      }
-
-      // Log detailed error information for debugging
-      const errorDetails = openrouterError?.toJSON()
+      
       logger.error(
-        {
-          error: getErrorObject(error),
-          userId,
-          agentId,
-          runId: runIdFromBody,
-          model: (body as any)?.model,
-          streaming: !!bodyStream,
-          hasByokKey: !!openrouterApiKey,
-          messageCount: Array.isArray((body as any)?.messages)
-            ? (body as any).messages.length
-            : 0,
-          openrouterStatusCode: openrouterError?.statusCode,
-          openrouterStatusText: openrouterError?.statusText,
-          openrouterErrorCode: errorDetails?.error?.code,
-          openrouterErrorType: errorDetails?.error?.type,
-          openrouterErrorMessage: errorDetails?.error?.message,
-          openrouterProviderName: errorDetails?.error?.metadata?.provider_name,
-          openrouterProviderRaw: errorDetails?.error?.metadata?.raw,
-        },
-        'OpenRouter request failed',
+        { error: getErrorObject(error), body },
+        'Error with localhost request',
       )
       trackEvent({
         event: AnalyticsEvent.CHAT_COMPLETIONS_ERROR,
@@ -386,10 +313,6 @@ export async function postChatCompletions(params: {
         logger,
       })
 
-      // Pass through OpenRouter provider-specific errors
-      if (error instanceof OpenRouterError) {
-        return NextResponse.json(error.toJSON(), { status: error.statusCode })
-      }
 
       return NextResponse.json(
         { error: 'Failed to process request' },

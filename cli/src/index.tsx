@@ -177,17 +177,40 @@ async function main(): Promise<void> {
     const result = await handlePublish(agentIds)
 
     if (result.success && result.publisherId && result.agents) {
-      console.log(green('✅ Successfully published:'))
-      for (const agent of result.agents) {
-        console.log(
-          cyan(
-            `  - ${agent.displayName} (${result.publisherId}/${agent.id}@${agent.version})`,
-          ),
-        )
+      // Handle batch publish (publish all) results
+      if (result.isBatchPublish) {
+        console.log(green(`✅ Successfully published ${result.totalSuccess} agent(s):`))
+        for (const agent of result.agents) {
+          console.log(
+            cyan(
+              `  - ${agent.displayName} (${result.publisherId}/${agent.id}@${agent.version})`,
+            ),
+          )
+        }
+        if (result.totalFailed && result.totalFailed > 0) {
+          console.log(yellow(`\n⚠️  ${result.totalFailed} agent(s) failed to publish`))
+          if (result.error) console.log(yellow(`  ${result.error}`))
+          if (result.hint) console.log(yellow(`  Hint: ${result.hint}`))
+        }
+        console.log(cyan(`\n📊 Summary: ${result.totalSuccess} published, ${result.totalFailed || 0} failed`))
+      } else {
+        console.log(green('✅ Successfully published:'))
+        for (const agent of result.agents) {
+          console.log(
+            cyan(
+              `  - ${agent.displayName} (${result.publisherId}/${agent.id}@${agent.version})`,
+            ),
+          )
+        }
       }
       process.exit(0)
     } else {
-      console.log(red('❌ Publish failed'))
+      // Handle batch publish failure
+      if (result.isBatchPublish) {
+        console.log(red(`❌ Publish failed for all ${result.totalFailed || 0} agent(s)`))
+      } else {
+        console.log(red('❌ Publish failed'))
+      }
       if (result.error) console.log(red(`Error: ${result.error}`))
       if (result.details) console.log(red(result.details))
       if (result.hint) console.log(yellow(`Hint: ${result.hint}`))

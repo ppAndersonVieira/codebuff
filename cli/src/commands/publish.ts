@@ -20,6 +20,12 @@ export interface PublishResult {
   error?: string
   details?: string
   hint?: string
+  /** For 'publish all' - total agents successfully published */
+  totalSuccess?: number
+  /** For 'publish all' - total agents that failed to publish */
+  totalFailed?: number
+  /** For 'publish all' - indicates this was a batch publish */
+  isBatchPublish?: boolean
 }
 
 /**
@@ -109,7 +115,7 @@ export async function handlePublish(agentIds: string[]): Promise<PublishResult> 
     return {
       success: false,
       error: 'No agents specified',
-      hint: 'Usage: publish <agent-id> [agent-id2] ...',
+      hint: 'Usage: publish <agent-id> [agent-id2] ... or publish all',
     }
   }
 
@@ -121,6 +127,13 @@ export async function handlePublish(agentIds: string[]): Promise<PublishResult> 
         success: false,
         error: 'No valid agent templates found in .agents directory.',
       }
+    }
+
+    // Check if user wants to publish all agents
+    const isPublishAll = agentIds.length === 1 && agentIds[0].toLowerCase() === 'all'
+    
+    if (isPublishAll) {
+      return handlePublishAll(loadedDefinitions, user.authToken!)
     }
 
     const matchingTemplates: Record<string, any> = {}
@@ -197,6 +210,111 @@ export async function handlePublish(agentIds: string[]): Promise<PublishResult> 
       success: false,
       error: 'Publish failed',
       details: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+/**
+ * Handle publishing all agents from .agents directory
+ * Groups agents by publisher and publishes in batches
+ */
+async function handlePublishAll(
+  loadedDefinitions: any[],
+  authToken: string,
+): Promise<PublishResult> {
+  // Group agents by publisher
+  const agentsByPublisher = new Map<string, any[]>()
+  
+  for (const template of loadedDefinitions) {
+    // Process the template for publishing
+    const processedTemplate = { ...template }
+    
+    // Convert handleSteps function to string if present
+    if (typeof template.handleSteps === 'function') {
+      processedTemplate.handleSteps = template.handleSteps.toString()
+    }
+    
+    const publisher = template.publisher || 'default'
+    if (!agentsByPublisher.has(publisher)) {
+      agentsByPublisher.set(publisher, [])
+    }
+    agentsByPublisher.get(publisher)!.push(processedTemplate)
+  }
+
+  // Get all local agent IDs for validation purposes
+  const allLocalAgentIds = loadedDefinitions.map((template) => template.id)
+
+  let totalSuccess = 0
+  let totalFailed = 0
+  const allPublishedAgents: Array<{ id: string; version: string; displayName: string }> = []
+  let lastPublisherId: string | undefined
+  let lastError: string | undefined
+  let lastDetails: string | undefined
+  let lastHint: string | undefined
+
+  // Publish agents in batches by publisher
+  for (const [publisher, agents] of agentsByPublisher.entries()) {
+    if (agents.length === 0) continue
+
+    const result = await publishAgentTemplates(
+      agents,
+      authToken,
+      allLocalAgentIds,
+    )
+
+    if (result.success) {
+      totalSuccess += result.agents.length
+      allPublishedAgents.push(...result.agents)
+      lastPublisherId = result.publisherId
+    } else {
+      totalFailed += agents.length
+      lastError = result.error
+      lastDetails = result.details
+      
+      // Build helpful hint based on error type
+      if (result.error.includes('Publisher field required')) {
+        lastHint = 'Add a "publisher" field to your agent templates.'
+      } else if (result.error.includes('Publisher not found or not accessible')) {
+        lastHint = `Check that the publisher ID is correct and you have access to it. Visit ${WEBSITE_URL}/publishers to manage publishers.`
+      } else {
+        lastHint = result.hint
+      }
+    }
+  }
+
+  // Return aggregated result
+  if (totalSuccess > 0 && totalFailed === 0) {
+    return {
+      success: true,
+      publisherId: lastPublisherId,
+      agents: allPublishedAgents,
+      totalSuccess,
+      totalFailed,
+      isBatchPublish: true,
+    }
+  } else if (totalSuccess > 0 && totalFailed > 0) {
+    // Partial success
+    return {
+      success: true,
+      publisherId: lastPublisherId,
+      agents: allPublishedAgents,
+      error: `Some agents failed to publish`,
+      details: lastDetails,
+      hint: lastHint,
+      totalSuccess,
+      totalFailed,
+      isBatchPublish: true,
+    }
+  } else {
+    // All failed
+    return {
+      success: false,
+      error: lastError || 'Failed to publish all agents',
+      details: lastDetails,
+      hint: lastHint,
+      totalSuccess,
+      totalFailed,
+      isBatchPublish: true,
     }
   }
 }

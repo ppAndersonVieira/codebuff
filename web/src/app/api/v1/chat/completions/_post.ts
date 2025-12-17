@@ -124,7 +124,7 @@ export async function postChatCompletions(params: {
     // Get user info
     const userInfo = await getUserInfoFromApiKey({
       apiKey,
-      fields: ['id', 'email', 'discord_id'],
+      fields: ['id', 'email', 'discord_id', 'banned'],
       logger,
     })
     if (!userInfo) {
@@ -144,6 +144,22 @@ export async function postChatCompletions(params: {
     logger = loggerWithContext({ userInfo })
 
     const userId = userInfo.id
+
+    // Check if user is banned.
+    // We use a clear, helpful message rather than a cryptic error because:
+    // 1. Legitimate users banned by mistake deserve to know what's happening
+    // 2. Bad actors will figure out they're banned regardless of the message
+    // 3. Clear messaging encourages resolution (matches our dispute notification email)
+    // 4. 403 Forbidden is the correct HTTP status for "you're not allowed"
+    if (userInfo.banned) {
+      return NextResponse.json(
+        {
+          error: 'account_suspended',
+          message: `Your account has been suspended due to billing issues. Please contact ${env.NEXT_PUBLIC_SUPPORT_EMAIL} to resolve this.`,
+        },
+        { status: 403 },
+      )
+    }
 
     // Track API request
     trackEvent({

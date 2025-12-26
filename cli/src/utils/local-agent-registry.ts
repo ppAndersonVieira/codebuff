@@ -104,8 +104,9 @@ const getUserAgentsAsLocalInfo = (): LocalAgentInfo[] => {
 
 /**
  * Get user agents from the cache as AgentDefinition[]
+ * These are agents from the user's .agents directory (not bundled Codebuff agents)
  */
-const getUserAgentDefinitions = (): AgentDefinition[] => {
+export const getUserAgentDefinitions = (): AgentDefinition[] => {
   return Object.values(userAgentsCache) as AgentDefinition[]
 }
 

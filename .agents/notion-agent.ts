@@ -1,8 +1,10 @@
 import type { AgentDefinition } from './types/agent-definition'
+import { publisher } from './constants'
 
 const definition: AgentDefinition = {
   id: 'notion-query-agent',
   displayName: 'Notion Query Agent',
+  publisher,
   model: 'x-ai/grok-4-fast',
 
   spawnerPrompt:

@@ -2,7 +2,7 @@ import { WEBSITE_URL } from '@codebuff/sdk'
 
 import { getUserCredentials } from '../utils/auth'
 import { getApiClient, setApiClientAuthToken } from '../utils/codebuff-api'
-import { loadAgentDefinitions, getLoadedAgentsData } from '../utils/local-agent-registry'
+import { loadAgentDefinitions, getLoadedAgentsData, getUserAgentDefinitions } from '../utils/local-agent-registry'
 
 import type {
   PublishAgentsErrorResponse,
@@ -133,7 +133,21 @@ export async function handlePublish(agentIds: string[]): Promise<PublishResult> 
     const isPublishAll = agentIds.length === 1 && agentIds[0].toLowerCase() === 'all'
     
     if (isPublishAll) {
-      return handlePublishAll(loadedDefinitions, user.authToken!)
+      // Publish all local agents that have a publisher defined
+      const userAgents = getUserAgentDefinitions()
+      const publishableAgents = userAgents.filter((agent: any) => {
+        // Include agents that have a publisher defined
+        return agent.publisher && agent.publisher.length > 0
+      })
+      
+      if (publishableAgents.length === 0) {
+        return {
+          success: false,
+          error: 'No publishable agents found in .agents directory.',
+          hint: 'Create agents with a "publisher" field in your .agents directory to publish them.',
+        }
+      }
+      return handlePublishAll(publishableAgents, user.authToken!)
     }
 
     const matchingTemplates: Record<string, any> = {}
@@ -215,18 +229,102 @@ export async function handlePublish(agentIds: string[]): Promise<PublishResult> 
 }
 
 /**
+ * Extract local agent ID from a spawnable agent reference.
+ * Handles formats like "my-agent", "publisher/my-agent", "publisher/my-agent@1.0.0"
+ * Returns the base agent ID without publisher prefix or version suffix.
+ */
+function extractLocalAgentId(spawnableRef: string): string {
+  // Remove version suffix if present (e.g., "@1.0.0")
+  const withoutVersion = spawnableRef.split('@')[0]
+  // Remove publisher prefix if present (e.g., "publisher/")
+  const parts = withoutVersion.split('/')
+  return parts[parts.length - 1]
+}
+
+/**
+ * Perform topological sort on agents based on their spawnableAgents dependencies.
+ * Returns agents ordered so that dependencies are published before dependents.
+ */
+function topologicalSortAgents(agents: any[]): any[] {
+  const agentMap = new Map<string, any>()
+  const inDegree = new Map<string, number>()
+  const adjacencyList = new Map<string, string[]>()
+  
+  // Build maps
+  for (const agent of agents) {
+    agentMap.set(agent.id, agent)
+    inDegree.set(agent.id, 0)
+    adjacencyList.set(agent.id, [])
+  }
+  
+  // Build dependency graph (edges from dependency to dependent)
+  // If A spawns B, B must be published before A, so B -> A
+  for (const agent of agents) {
+    const spawnableAgents = agent.spawnableAgents || []
+    for (const spawnableRef of spawnableAgents) {
+      const depId = extractLocalAgentId(spawnableRef)
+      // Only consider dependencies that are in our local agent set
+      if (agentMap.has(depId)) {
+        // depId -> agent.id (dependency must come before dependent)
+        adjacencyList.get(depId)!.push(agent.id)
+        inDegree.set(agent.id, (inDegree.get(agent.id) || 0) + 1)
+      }
+    }
+  }
+  
+  // Kahn's algorithm for topological sort
+  const queue: string[] = []
+  const sorted: any[] = []
+  
+  // Start with agents that have no dependencies (in-degree 0)
+  for (const [id, degree] of inDegree.entries()) {
+    if (degree === 0) {
+      queue.push(id)
+    }
+  }
+  
+  while (queue.length > 0) {
+    const current = queue.shift()!
+    sorted.push(agentMap.get(current)!)
+    
+    for (const dependent of adjacencyList.get(current) || []) {
+      const newDegree = (inDegree.get(dependent) || 1) - 1
+      inDegree.set(dependent, newDegree)
+      if (newDegree === 0) {
+        queue.push(dependent)
+      }
+    }
+  }
+  
+  // If we couldn't sort all agents, there's a cycle - just append remaining
+  // in original order to avoid losing them
+  if (sorted.length < agents.length) {
+    const sortedIds = new Set(sorted.map(a => a.id))
+    for (const agent of agents) {
+      if (!sortedIds.has(agent.id)) {
+        sorted.push(agent)
+      }
+    }
+  }
+  
+  return sorted
+}
+
+/**
  * Handle publishing all agents from .agents directory
- * Groups agents by publisher and publishes in batches
+ * Sorts agents by dependencies (topological order) and publishes one by one
+ * to ensure dependencies are published before dependents.
  */
 async function handlePublishAll(
   loadedDefinitions: any[],
   authToken: string,
 ): Promise<PublishResult> {
-  // Group agents by publisher
-  const agentsByPublisher = new Map<string, any[]>()
+  // Sort agents topologically by dependencies
+  const sortedAgents = topologicalSortAgents(loadedDefinitions)
   
-  for (const template of loadedDefinitions) {
-    // Process the template for publishing
+  // Process templates for publishing
+  const processedAgents: any[] = []
+  for (const template of sortedAgents) {
     const processedTemplate = { ...template }
     
     // Convert handleSteps function to string if present
@@ -234,11 +332,7 @@ async function handlePublishAll(
       processedTemplate.handleSteps = template.handleSteps.toString()
     }
     
-    const publisher = template.publisher || 'default'
-    if (!agentsByPublisher.has(publisher)) {
-      agentsByPublisher.set(publisher, [])
-    }
-    agentsByPublisher.get(publisher)!.push(processedTemplate)
+    processedAgents.push(processedTemplate)
   }
 
   // Get all local agent IDs for validation purposes
@@ -252,29 +346,29 @@ async function handlePublishAll(
   let lastDetails: string | undefined
   let lastHint: string | undefined
 
-  // Publish agents in batches by publisher
-  for (const [publisher, agents] of agentsByPublisher.entries()) {
-    if (agents.length === 0) continue
-
+  // Publish agents one by one in dependency order
+  for (const agent of processedAgents) {
     const result = await publishAgentTemplates(
-      agents,
+      [agent],
       authToken,
       allLocalAgentIds,
     )
 
     if (result.success) {
-      totalSuccess += result.agents.length
-      allPublishedAgents.push(...result.agents)
+      totalSuccess += 1
+      if (result.agents) {
+        allPublishedAgents.push(...result.agents)
+      }
       lastPublisherId = result.publisherId
     } else {
-      totalFailed += agents.length
+      totalFailed += 1
       lastError = result.error
       lastDetails = result.details
       
       // Build helpful hint based on error type
-      if (result.error.includes('Publisher field required')) {
+      if (result.error?.includes('Publisher field required')) {
         lastHint = 'Add a "publisher" field to your agent templates.'
-      } else if (result.error.includes('Publisher not found or not accessible')) {
+      } else if (result.error?.includes('Publisher not found or not accessible')) {
         lastHint = `Check that the publisher ID is correct and you have access to it. Visit ${WEBSITE_URL}/publishers to manage publishers.`
       } else {
         lastHint = result.hint

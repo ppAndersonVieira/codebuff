@@ -1,7 +1,7 @@
 import * as bigquery from '@codebuff/bigquery'
 import * as analytics from '@codebuff/common/analytics'
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
-import { TEST_AGENT_RUNTIME_IMPL } from '@codebuff/common/testing/impl/agent-runtime'
+import { createTestAgentRuntimeParams } from '@codebuff/common/testing/fixtures/agent-runtime'
 import {
   AgentTemplateTypes,
   getInitialSessionState,
@@ -23,14 +23,15 @@ import { mainPrompt } from '../main-prompt'
 import * as processFileBlockModule from '../process-file-block'
 
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
-import type { RequestToolCallFn } from '@codebuff/common/types/contracts/client'
 import type {
-  ParamsExcluding,
-  ParamsOf,
-} from '@codebuff/common/types/function-params'
+  RequestFilesFn,
+  RequestOptionalFileFn,
+  RequestToolCallFn,
+} from '@codebuff/common/types/contracts/client'
+import type { ParamsOf } from '@codebuff/common/types/function-params'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
 
-let mainPromptBaseParams: ParamsExcluding<typeof mainPrompt, 'action'>
+let mainPromptBaseParams: any
 
 import { createToolCallChunk } from './test-utils'
 
@@ -90,7 +91,7 @@ describe('mainPrompt', () => {
     }
 
     mainPromptBaseParams = {
-      ...TEST_AGENT_RUNTIME_IMPL,
+      ...createTestAgentRuntimeParams(),
       repoId: undefined,
       repoUrl: undefined,
       userId: TEST_USER_ID,
@@ -125,7 +126,9 @@ describe('mainPrompt', () => {
     mockAgentStream([{ type: 'text', text: 'Test response' }])
 
     // Mock websocket actions
-    mainPromptBaseParams.requestFiles = async ({ filePaths }) => {
+    mainPromptBaseParams.requestFiles = async ({
+      filePaths,
+    }: ParamsOf<RequestFilesFn>) => {
       const results: Record<string, string | null> = {}
       filePaths.forEach((p) => {
         if (p === 'test.txt') {
@@ -137,7 +140,9 @@ describe('mainPrompt', () => {
       return results
     }
 
-    mainPromptBaseParams.requestOptionalFile = async ({ filePath }) => {
+    mainPromptBaseParams.requestOptionalFile = async ({
+      filePath,
+    }: ParamsOf<RequestOptionalFileFn>) => {
       if (filePath === 'test.txt') {
         return 'mock content for test.txt'
       }
@@ -200,7 +205,9 @@ describe('mainPrompt', () => {
     },
   }
 
-  it('includes local agents in spawnableAgents when agentId is provided', async () => {
+  it('does not include other local agents in spawnableAgents when agentId is provided', async () => {
+    // When a specific agentId is provided, we only use the spawnable agents
+    // defined in that agent's template - we don't auto-add all available agents
     const sessionState = getInitialSessionState(mockFileContext)
     const mainAgentId = 'test-main-agent'
     const localAgentId = 'test-local-agent'
@@ -257,9 +264,12 @@ describe('mainPrompt', () => {
       localAgentTemplates,
     })
 
-    expect(localAgentTemplates[mainAgentId].spawnableAgents).toContain(
+    // When agentId is provided, spawnableAgents should only contain what was
+    // explicitly defined in the template (empty in this case)
+    expect(localAgentTemplates[mainAgentId].spawnableAgents).not.toContain(
       localAgentId,
     )
+    expect(localAgentTemplates[mainAgentId].spawnableAgents).toEqual([])
   })
 
   it('should handle write_file tool call', async () => {

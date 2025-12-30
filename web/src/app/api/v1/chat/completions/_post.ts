@@ -314,7 +314,19 @@ export async function postChatCompletions(params: {
     } catch (error) {
       
       logger.error(
-        { error: getErrorObject(error), body },
+        {
+          error: getErrorObject(error),
+          body,
+          userId,
+          agentId,
+          runId: runIdFromBody,
+          model: (body as any)?.model,
+          streaming: !!bodyStream,
+          messageCount: Array.isArray((body as any)?.messages)
+            ? (body as any).messages.length
+            : 0,
+          messages: (body as any)?.messages,
+        },
         'Error with localhost request',
       )
       trackEvent({

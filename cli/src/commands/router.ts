@@ -1,5 +1,6 @@
 import { runTerminalCommand } from '@codebuff/sdk'
 
+import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 
 import {
   findCommand,
@@ -14,6 +15,7 @@ import {
   extractReferralCode,
   normalizeReferralCode,
 } from './router-utils'
+import { handleClaudeAuthCode } from '../components/claude-connect-banner'
 import { getProjectRoot } from '../project-files'
 import { useChatStore } from '../state/chat-store'
 import {
@@ -28,6 +30,7 @@ import {
 import { showClipboardMessage } from '../utils/clipboard'
 import { getSystemProcessEnv } from '../utils/env'
 import { getSystemMessage, getUserMessage } from '../utils/message-history'
+import { trackEvent } from '../utils/analytics'
 
 /**
  * Run a bash command with automatic ghost/direct mode selection.
@@ -45,6 +48,7 @@ export function runBashCommand(command: string) {
   const ghost = streamingAgents.size > 0 || isChainInProgress
   const id = crypto.randomUUID()
   const commandCwd = process.cwd()
+  const startTime = Date.now()
 
   if (ghost) {
     // Ghost mode: add to pending messages
@@ -80,6 +84,20 @@ export function runBashCommand(command: string) {
       const stdout = 'stdout' in value ? value.stdout || '' : ''
       const stderr = 'stderr' in value ? value.stderr || '' : ''
       const exitCode = 'exitCode' in value ? value.exitCode ?? 0 : 0
+
+      // Track terminal command completion
+      const durationMs = Date.now() - startTime
+      trackEvent(AnalyticsEvent.TERMINAL_COMMAND_COMPLETED, {
+        command: command.split(' ')[0], // Just the command name, not args
+        exitCode,
+        success: exitCode === 0,
+        ghost,
+        durationMs,
+        hasStdout: stdout.length > 0,
+        hasStderr: stderr.length > 0,
+        stdoutLength: stdout.length,
+        stderrLength: stderr.length,
+      })
 
       if (ghost) {
         updatePendingBashMessage(id, {
@@ -130,6 +148,21 @@ export function runBashCommand(command: string) {
     .catch((error) => {
       const errorMessage =
         error instanceof Error ? error.message : String(error)
+
+      // Track terminal command completion with error
+      const durationMs = Date.now() - startTime
+      trackEvent(AnalyticsEvent.TERMINAL_COMMAND_COMPLETED, {
+        command: command.split(' ')[0], // Just the command name, not args
+        exitCode: 1,
+        success: false,
+        ghost,
+        durationMs,
+        hasStdout: false,
+        hasStderr: true,
+        stdoutLength: 0,
+        stderrLength: errorMessage.length,
+        isException: true,
+      })
 
       if (ghost) {
         updatePendingBashMessage(id, {
@@ -240,6 +273,21 @@ export async function routeUserPrompt(
   // Allow empty messages if there are pending images attached
   if (!trimmed && pendingImages.length === 0) return
 
+  // Track user input complete
+  // Count @ mentions (simple pattern match - more accurate than nothing)
+  const mentionMatches = trimmed.match(/@\S+/g) || []
+  trackEvent(AnalyticsEvent.USER_INPUT_COMPLETE, {
+    inputLength: trimmed.length,
+    mode: agentMode,
+    inputMode,
+    hasImages: pendingImages.length > 0,
+    imageCount: pendingImages.length,
+    isSlashCommand: isSlashCommand(trimmed),
+    isBashCommand: trimmed.startsWith('!'),
+    hasMentions: mentionMatches.length > 0,
+    mentionCount: mentionMatches.length,
+  })
+
   // Handle bash mode commands
   if (inputMode === 'bash') {
     const commandWithBang = '!' + trimmed
@@ -278,6 +326,23 @@ export async function routeUserPrompt(
     }
 
     // Note: No system message added here - the PendingImagesBanner shows attached images
+    saveToHistory(trimmed)
+    setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
+    setInputMode('default')
+    return
+  }
+
+  // Handle connect:claude mode input (authorization code)
+  if (inputMode === 'connect:claude') {
+    const code = trimmed
+    if (code) {
+      const result = await handleClaudeAuthCode(code)
+      setMessages((prev) => [
+        ...prev,
+        getUserMessage(trimmed),
+        getSystemMessage(result.message),
+      ])
+    }
     saveToHistory(trimmed)
     setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
     setInputMode('default')
@@ -356,6 +421,14 @@ export async function routeUserPrompt(
     // Look up command in registry
     const commandDef = findCommand(cmd)
     if (commandDef) {
+      // Track slash command usage
+      trackEvent(AnalyticsEvent.SLASH_COMMAND_USED, {
+        command: commandDef.name,
+        hasArgs: args.trim().length > 0,
+        argsLength: args.trim().length,
+        agentMode,
+      })
+
       // The command handler (via defineCommand/defineCommandWithArgs factories)
       // is responsible for validating and handling args
       return await commandDef.handler(params, args)
@@ -391,6 +464,14 @@ export async function routeUserPrompt(
 
   // Unknown slash command - show error
   if (isSlashCommand(trimmed)) {
+    // Track invalid/unknown command (only log command name, not full input for privacy)
+    const attemptedCmd = parseCommand(trimmed)
+    trackEvent(AnalyticsEvent.INVALID_COMMAND, {
+      attemptedCommand: attemptedCmd,
+      inputLength: trimmed.length,
+      agentMode,
+    })
+
     setMessages((prev) => [
       ...prev,
       getUserMessage(trimmed),

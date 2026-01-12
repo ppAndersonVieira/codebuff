@@ -1,3 +1,5 @@
+import open from 'open'
+
 import { handleAdsEnable, handleAdsDisable } from './ads'
 import { handleHelpCommand } from './help'
 import { handleImageCommand } from './image'
@@ -6,6 +8,7 @@ import { handleReferralCode } from './referral'
 import { runBashCommand } from './router'
 import { normalizeReferralCode } from './router-utils'
 import { handleUsageCommand } from './usage'
+import { WEBSITE_URL } from '../login/constants'
 import { useChatStore } from '../state/chat-store'
 import { useFeedbackStore } from '../state/feedback-store'
 import { useLoginStore } from '../state/login-store'
@@ -51,6 +54,7 @@ export type RouterParams = {
 export type CommandResult = {
   openFeedbackMode?: boolean
   openPublishMode?: boolean
+  openChatHistory?: boolean
   preSelectAgents?: string[]
 } | void
 
@@ -375,6 +379,14 @@ export const COMMAND_REGISTRY: CommandDefinition[] = [
       clearInput(params)
     },
   }),
+  defineCommand({
+    name: 'buy-credits',
+    handler: (params) => {
+      open(WEBSITE_URL + '/profile?tab=usage')
+      // Don't save to history.
+      clearInput(params)
+    },
+  }),
   defineCommandWithArgs({
     name: 'image',
     aliases: ['img', 'attach'],
@@ -440,6 +452,25 @@ export const COMMAND_REGISTRY: CommandDefinition[] = [
 
       // Otherwise open selection UI
       return { openPublishMode: true }
+    },
+  }),
+  defineCommand({
+    name: 'connect:claude',
+    aliases: ['claude'],
+    handler: (params) => {
+      // Enter connect:claude mode to show the OAuth banner
+      useChatStore.getState().setInputMode('connect:claude')
+      params.saveToHistory(params.inputValue.trim())
+      clearInput(params)
+    },
+  }),
+  defineCommand({
+    name: 'chats',
+    aliases: ['history'],
+    handler: (params) => {
+      params.saveToHistory(params.inputValue.trim())
+      clearInput(params)
+      return { openChatHistory: true }
     },
   }),
 ]

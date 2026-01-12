@@ -1,3 +1,4 @@
+import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import { RECONNECTION_MESSAGE_DURATION_MS } from '@codebuff/sdk'
 import open from 'open'
 import { useQueryClient } from '@tanstack/react-query'
@@ -15,6 +16,7 @@ import { getAdsEnabled } from './commands/ads'
 import { routeUserPrompt, addBashMessageToHistory } from './commands/router'
 import { AdBanner } from './components/ad-banner'
 import { ChatInputBar } from './components/chat-input-bar'
+import { BottomStatusLine } from './components/bottom-status-line'
 import { areCreditsRestored } from './components/out-of-credits-banner'
 import { LoadPreviousButton } from './components/load-previous-button'
 import { MessageWithAgents } from './components/message-with-agents'
@@ -26,6 +28,7 @@ import { useAgentValidation } from './hooks/use-agent-validation'
 import { useAskUserBridge } from './hooks/use-ask-user-bridge'
 import { authQueryKeys } from './hooks/use-auth-query'
 import { useChatInput } from './hooks/use-chat-input'
+import { useClaudeQuotaQuery } from './hooks/use-claude-quota-query'
 import {
   useChatKeyboard,
   type ChatKeyboardHandlers,
@@ -52,6 +55,7 @@ import { useUsageMonitor } from './hooks/use-usage-monitor'
 import { WEBSITE_URL } from './login/constants'
 import { getProjectRoot } from './project-files'
 import { useChatStore } from './state/chat-store'
+import { useChatHistoryStore } from './state/chat-history-store'
 import { useFeedbackStore } from './state/feedback-store'
 import { usePublishStore } from './state/publish-store'
 import {
@@ -73,9 +77,12 @@ import {
   getStatusIndicatorState,
   type AuthStatus,
 } from './utils/status-indicator-state'
+import { getClaudeOAuthStatus } from './utils/claude-oauth'
 import { createPasteHandler } from './utils/strings'
 import { computeInputLayoutMetrics } from './utils/text-layout'
 import { createMarkdownPalette } from './utils/theme-system'
+import { reportActivity } from './utils/activity-tracker'
+import { trackEvent } from './utils/analytics'
 
 import type { CommandResult } from './commands/command-registry'
 import type { MultilineInputHandle } from './components/multiline-input'
@@ -246,7 +253,8 @@ export const Chat = ({
 
   const isConnected = useConnectionStatus(handleReconnection)
   const mainAgentTimer = useElapsedTime()
-  const { ad, reportActivity } = useGravityAd()
+  const { ad } = useGravityAd()
+  // Use startTime for active timer display; when paused, timer hook maintains frozen value
   const timerStartTime = mainAgentTimer.startTime
 
   // Set initial mode from CLI flag on mount
@@ -432,6 +440,15 @@ export const Chat = ({
   const setInputMode = useChatStore((state) => state.setInputMode)
   const askUserState = useChatStore((state) => state.askUserState)
 
+  // Pause/resume timer when ask_user tool becomes active/inactive
+  useEffect(() => {
+    if (askUserState !== null) {
+      mainAgentTimer.pause()
+    } else if (mainAgentTimer.isPaused) {
+      mainAgentTimer.resume()
+    }
+  }, [askUserState, mainAgentTimer])
+
   // Filter slash commands based on current ads state - only show the option that changes state
   const filteredSlashCommands = useMemo(() => {
     const adsEnabled = getAdsEnabled()
@@ -466,6 +483,19 @@ export const Chat = ({
       setForceFileOnlyMentions(false)
     }
   }, [mentionContext.active])
+
+  // Track when slash menu is activated
+  const prevSlashActiveRef = useRef(false)
+  useEffect(() => {
+    if (slashContext.active && !prevSlashActiveRef.current) {
+      trackEvent(AnalyticsEvent.SLASH_MENU_ACTIVATED, {
+        queryLength: slashContext.query.length,
+        matchCount: slashMatches.length,
+        inputLength: inputValue.length,
+      })
+    }
+    prevSlashActiveRef.current = slashContext.active
+  }, [slashContext.active, slashContext.query, slashMatches.length, inputValue.length])
 
   // Reset suggestion menu indexes when context changes
   useEffect(() => {
@@ -863,6 +893,10 @@ export const Chat = ({
           openPublishMode()
         }
       }
+
+      if (result.openChatHistory) {
+        useChatHistoryStore.getState().openChatHistory()
+      }
     },
     [
       saveCurrentInput,
@@ -909,7 +943,7 @@ export const Chat = ({
       lastReportedActivityRef.current = now
       reportActivity()
     }
-  }, [inputValue, reportActivity])
+  }, [inputValue])
   useEffect(() => {
     cursorPositionRef.current = cursorPosition
   }, [cursorPosition])
@@ -986,13 +1020,7 @@ export const Chat = ({
     reportActivity()
     const result = await onSubmitPrompt(inputValue, agentMode)
     handleCommandResult(result)
-  }, [
-    onSubmitPrompt,
-    inputValue,
-    agentMode,
-    handleCommandResult,
-    reportActivity,
-  ])
+  }, [onSubmitPrompt, inputValue, agentMode, handleCommandResult])
 
   const totalMentionMatches = agentMatches.length + fileMatches.length
   const historyNavUpEnabled =
@@ -1360,6 +1388,15 @@ export const Chat = ({
     isAskUserActive: askUserState !== null,
   })
   const hasStatusIndicatorContent = statusIndicatorState.kind !== 'idle'
+
+  const isClaudeOAuthActive = getClaudeOAuthStatus().connected
+
+  // Fetch Claude quota when OAuth is active
+  const { data: claudeQuota } = useClaudeQuotaQuery({
+    enabled: isClaudeOAuthActive,
+    refetchInterval: 60 * 1000, // Refetch every 60 seconds
+  })
+
   const inputBoxTitle = useMemo(() => {
     const segments: string[] = []
 
@@ -1380,6 +1417,9 @@ export const Chat = ({
     !feedbackMode &&
     (hasStatusIndicatorContent || shouldShowQueuePreview || !isAtBottom)
 
+  // Determine if Claude is actively streaming/waiting
+  const isClaudeActive = isStreaming || isWaitingForResponse
+
   // Track mouse movement for ad activity (throttled)
   const lastMouseActivityRef = useRef<number>(0)
   const handleMouseActivity = useCallback(() => {
@@ -1389,7 +1429,7 @@ export const Chat = ({
       lastMouseActivityRef.current = now
       reportActivity()
     }
-  }, [reportActivity])
+  }, [])
 
   return (
     <box
@@ -1540,6 +1580,12 @@ export const Chat = ({
             onPasteImagePath: chatKeyboardHandlers.onPasteImagePath,
             cwd: getProjectRoot() ?? process.cwd(),
           })}
+        />
+
+        <BottomStatusLine
+          isClaudeConnected={isClaudeOAuthActive}
+          isClaudeActive={isClaudeActive}
+          claudeQuota={claudeQuota}
         />
       </box>
     </box>

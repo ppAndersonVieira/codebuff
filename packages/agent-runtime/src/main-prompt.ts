@@ -1,3 +1,5 @@
+import { trackEvent } from '@codebuff/common/analytics'
+import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import { AgentTemplateTypes } from '@codebuff/common/types/session-state'
 import { uniq } from 'lodash'
 
@@ -63,6 +65,30 @@ export async function mainPrompt(
   } = action
   const { fileContext, mainAgentState } = sessionState
 
+  // Track user input analytics event
+  // userId comes from params (passed through from loopAgentSteps)
+  const userId = (params as { userId?: string }).userId
+  if (typeof userId === 'string' && userId.trim() !== '') {
+    trackEvent({
+      event: AnalyticsEvent.USER_INPUT,
+      userId,
+      properties: {
+        promptId,
+        agentId,
+        costMode,
+        hasPrompt: !!prompt,
+        hasContent: !!content,
+        hasPromptParams: !!promptParams && Object.keys(promptParams).length > 0,
+        promptParamsCount: promptParams ? Object.keys(promptParams).length : 0,
+        fingerprintId,
+        promptLength: prompt?.length ?? 0,
+        contentLength: content?.length ?? 0,
+        messageHistoryLength: mainAgentState.messageHistory.length,
+      },
+      logger,
+    })
+  }
+
   const availableAgents = Object.keys(localAgentTemplates)
 
   // Determine agent type - prioritize CLI agent selection, then cost mode
@@ -105,13 +131,6 @@ export async function mainPrompt(
   if (!mainAgentTemplate) {
     throw new Error(`Agent template not found for type: ${agentType}`)
   }
-
-  const updatedSubagents = agentId
-    ? // Use only the spawnable agents from the main agent template if an agent ID is specified
-      mainAgentTemplate.spawnableAgents
-    : uniq([...mainAgentTemplate.spawnableAgents, ...availableAgents])
-  mainAgentTemplate.spawnableAgents = updatedSubagents
-  localAgentTemplates[agentType] = mainAgentTemplate
 
   const { agentState, output } = await loopAgentSteps({
     ...params,

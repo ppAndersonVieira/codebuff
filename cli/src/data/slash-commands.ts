@@ -16,37 +16,15 @@ const MODE_COMMANDS: SlashCommand[] = AGENT_MODES.map((mode) => ({
 
 export const SLASH_COMMANDS: SlashCommand[] = [
   {
-    id: 'ads:enable',
-    label: 'ads:enable',
-    description: 'Enable contextual ads and earn credits',
-  },
-  {
-    id: 'ads:disable',
-    label: 'ads:disable',
-    description: 'Disable contextual ads',
-  },
-  {
-    id: 'help',
-    label: 'help',
-    description: 'Display keyboard shortcuts and tips',
-    aliases: ['h', '?'],
+    id: 'connect:claude',
+    label: 'connect:claude',
+    description: 'Connect your Claude Pro/Max subscription',
+    aliases: ['claude'],
   },
   {
     id: 'init',
     label: 'init',
     description: 'Create a starter knowledge.md file',
-  },
-  {
-    id: 'logout',
-    label: 'logout',
-    description: 'Sign out of your session',
-    aliases: ['signout'],
-  },
-  {
-    id: 'exit',
-    label: 'exit',
-    description: 'Quit the CLI',
-    aliases: ['quit', 'q'],
   },
   // {
   //   id: 'undo',
@@ -58,22 +36,28 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   //   label: 'redo',
   //   description: 'Redo the most recent undone change',
   // },
-  // {
-  //   id: 'checkpoint',
-  //   label: 'checkpoint',
-  //   description: 'Restore the workspace to a specific checkpoint',
-  // },
   {
     id: 'usage',
     label: 'usage',
-    description: 'View remaining or bonus credits',
+    description: 'View credits and subscription quota',
     aliases: ['credits'],
+  },
+  {
+    id: 'buy-credits',
+    label: 'buy-credits',
+    description: 'Open the usage page to buy credits',
   },
   {
     id: 'new',
     label: 'new',
     description: 'Start a fresh conversation session',
     aliases: ['n', 'clear', 'c', 'reset'],
+  },
+  {
+    id: 'chats',
+    label: 'chats',
+    description: 'Browse and resume past conversations',
+    aliases: ['history'],
   },
   {
     id: 'feedback',
@@ -87,21 +71,49 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     aliases: ['!'],
   },
   {
-    id: 'referral',
-    label: 'referral',
-    description: 'Redeem a referral code for bonus credits',
-    aliases: ['redeem'],
-  },
-  {
     id: 'image',
     label: 'image',
     description: 'Attach an image file (or Ctrl+V to paste from clipboard)',
     aliases: ['img', 'attach'],
   },
   {
+    id: 'help',
+    label: 'help',
+    description: 'Display keyboard shortcuts and tips',
+    aliases: ['h', '?'],
+  },
+  ...MODE_COMMANDS,
+  {
+    id: 'ads:enable',
+    label: 'ads:enable (beta)',
+    description: 'Enable contextual ads and earn credits',
+  },
+  {
+    id: 'ads:disable',
+    label: 'ads:disable (beta)',
+    description: 'Disable contextual ads',
+  },
+  {
+    id: 'referral',
+    label: 'referral',
+    description: 'Redeem a referral code for bonus credits',
+    aliases: ['redeem'],
+  },
+  {
     id: 'publish',
     label: 'publish',
     description: 'Publish agents to the agent store',
   },
-  ...MODE_COMMANDS,
+  {
+    id: 'logout',
+    label: 'logout',
+    description: 'Sign out of your session',
+    aliases: ['signout'],
+  },
+  {
+    id: 'exit',
+    label: 'exit',
+    description: 'Quit the CLI',
+    aliases: ['quit', 'q'],
+  },
 ]

@@ -22,12 +22,6 @@ const extractDomain = (url: string): string => {
 }
 
 export const AdBanner: React.FC<AdBannerProps> = ({ ad }) => {
-  useEffect(() => {
-    logger.info(
-      { adText: ad.adText?.substring(0, 50), hasClickUrl: !!ad.clickUrl },
-      '[gravity] Rendering AdBanner',
-    )
-  }, [ad])
   const theme = useTheme()
   const { separatorWidth, terminalWidth } = useTerminalDimensions()
   const [isLinkHovered, setIsLinkHovered] = useState(false)
@@ -42,8 +36,8 @@ export const AdBanner: React.FC<AdBannerProps> = ({ ad }) => {
 
   // Use 'url' field for display domain (the actual destination)
   const domain = extractDomain(ad.url)
-  // Use title as CTA, with fallback for empty titles
-  const ctaText = ad.title || 'Learn more'
+  // Use cta field for button text, with title as fallback
+  const ctaText = ad.cta || ad.title || 'Learn more'
 
   // Calculate available width for ad text
   // Account for: padding (2), "Ad" label with space (3)

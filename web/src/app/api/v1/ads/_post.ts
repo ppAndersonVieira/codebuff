@@ -14,15 +14,25 @@ import type {
 } from '@codebuff/common/types/contracts/logger'
 import type { NextRequest } from 'next/server'
 import { getErrorObject } from '@codebuff/common/util/error'
+import { buildArray } from '@codebuff/common/util/array'
+
+const DEFAULT_PAYOUT = 0.04
 
 const messageSchema = z.object({
   role: z.string(),
   content: z.string(),
 })
 
+const deviceSchema = z.object({
+  os: z.enum(['macos', 'windows', 'linux']).optional(),
+  timezone: z.string().optional(),
+  locale: z.string().optional(),
+})
+
 const bodySchema = z.object({
   messages: z.array(messageSchema),
   sessionId: z.string().optional(),
+  device: deviceSchema.optional(),
 })
 
 export type GravityEnv = {
@@ -58,7 +68,7 @@ export async function postAds(params: {
   })
   if (!authed.ok) return authed.response
 
-  const { userId, logger } = authed.data
+  const { userId, userInfo, logger } = authed.data
 
   // Check if Gravity API key is configured
   if (!serverEnv.GRAVITY_API_KEY) {
@@ -66,9 +76,16 @@ export async function postAds(params: {
     return NextResponse.json({ ad: null }, { status: 200 })
   }
 
+  // Extract client IP from request headers
+  const forwardedFor = req.headers.get('x-forwarded-for')
+  const clientIp = forwardedFor
+    ? forwardedFor.split(',')[0].trim()
+    : (req.headers.get('x-real-ip') ?? undefined)
+
   // Parse and validate request body
   let messages: z.infer<typeof bodySchema>['messages']
   let sessionId: string | undefined
+  let deviceInfo: z.infer<typeof deviceSchema> | undefined
   try {
     const json = await req.json()
     const parsed = bodySchema.safeParse(json)
@@ -80,9 +97,21 @@ export async function postAds(params: {
       )
     }
 
-    // Filter out messages with no content
-    messages = parsed.data.messages.filter((message) => message.content)
+    // Filter out messages with no content and extract user message content from tags
+    messages = parsed.data.messages
+      .filter((message) => message.content)
+      .map((message) => {
+        // For user messages, extract content from the last <user_message> tag if present
+        if (message.role === 'user') {
+          return {
+            ...message,
+            content: extractLastUserMessageContent(message.content),
+          }
+        }
+        return message
+      })
     sessionId = parsed.data.sessionId
+    deviceInfo = parsed.data.device
   } catch {
     logger.error(
       { error: 'Invalid JSON in request body' },
@@ -94,14 +123,42 @@ export async function postAds(params: {
     )
   }
 
+  // Keep just the last user message and the last assistant message before it
+  const lastUserMessageIndex = messages.findLastIndex(
+    (message) => message.role === 'user',
+  )
+  const lastUserMessage = messages[lastUserMessageIndex]
+  const lastAssistantMessage = messages
+    .slice(0, lastUserMessageIndex)
+    .findLast((message) => message.role === 'assistant')
+  const filteredMessages = buildArray(lastAssistantMessage, lastUserMessage)
+
+  // Build device object for Gravity API
+  const device = clientIp
+    ? {
+        ip: clientIp,
+        ...(deviceInfo?.os ? { os: deviceInfo.os } : {}),
+        ...(deviceInfo?.timezone ? { timezone: deviceInfo.timezone } : {}),
+        ...(deviceInfo?.locale ? { locale: deviceInfo.locale } : {}),
+      }
+    : undefined
+
   try {
     const requestBody = {
-      messages,
-      user: { uid: userId, ...(sessionId ? { sessionId } : {}) },
+      messages: filteredMessages,
+      sessionId: sessionId ?? userId,
+      placements: [
+        { placement: 'below_response', placement_id: 'code-assist-ad' },
+      ],
       testAd: serverEnv.CB_ENVIRONMENT !== 'prod',
+      ...(device ? { device } : {}),
+      user: {
+        id: userId,
+        email: userInfo.email,
+      },
     }
     // Call Gravity API
-    const response = await fetch('https://server.trygravity.ai/ad', {
+    const response = await fetch('https://server.trygravity.ai/api/v1/ad', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${serverEnv.GRAVITY_API_KEY}`,
@@ -120,21 +177,31 @@ export async function postAds(params: {
     }
 
     // Now safe to parse JSON body
-    const ad = await response.json()
+    const ads = await response.json()
 
     if (!response.ok) {
       logger.error(
-        { request: requestBody, response: ad, status: response.status },
+        { request: requestBody, response: ads, status: response.status },
         '[ads] Gravity API returned error',
       )
       return NextResponse.json({ ad: null }, { status: 200 })
     }
+
+    const ad = ads[0]
+
+    const payout = ad.payout || DEFAULT_PAYOUT
 
     logger.info(
       {
         ad,
         request: requestBody,
         status: response.status,
+        payout: {
+          included: ad.payout && ad.payout > 0,
+          recieved: ad.payout,
+          default: DEFAULT_PAYOUT,
+          final: payout,
+        },
       },
       '[ads] Fetched ad from Gravity API',
     )
@@ -145,19 +212,15 @@ export async function postAds(params: {
       await db.insert(schema.adImpression).values({
         user_id: userId,
         ad_text: ad.adText,
-        title: ad.title || ad.cta || '',
+        title: ad.title,
+        cta: ad.cta,
         url: ad.url,
-        favicon: ad.favicon || '',
+        favicon: ad.favicon,
         click_url: ad.clickUrl,
         imp_url: ad.impUrl,
-        payout: String(ad.payout),
+        payout: String(payout),
         credits_granted: 0, // Will be updated when impression is fired
       })
-
-      logger.info(
-        { userId, impUrl: ad.impUrl, status: response.status },
-        '[ads] Created ad_impression record for served ad',
-      )
     } catch (error) {
       // If insert fails (e.g., duplicate impUrl), log but continue
       // The ad can still be shown, it just won't be tracked
@@ -196,4 +259,22 @@ export async function postAds(params: {
       { status: 500 },
     )
   }
+}
+
+/**
+ * Extract the content from the last <user_message> tag in a string.
+ * If no tag is found, returns the original content.
+ */
+function extractLastUserMessageContent(content: string): string {
+  // Find all <user_message>...</user_message> matches
+  const regex = /<user_message>([\s\S]*?)<\/user_message>/gi
+  const matches = [...content.matchAll(regex)]
+
+  if (matches.length > 0) {
+    // Return the content from the last match
+    const lastMatch = matches[matches.length - 1]
+    return lastMatch[1].trim()
+  }
+
+  return content
 }

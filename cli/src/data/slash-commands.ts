@@ -5,6 +5,11 @@ export interface SlashCommand {
   label: string
   description: string
   aliases?: string[]
+  /**
+   * If true, this command can be invoked without a leading slash when the
+   * input matches the command id exactly (no arguments).
+   */
+  implicitCommand?: boolean
 }
 
 // Generate mode commands from the AGENT_MODES constant
@@ -22,9 +27,20 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     aliases: ['claude'],
   },
   {
+    id: 'ads:enable',
+    label: 'ads:enable',
+    description: 'Enable contextual ads and earn credits',
+  },
+  {
+    id: 'ads:disable',
+    label: 'ads:disable',
+    description: 'Disable contextual ads and stop earning credits',
+  },
+  {
     id: 'init',
     label: 'init',
     description: 'Create a starter knowledge.md file',
+    implicitCommand: true,
   },
   // {
   //   id: 'undo',
@@ -52,12 +68,13 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     label: 'new',
     description: 'Start a fresh conversation session',
     aliases: ['n', 'clear', 'c', 'reset'],
+    implicitCommand: true,
   },
   {
-    id: 'chats',
-    label: 'chats',
+    id: 'history',
+    label: 'history',
     description: 'Browse and resume past conversations',
-    aliases: ['history'],
+    aliases: ['chats'],
   },
   {
     id: 'feedback',
@@ -81,18 +98,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     label: 'help',
     description: 'Display keyboard shortcuts and tips',
     aliases: ['h', '?'],
+    implicitCommand: true,
   },
   ...MODE_COMMANDS,
-  {
-    id: 'ads:enable',
-    label: 'ads:enable (beta)',
-    description: 'Enable contextual ads and earn credits',
-  },
-  {
-    id: 'ads:disable',
-    label: 'ads:disable (beta)',
-    description: 'Disable contextual ads',
-  },
   {
     id: 'referral',
     label: 'referral',
@@ -109,11 +117,19 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     label: 'logout',
     description: 'Sign out of your session',
     aliases: ['signout'],
+    implicitCommand: true,
   },
   {
     id: 'exit',
     label: 'exit',
     description: 'Quit the CLI',
     aliases: ['quit', 'q'],
+    implicitCommand: true,
   },
 ]
+
+export const SLASHLESS_COMMAND_IDS = new Set(
+  SLASH_COMMANDS.filter((cmd) => cmd.implicitCommand).map((cmd) =>
+    cmd.id.toLowerCase(),
+  ),
+)

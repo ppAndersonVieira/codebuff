@@ -1,5 +1,6 @@
 import { Metadata } from 'next'
-import { getCachedAgentsLite } from '@/server/agents-data'
+import { env } from '@codebuff/common/env'
+import { getCachedAgentsBasicInfo } from '@/server/agents-data'
 import AgentStoreClient from './store-client'
 
 interface PublisherProfileResponse {
@@ -15,7 +16,7 @@ export async function generateMetadata(): Promise<Metadata> {
     publisher?: { avatar_url?: string | null }
   }> = []
   try {
-    agents = await getCachedAgentsLite()
+    agents = await getCachedAgentsBasicInfo()
   } catch (error) {
     console.error('[Store] Failed to fetch agents for metadata:', error)
     agents = []
@@ -36,9 +37,15 @@ export async function generateMetadata(): Promise<Metadata> {
     .filter((u): u is string => !!u)
     .slice(0, 3)
 
+  // Canonical URL strips query params to prevent duplicate content
+  const canonicalUrl = `${env.NEXT_PUBLIC_CODEBUFF_APP_URL}/store`
+
   return {
     title,
     description,
+    alternates: {
+      canonical: canonicalUrl,
+    },
     openGraph: {
       title,
       description,
@@ -56,12 +63,46 @@ interface StorePageProps {
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>
 }
 
+// JSON-LD structured data for the store page (ItemList schema)
+function StoreJsonLd({ agentCount }: { agentCount: number }) {
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'CollectionPage',
+    name: 'Codebuff Agent Store',
+    description: `Browse ${agentCount} AI agents for code assistance, automation, and development workflows.`,
+    url: `${env.NEXT_PUBLIC_CODEBUFF_APP_URL}/store`,
+    mainEntity: {
+      '@type': 'ItemList',
+      name: 'AI Agents',
+      description: 'Published AI agents available for use with Codebuff',
+      numberOfItems: agentCount,
+      itemListElement: {
+        '@type': 'ListItem',
+        name: 'AI Agent',
+      },
+    },
+    provider: {
+      '@type': 'Organization',
+      name: 'Codebuff',
+      url: env.NEXT_PUBLIC_CODEBUFF_APP_URL,
+    },
+  }
+
+  return (
+    <script
+      type="application/ld+json"
+      dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+    />
+  )
+}
+
 export default async function StorePage({ searchParams }: StorePageProps) {
   const resolvedSearchParams = await searchParams
-  // Fetch agents data on the server with ISR cache
+  // Fetch only basic agent info on the server - metrics load client-side
+  // This keeps the initial payload small and cacheable
   let agentsData: any[] = []
   try {
-    agentsData = await getCachedAgentsLite()
+    agentsData = await getCachedAgentsBasicInfo()
   } catch (error) {
     console.error('[Store] Failed to fetch agents data:', error)
     agentsData = []
@@ -72,11 +113,14 @@ export default async function StorePage({ searchParams }: StorePageProps) {
   const userPublishers: PublisherProfileResponse[] = []
 
   return (
-    <AgentStoreClient
-      initialAgents={agentsData}
-      initialPublishers={userPublishers}
-      session={null} // Client will handle session
-      searchParams={resolvedSearchParams}
-    />
+    <>
+      <StoreJsonLd agentCount={agentsData.length} />
+      <AgentStoreClient
+        initialAgents={agentsData}
+        initialPublishers={userPublishers}
+        session={null} // Client will handle session
+        searchParams={resolvedSearchParams}
+      />
+    </>
   )
 }

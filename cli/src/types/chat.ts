@@ -2,6 +2,12 @@ import type { ChatTheme } from './theme-system'
 import type { ToolName } from '@codebuff/sdk'
 import type { ReactNode } from 'react'
 
+/**
+ * isCollapsed/userOpened are duplicated across block types intentionally - each UI
+ * element tracks collapse state independently for different defaults and to persist
+ * user intent vs programmatic state.
+ */
+
 export type ChatVariant = 'ai' | 'user' | 'agent' | 'error'
 
 export type TextContentBlock = {
@@ -18,6 +24,7 @@ export type TextContentBlock = {
   /** True if this is a reasoning block from a <think> tag that hasn't been closed yet */
   thinkingOpen?: boolean
 }
+/** Renders dynamic React content. NOT serializable - don't use for persistent data. */
 export type HtmlContentBlock = {
   type: 'html'
   marginTop?: number
@@ -116,6 +123,13 @@ export type ImageAttachment = {
   size?: number
 }
 
+export type TextAttachment = {
+  id: string
+  content: string
+  preview: string
+  charCount: number
+}
+
 export type ContentBlock =
   | AgentContentBlock
   | AgentListContentBlock
@@ -159,7 +173,14 @@ export type ChatMessage = {
   isComplete?: boolean
   metadata?: ChatMessageMetadata
   validationErrors?: Array<{ id: string; message: string }>
+  /**
+   * UI-only runtime error displayed in UserErrorBanner (not sent to LLM).
+   * Set by setError() when an error occurs during message streaming.
+   * Can be cleared by clearUserError() when starting a new successful interaction.
+   */
+  userError?: string
   attachments?: ImageAttachment[]
+  textAttachments?: TextAttachment[]
 }
 
 // Type guard functions for safe type narrowing

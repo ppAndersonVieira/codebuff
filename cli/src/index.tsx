@@ -198,24 +198,24 @@ async function main(): Promise<void> {
     if (result.success && result.publisherId && result.agents) {
       // Handle batch publish (publish all) results
       if (result.isBatchPublish) {
-        console.log(green(`✅ Successfully published ${result.totalSuccess} agent(s):`))
+        logger.info(green(`✅ Successfully published ${result.totalSuccess} agent(s):`))
         for (const agent of result.agents) {
-          console.log(
+          logger.info(
             cyan(
               `  - ${agent.displayName} (${result.publisherId}/${agent.id}@${agent.version})`,
             ),
           )
         }
         if (result.totalFailed && result.totalFailed > 0) {
-          console.log(yellow(`\n⚠️  ${result.totalFailed} agent(s) failed to publish`))
-          if (result.error) console.log(yellow(`  ${result.error}`))
-          if (result.hint) console.log(yellow(`  Hint: ${result.hint}`))
+          logger.warn(yellow(`\n⚠️  ${result.totalFailed} agent(s) failed to publish`))
+          if (result.error) logger.warn(yellow(`  ${result.error}`))
+          if (result.hint) logger.warn(yellow(`  Hint: ${result.hint}`))
         }
-        console.log(cyan(`\n📊 Summary: ${result.totalSuccess} published, ${result.totalFailed || 0} failed`))
+        logger.info(cyan(`\n📊 Summary: ${result.totalSuccess} published, ${result.totalFailed || 0} failed`))
       } else {
-        console.log(green('✅ Successfully published:'))
+        logger.info(green('✅ Successfully published:'))
         for (const agent of result.agents) {
-          console.log(
+          logger.info(
             cyan(
               `  - ${agent.displayName} (${result.publisherId}/${agent.id}@${agent.version})`,
             ),
@@ -226,13 +226,13 @@ async function main(): Promise<void> {
     } else {
       // Handle batch publish failure
       if (result.isBatchPublish) {
-        console.log(red(`❌ Publish failed for all ${result.totalFailed || 0} agent(s)`))
+        logger.error(red(`❌ Publish failed for all ${result.totalFailed || 0} agent(s)`))
       } else {
-        console.log(red('❌ Publish failed'))
+        logger.error(red('❌ Publish failed'))
       }
-      if (result.error) console.log(red(`Error: ${result.error}`))
-      if (result.details) console.log(red(result.details))
-      if (result.hint) console.log(yellow(`Hint: ${result.hint}`))
+      if (result.error) logger.error(red(`Error: ${result.error}`))
+      if (result.details) logger.error(red(result.details))
+      if (result.hint) logger.warn(yellow(`Hint: ${result.hint}`))
       process.exit(1)
     }
   }

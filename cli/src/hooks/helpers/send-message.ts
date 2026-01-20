@@ -2,7 +2,6 @@ import { getProjectRoot } from '../../project-files'
 import { useChatStore } from '../../state/chat-store'
 import { processBashContext } from '../../utils/bash-context-processor'
 import {
-  createErrorMessage,
   isOutOfCreditsError,
   OUT_OF_CREDITS_MESSAGE,
 } from '../../utils/error-handling'
@@ -18,8 +17,14 @@ import {
   type BatchedMessageUpdater,
 } from '../../utils/message-updater'
 import { createModeDividerMessage } from '../../utils/send-message-helpers'
+import { yieldToEventLoop } from '../../utils/yield-to-event-loop'
+import { getErrorObject } from '@codebuff/common/util/error'
 
-import type { PendingImage } from '../../state/chat-store'
+import type {
+  PendingAttachment,
+  PendingImageAttachment,
+  PendingTextAttachment,
+} from '../../state/chat-store'
 import type { ChatMessage } from '../../types/chat'
 import type { AgentMode } from '../../utils/constants'
 
@@ -28,12 +33,42 @@ import type { StreamController } from '../stream-state'
 import type { StreamStatus } from '../use-message-queue'
 import type { MessageContent, RunState } from '@codebuff/sdk'
 import type { MutableRefObject, SetStateAction } from 'react'
-import { getErrorObject } from '@codebuff/common/util/error'
 
-const yieldToEventLoop = () =>
-  new Promise<void>((resolve) => {
-    setTimeout(resolve, 0)
-  })
+/** Resets queue state after streaming completes, aborts, or errors. */
+export type FinalizeQueueStateParams = {
+  setStreamStatus: (status: StreamStatus) => void
+  setCanProcessQueue: (can: boolean) => void
+  updateChainInProgress: (value: boolean) => void
+  isProcessingQueueRef?: MutableRefObject<boolean>
+  isQueuePausedRef?: MutableRefObject<boolean>
+  resumeQueue?: () => void
+}
+
+export const finalizeQueueState = (params: FinalizeQueueStateParams): void => {
+  const {
+    setStreamStatus,
+    setCanProcessQueue,
+    updateChainInProgress,
+    isProcessingQueueRef,
+    isQueuePausedRef,
+    resumeQueue,
+  } = params
+
+  setStreamStatus('idle')
+  // Release lock here as part of normal completion flow.
+  // Also released in finally block and .catch() as safety nets (idempotent).
+  if (isProcessingQueueRef) {
+    isProcessingQueueRef.current = false
+  }
+  if (resumeQueue) {
+    resumeQueue()
+  } else {
+    setCanProcessQueue(!isQueuePausedRef?.current)
+  }
+  updateChainInProgress(false)
+}
+
+const DEFAULT_RUN_OUTPUT_ERROR_MESSAGE = 'No output from agent run'
 
 export type PrepareUserMessageDeps = {
   setMessages: (update: SetStateAction<ChatMessage[]>) => void
@@ -47,14 +82,15 @@ export const prepareUserMessage = async (params: {
   content: string
   agentMode: AgentMode
   postUserMessage?: (prev: ChatMessage[]) => ChatMessage[]
-  attachedImages?: PendingImage[]
+  attachments?: PendingAttachment[]
   deps: PrepareUserMessageDeps
 }): Promise<{
   userMessageId: string
   messageContent: MessageContent[] | undefined
   bashContextForPrompt: string
+  finalContent: string
 }> => {
-  const { content, agentMode, postUserMessage, attachedImages, deps } = params
+  const { content, agentMode, postUserMessage, attachments, deps } = params
   const { setMessages, lastMessageMode, setLastMessageMode, scrollToLatest } =
     deps
 
@@ -68,13 +104,33 @@ export const prepareUserMessage = async (params: {
   }
   clearPendingBashMessages()
 
-  const pendingImages = attachedImages ?? useChatStore.getState().pendingImages
-  if (!attachedImages && pendingImages.length > 0) {
-    useChatStore.getState().clearPendingImages()
+  // Split attachments by kind
+  const allAttachments =
+    attachments ?? useChatStore.getState().pendingAttachments
+  if (!attachments && allAttachments.length > 0) {
+    useChatStore.getState().clearPendingAttachments()
   }
 
-  const { attachments, messageContent } = await processImagesForMessage({
-    content,
+  const pendingImages = allAttachments.filter(
+    (a): a is PendingImageAttachment => a.kind === 'image',
+  )
+  const pendingTextAttachments = allAttachments.filter(
+    (a): a is PendingTextAttachment => a.kind === 'text',
+  )
+
+  // Append text attachments to the content
+  let finalContent = content
+  if (pendingTextAttachments.length > 0) {
+    const textAttachmentContent = pendingTextAttachments
+      .map((att) => `[Pasted Text]\n${att.content}`)
+      .join('\n\n')
+    finalContent = content
+      ? `${content}\n\n${textAttachmentContent}`
+      : textAttachmentContent
+  }
+
+  const { attachments: imageAttachments, messageContent } = await processImagesForMessage({
+    content: finalContent,
     pendingImages,
     projectRoot: getProjectRoot(),
   })
@@ -82,10 +138,19 @@ export const prepareUserMessage = async (params: {
   const shouldInsertDivider =
     lastMessageMode === null || lastMessageMode !== agentMode
 
-  const userMessage = getUserMessage(content, attachments)
+  // Convert pending text attachments to stored text attachments for display
+  const textAttachmentsForMessage = pendingTextAttachments.map((att) => ({
+    id: att.id,
+    content: att.content,
+    preview: att.preview,
+    charCount: att.charCount,
+  }))
+
+  // Pass original content (not finalContent) for display, but finalContent goes to agent
+  const userMessage = getUserMessage(content, imageAttachments, textAttachmentsForMessage)
   const userMessageId = userMessage.id
-  if (attachments.length > 0) {
-    userMessage.attachments = attachments
+  if (imageAttachments.length > 0) {
+    userMessage.attachments = imageAttachments
   }
 
   setMessages((prev) => {
@@ -111,6 +176,7 @@ export const prepareUserMessage = async (params: {
     userMessageId,
     messageContent,
     bashContextForPrompt,
+    finalContent,
   }
 }
 
@@ -123,6 +189,7 @@ export const setupStreamingContext = (params: {
   setStreamStatus: (status: StreamStatus) => void
   setCanProcessQueue: (can: boolean) => void
   isQueuePausedRef?: MutableRefObject<boolean>
+  isProcessingQueueRef?: MutableRefObject<boolean>
   updateChainInProgress: (value: boolean) => void
   setIsRetrying: (value: boolean) => void
 }) => {
@@ -135,6 +202,7 @@ export const setupStreamingContext = (params: {
     setStreamStatus,
     setCanProcessQueue,
     isQueuePausedRef,
+    isProcessingQueueRef,
     updateChainInProgress,
     setIsRetrying,
   } = params
@@ -142,6 +210,8 @@ export const setupStreamingContext = (params: {
   streamRefs.reset()
   timerController.start(aiMessageId)
   const updater = createBatchedMessageUpdater(aiMessageId, setMessages)
+  // Clear any previous UI-only error on this message when starting a new run
+  updater.clearUserError()
   const hasReceivedContentRef = { current: false }
   const abortController = new AbortController()
   abortControllerRef.current = abortController
@@ -149,9 +219,13 @@ export const setupStreamingContext = (params: {
   abortController.signal.addEventListener('abort', () => {
     // Abort means the user stopped streaming; finalize with an interruption notice.
     streamRefs.setters.setWasAbortedByUser(true)
-    setStreamStatus('idle')
-    setCanProcessQueue(!isQueuePausedRef?.current)
-    updateChainInProgress(false)
+    finalizeQueueState({
+      setStreamStatus,
+      setCanProcessQueue,
+      updateChainInProgress,
+      isProcessingQueueRef,
+      isQueuePausedRef,
+    })
     setIsRetrying(false)
     timerController.stop('aborted')
 
@@ -175,6 +249,8 @@ export const handleRunCompletion = (params: {
   updateChainInProgress: (value: boolean) => void
   setHasReceivedPlanResponse: (value: boolean) => void
   resumeQueue?: () => void
+  isProcessingQueueRef?: MutableRefObject<boolean>
+  isQueuePausedRef?: MutableRefObject<boolean>
 }) => {
   const {
     runState,
@@ -189,19 +265,25 @@ export const handleRunCompletion = (params: {
     updateChainInProgress,
     setHasReceivedPlanResponse,
     resumeQueue,
+    isProcessingQueueRef,
+    isQueuePausedRef,
   } = params
 
   const output = runState.output
   const finalizeAfterError = () => {
-    setStreamStatus('idle')
-    setCanProcessQueue(true)
-    updateChainInProgress(false)
+    finalizeQueueState({
+      setStreamStatus,
+      setCanProcessQueue,
+      updateChainInProgress,
+      isProcessingQueueRef,
+      isQueuePausedRef,
+    })
     timerController.stop('error')
   }
 
   if (!output) {
     if (!streamRefs.state.wasAbortedByUser) {
-      updater.setError('No output from agent run')
+      updater.setError(DEFAULT_RUN_OUTPUT_ERROR_MESSAGE)
       finalizeAfterError()
     }
     return
@@ -220,11 +302,8 @@ export const handleRunCompletion = (params: {
       return
     }
 
-    const partial = createErrorMessage(
-      output.message ?? 'No output from agent run',
-      aiMessageId,
-    )
-    updater.setError(partial.content ?? '')
+    // Pass the raw error message to setError (displayed in UserErrorBanner without additional wrapper formatting)
+    updater.setError(output.message ?? DEFAULT_RUN_OUTPUT_ERROR_MESSAGE)
 
     finalizeAfterError()
     return
@@ -232,12 +311,14 @@ export const handleRunCompletion = (params: {
 
   invalidateActivityQuery(usageQueryKeys.current())
 
-  setStreamStatus('idle')
-  if (resumeQueue) {
-    resumeQueue()
-  }
-  setCanProcessQueue(true)
-  updateChainInProgress(false)
+  finalizeQueueState({
+    setStreamStatus,
+    setCanProcessQueue,
+    updateChainInProgress,
+    isProcessingQueueRef,
+    isQueuePausedRef,
+    resumeQueue,
+  })
   const timerResult = timerController.stop('success')
 
   if (agentMode === 'PLAN') {
@@ -262,35 +343,38 @@ export const handleRunCompletion = (params: {
 
 export const handleRunError = (params: {
   error: unknown
-  aiMessageId: string
   timerController: SendMessageTimerController
   updater: BatchedMessageUpdater
   setIsRetrying: (value: boolean) => void
   setStreamStatus: (status: StreamStatus) => void
   setCanProcessQueue: (can: boolean) => void
   updateChainInProgress: (value: boolean) => void
+  isProcessingQueueRef?: MutableRefObject<boolean>
+  isQueuePausedRef?: MutableRefObject<boolean>
 }) => {
   const {
     error,
-    aiMessageId,
     timerController,
     updater,
     setIsRetrying,
     setStreamStatus,
     setCanProcessQueue,
     updateChainInProgress,
+    isProcessingQueueRef,
+    isQueuePausedRef,
   } = params
 
-  const partial = createErrorMessage(error, aiMessageId)
+  const errorInfo = getErrorObject(error, { includeRawError: true })
 
-  logger.error(
-    { error: getErrorObject(error, { includeRawError: true }) },
-    'SDK client.run() failed',
-  )
+  logger.error({ error: errorInfo }, 'SDK client.run() failed')
   setIsRetrying(false)
-  setStreamStatus('idle')
-  setCanProcessQueue(true)
-  updateChainInProgress(false)
+  finalizeQueueState({
+    setStreamStatus,
+    setCanProcessQueue,
+    updateChainInProgress,
+    isProcessingQueueRef,
+    isQueuePausedRef,
+  })
   timerController.stop('error')
 
   if (isOutOfCreditsError(error)) {
@@ -300,15 +384,7 @@ export const handleRunError = (params: {
     return
   }
 
-  updater.updateAiMessage((msg) => {
-    const updatedContent = [msg.content, partial.content]
-      .filter(Boolean)
-      .join('\n\n')
-    return {
-      ...msg,
-      content: updatedContent,
-    }
-  })
-
-  updater.markComplete()
+  // Use setError for all errors so they display in UserErrorBanner consistently
+  const errorMessage = errorInfo.message || 'An unexpected error occurred'
+  updater.setError(errorMessage)
 }

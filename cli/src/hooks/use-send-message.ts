@@ -27,21 +27,16 @@ import {
   setupStreamingContext,
 } from './helpers/send-message'
 import { NETWORK_ERROR_ID } from '../utils/validation-error-helpers'
+import { yieldToEventLoop } from '../utils/yield-to-event-loop'
 
 import type { ElapsedTimeTracker } from './use-elapsed-time'
 import type { StreamStatus } from './use-message-queue'
-import type { PendingImage } from '../state/chat-store'
+import type { PendingAttachment } from '../state/chat-store'
 import type { ChatMessage } from '../types/chat'
 import type { SendMessageFn } from '../types/contracts/send-message'
 import type { AgentMode } from '../utils/constants'
 import type { SendMessageTimerEvent } from '../utils/send-message-timer'
 import type { AgentDefinition, MessageContent, RunState } from '@codebuff/sdk'
-
-// Main chat send hook: orchestrates prep, streaming, and completion.
-const yieldToEventLoop = () =>
-  new Promise<void>((resolve) => {
-    setTimeout(resolve, 0)
-  })
 
 interface UseSendMessageOptions {
   inputRef: React.MutableRefObject<any>
@@ -59,6 +54,7 @@ interface UseSendMessageOptions {
   scrollToLatest: () => void
   onTimerEvent?: (event: SendMessageTimerEvent) => void
   isQueuePausedRef?: React.MutableRefObject<boolean>
+  isProcessingQueueRef?: React.MutableRefObject<boolean>
   resumeQueue?: () => void
   continueChat: boolean
   continueChatId?: string
@@ -108,6 +104,7 @@ export const useSendMessage = ({
   scrollToLatest,
   onTimerEvent = () => {},
   isQueuePausedRef,
+  isProcessingQueueRef,
   resumeQueue,
   continueChat,
   continueChatId,
@@ -197,7 +194,7 @@ export const useSendMessage = ({
       content: string
       agentMode: AgentMode
       postUserMessage?: (prev: ChatMessage[]) => ChatMessage[]
-      attachedImages?: PendingImage[]
+      attachments?: PendingAttachment[]
     }) => {
       // Access lastMessageMode fresh each call to get current value
       const { lastMessageMode } = useChatStore.getState()
@@ -212,8 +209,6 @@ export const useSendMessage = ({
         },
       })
     },
-    // Note: lastMessageMode is accessed via getState() inside the callback,
-    // so it always gets the fresh value - no need to include in deps
     [
       setMessages,
       setLastMessageMode,
@@ -223,7 +218,7 @@ export const useSendMessage = ({
   )
 
   const sendMessage = useCallback<SendMessageFn>(
-    async ({ content, agentMode, postUserMessage, images: attachedImages }) => {
+    async ({ content, agentMode, postUserMessage, attachments }) => {
       if (agentMode !== 'PLAN') {
         setHasReceivedPlanResponse(false)
       }
@@ -236,20 +231,28 @@ export const useSendMessage = ({
       })
       setIsRetrying(false)
 
-      // Prepare user message (bash context, images, mode divider)
-      const { userMessageId, messageContent, bashContextForPrompt } =
-        await prepareUserMessage({
-          content,
-          agentMode,
-          postUserMessage,
-          attachedImages,
-        })
+      // Prepare user message (bash context, images, text attachments, mode divider)
+      const {
+        userMessageId,
+        messageContent,
+        bashContextForPrompt,
+        finalContent,
+      } = await prepareUserMessage({
+        content,
+        agentMode,
+        postUserMessage,
+        attachments,
+      })
 
       // Validate before sending (e.g., agent config checks)
       try {
         const validationResult = await onBeforeMessageSend()
 
         if (!validationResult.success) {
+          logger.warn(
+            { errors: validationResult.errors },
+            '[send-message] Validation failed',
+          )
           const errorsToAttach =
             validationResult.errors.length === 0
               ? [
@@ -277,7 +280,7 @@ export const useSendMessage = ({
       } catch (error) {
         logger.error(
           { error },
-          'Validation before message send failed with exception',
+          '[send-message] Validation before message send failed with exception',
         )
 
         setMessages((prev) => [
@@ -303,8 +306,21 @@ export const useSendMessage = ({
       if (!client) {
         logger.error(
           {},
-          'No Codebuff client available. Please ensure you are authenticated.',
+          '[send-message] No Codebuff client available. Please ensure you are authenticated.',
         )
+        // Show error to user instead of silently failing
+        setMessages((prev) => [
+          ...prev,
+          createErrorChatMessage(
+            '⚠️ Unable to connect to Codebuff. Please check your authentication and try again.',
+          ),
+        ])
+        await yieldToEventLoop()
+        setTimeout(() => scrollToLatest(), 0)
+        // Release the queue processing lock since we're returning early (before try block)
+        if (isProcessingQueueRef) {
+          isProcessingQueueRef.current = false
+        }
         return
       }
 
@@ -324,6 +340,7 @@ export const useSendMessage = ({
           setStreamStatus,
           setCanProcessQueue,
           isQueuePausedRef,
+          isProcessingQueueRef,
           updateChainInProgress,
           setIsRetrying,
         })
@@ -339,8 +356,8 @@ export const useSendMessage = ({
         const resolvedAgent = resolveAgent(agentMode, agentId, agentDefinitions)
 
         const promptWithBashContext = bashContextForPrompt
-          ? bashContextForPrompt + content
-          : content
+          ? bashContextForPrompt + finalContent
+          : finalContent
         const effectivePrompt = buildPromptWithContext(
           promptWithBashContext,
           messageContent,
@@ -376,6 +393,7 @@ export const useSendMessage = ({
           signal: abortController.signal,
         })
 
+        logger.info({ runConfig }, '[send-message] Sending message with sdk run config')
         const runState = await client.run(runConfig)
 
         // Finalize: persist state and mark complete
@@ -400,22 +418,36 @@ export const useSendMessage = ({
           updateChainInProgress,
           setHasReceivedPlanResponse,
           resumeQueue,
+          isProcessingQueueRef,
+          isQueuePausedRef,
         })
       } catch (error) {
         handleRunError({
           error,
-          aiMessageId,
           timerController,
           updater,
           setIsRetrying,
           setStreamStatus,
           setCanProcessQueue,
           updateChainInProgress,
+          isProcessingQueueRef,
+          isQueuePausedRef,
         })
       } finally {
-        // Ensure the batched updater's flush interval is always cleaned up,
-        // even if handleRunCompletion or handleRunError throw unexpectedly.
-        // dispose() is safe to call multiple times.
+        if (isChainInProgressRef.current) {
+          logger.warn(
+            {},
+            '[send-message] Chain still in progress after try/catch, forcing reset',
+          )
+          updateChainInProgress(false)
+          setStreamStatus('idle')
+          setCanProcessQueue(!isQueuePausedRef?.current)
+        }
+        // Safety net: ensure lock is always released even if handleRunCompletion/handleRunError
+        // didn't run (e.g., due to unexpected early return). Redundant releases are safe (idempotent).
+        if (isProcessingQueueRef) {
+          isProcessingQueueRef.current = false
+        }
         updater.dispose()
       }
     },
@@ -424,6 +456,7 @@ export const useSendMessage = ({
       addSessionCredits,
       agentId,
       inputRef,
+      isProcessingQueueRef,
       isQueuePausedRef,
       mainAgentTimer,
       onBeforeMessageSend,

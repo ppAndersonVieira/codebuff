@@ -9,20 +9,20 @@ import {
 } from './command-registry'
 import { handleReferralCode } from './referral'
 import {
-  parseCommand,
   isSlashCommand,
   isReferralCode,
   extractReferralCode,
   normalizeReferralCode,
+  parseCommandInput,
 } from './router-utils'
 import { handleClaudeAuthCode } from '../components/claude-connect-banner'
 import { getProjectRoot } from '../project-files'
 import { useChatStore } from '../state/chat-store'
 import {
-  capturePendingImages,
+  capturePendingAttachments,
   hasProcessingImages,
   validateAndAddImage,
-} from '../utils/add-pending-image'
+} from '../utils/pending-attachments'
 import {
   buildBashHistoryMessages,
   createRunTerminalToolResult,
@@ -267,11 +267,16 @@ export async function routeUserPrompt(
 
   const inputMode = useChatStore.getState().inputMode
   const setInputMode = useChatStore.getState().setInputMode
-  const pendingImages = useChatStore.getState().pendingImages
+  const pendingAttachments = useChatStore.getState().pendingAttachments
+  const pendingImages = pendingAttachments.filter((a) => a.kind === 'image')
+  const pendingTextAttachments = pendingAttachments.filter(
+    (a) => a.kind === 'text',
+  )
 
   const trimmed = inputValue.trim()
-  // Allow empty messages if there are pending images attached
-  if (!trimmed && pendingImages.length === 0) return
+  // Allow empty messages if there are pending attachments (images or text)
+  const hasAttachments = pendingAttachments.length > 0
+  if (!trimmed && !hasAttachments) return
 
   // Track user input complete
   // Count @ mentions (simple pattern match - more accurate than nothing)
@@ -282,6 +287,8 @@ export async function routeUserPrompt(
     inputMode,
     hasImages: pendingImages.length > 0,
     imageCount: pendingImages.length,
+    hasTextAttachments: pendingTextAttachments.length > 0,
+    textAttachmentCount: pendingTextAttachments.length,
     isSlashCommand: isSlashCommand(trimmed),
     isBashCommand: trimmed.startsWith('!'),
     hasMentions: mentionMatches.length > 0,
@@ -413,25 +420,25 @@ export async function routeUserPrompt(
     return
   }
 
-  // Only process slash commands if input starts with '/'
-  if (isSlashCommand(trimmed)) {
-    const cmd = parseCommand(trimmed)
-    const args = trimmed.slice(1 + cmd.length).trim()
-
-    // Look up command in registry
-    const commandDef = findCommand(cmd)
+  // Handle slash commands or configured slashless exact commands.
+  const parsedCommand = parseCommandInput(trimmed)
+  if (parsedCommand) {
+    const commandDef = findCommand(parsedCommand.command)
     if (commandDef) {
-      // Track slash command usage
-      trackEvent(AnalyticsEvent.SLASH_COMMAND_USED, {
+      const argsLength = parsedCommand.args.length
+      const analyticsPayload = {
         command: commandDef.name,
-        hasArgs: args.trim().length > 0,
-        argsLength: args.trim().length,
+        hasArgs: argsLength > 0,
+        argsLength,
         agentMode,
-      })
+        ...(parsedCommand.implicitCommand ? { implicitCommand: true } : {}),
+      }
+
+      trackEvent(AnalyticsEvent.SLASH_COMMAND_USED, analyticsPayload)
 
       // The command handler (via defineCommand/defineCommandWithArgs factories)
       // is responsible for validating and handling args
-      return await commandDef.handler(params, args)
+      return await commandDef.handler(params, parsedCommand.args)
     }
   }
 
@@ -453,9 +460,9 @@ export async function routeUserPrompt(
     streamMessageIdRef.current ||
     isChainInProgressRef.current
   ) {
-    const pendingImagesForQueue = capturePendingImages()
-    // Pass a copy of pending images to the queue
-    addToQueue(trimmed, pendingImagesForQueue)
+    const pendingAttachmentsForQueue = capturePendingAttachments()
+    // Pass a copy of pending attachments to the queue
+    addToQueue(trimmed, pendingAttachmentsForQueue)
 
     setInputFocused(true)
     inputRef.current?.focus()
@@ -465,7 +472,7 @@ export async function routeUserPrompt(
   // Unknown slash command - show error
   if (isSlashCommand(trimmed)) {
     // Track invalid/unknown command (only log command name, not full input for privacy)
-    const attemptedCmd = parseCommand(trimmed)
+    const attemptedCmd = trimmed.slice(1).split(/\s+/)[0]?.toLowerCase() || ''
     trackEvent(AnalyticsEvent.INVALID_COMMAND, {
       attemptedCommand: attemptedCmd,
       inputLength: trimmed.length,

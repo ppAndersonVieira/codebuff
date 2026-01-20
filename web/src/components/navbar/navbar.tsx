@@ -6,7 +6,6 @@ import {
   LogIn,
   BarChart2,
   BookHeart,
-  Bot,
 } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
@@ -46,18 +45,18 @@ export const Navbar = () => {
         </Link>
         <nav className="hidden md:flex items-center space-x-1 ml-auto">
           <Link
-            href={`/docs`}
+            href="/docs"
             className="relative font-medium px-3 py-2 rounded-md transition-all duration-200 hover:bg-accent hover:text-accent-foreground group"
           >
             <span className="relative z-10">Docs</span>
-            <span className="absolute inset-0 rounded-md bg-gradient-to-r from-blue-500/0 via-blue-500/5 to-purple-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+            <span className="pointer-events-none absolute inset-0 rounded-md bg-gradient-to-r from-blue-500/0 via-blue-500/5 to-purple-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
           </Link>
           <Link
             href="/pricing"
             className="relative font-medium px-3 py-2 rounded-md transition-all duration-200 hover:bg-accent hover:text-accent-foreground group"
           >
             <span className="relative z-10">Pricing</span>
-            <span className="absolute inset-0 rounded-md bg-gradient-to-r from-blue-500/0 via-blue-500/5 to-purple-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+            <span className="pointer-events-none absolute inset-0 rounded-md bg-gradient-to-r from-blue-500/0 via-blue-500/5 to-purple-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
           </Link>
           <Link
             href="https://github.com/CodebuffAI/codebuff"
@@ -67,17 +66,8 @@ export const Navbar = () => {
           >
             <Icons.github className="h-4 w-4 transition-transform duration-200 group-hover:scale-110" />
             <span className="relative z-10">GitHub</span>
-            <span className="absolute inset-0 rounded-md bg-gradient-to-r from-blue-500/0 via-blue-500/5 to-purple-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+            <span className="pointer-events-none absolute inset-0 rounded-md bg-gradient-to-r from-blue-500/0 via-blue-500/5 to-purple-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
           </Link>
-          <Link
-            href="/store"
-            className="relative font-medium px-3 py-2 rounded-md transition-all duration-200 hover:bg-accent hover:text-accent-foreground flex items-center gap-2 group"
-          >
-            <Bot className="h-4 w-4 transition-transform duration-200 group-hover:scale-110" />
-            <span className="relative z-10">Agent Store</span>
-            <span className="absolute inset-0 rounded-md bg-gradient-to-r from-blue-500/0 via-blue-500/5 to-purple-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-          </Link>
-
           {/* Only show Usage link when session is ready and user is authenticated */}
           {status !== 'loading' && session && (
             <Link
@@ -85,7 +75,7 @@ export const Navbar = () => {
               className="relative font-medium px-3 py-2 rounded-md transition-all duration-200 hover:bg-accent hover:text-accent-foreground group"
             >
               <span className="relative z-10">Usage</span>
-              <span className="absolute inset-0 rounded-md bg-gradient-to-r from-blue-500/0 via-blue-500/5 to-purple-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+              <span className="pointer-events-none absolute inset-0 rounded-md bg-gradient-to-r from-blue-500/0 via-blue-500/5 to-purple-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
             </Link>
           )}
         </nav>
@@ -134,16 +124,6 @@ export const Navbar = () => {
                   <span>GitHub</span>
                 </Link>
               </DropdownMenuItem>
-              <DropdownMenuItem asChild>
-                <Link
-                  href="/store"
-                  className="flex items-center cursor-pointer transition-colors"
-                >
-                  <Bot className="mr-2 h-4 w-4" />
-                  <span>Agent Store</span>
-                </Link>
-              </DropdownMenuItem>
-
               {/* Only show Usage and Login links when session is ready */}
               {status !== 'loading' && session && (
                 <DropdownMenuItem asChild>

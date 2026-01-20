@@ -238,6 +238,7 @@ export const session = pgTable('session', {
   expires: timestamp('expires', { mode: 'date' }).notNull(),
   fingerprint_id: text('fingerprint_id').references(() => fingerprint.id),
   type: sessionTypeEnum('type').notNull().default('web'),
+  created_at: timestamp('created_at', { mode: 'date' }).notNull().defaultNow(),
 })
 
 export const verificationToken = pgTable(
@@ -414,6 +415,7 @@ export const adImpression = pgTable(
     // Ad content from Gravity API
     ad_text: text('ad_text').notNull(),
     title: text('title').notNull(),
+    cta: text('cta').notNull().default(''),
     url: text('url').notNull(),
     favicon: text('favicon').notNull(),
     click_url: text('click_url').notNull(),

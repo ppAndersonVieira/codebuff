@@ -5,7 +5,7 @@ import { getAdsEnabled } from '../commands/ads'
 import { useChatStore } from '../state/chat-store'
 import { subscribeToActivity } from '../utils/activity-tracker'
 import { getAuthToken } from '../utils/auth'
-import { logger, loggerContext } from '../utils/logger'
+import { logger } from '../utils/logger'
 
 const AD_ROTATION_INTERVAL_MS = 60 * 1000 // 60 seconds per ad
 const MAX_ADS_AFTER_ACTIVITY = 3 // Show up to 3 ads after last activity, then stop
@@ -14,6 +14,7 @@ const MAX_ADS_AFTER_ACTIVITY = 3 // Show up to 3 ads after last activity, then s
 export type AdResponse = {
   adText: string
   title: string
+  cta: string
   url: string
   favicon: string
   clickUrl: string
@@ -57,11 +58,6 @@ export const useGravityAd = (): GravityAdState => {
     if (isActive && ad?.impUrl && !impressionFiredRef.current.has(ad.impUrl)) {
       const currentImpUrl = ad.impUrl
       impressionFiredRef.current.add(currentImpUrl)
-      logger.info(
-        { impUrl: currentImpUrl },
-        '[gravity] Recording ad impression',
-      )
-
       const authToken = getAuthToken()
       if (!authToken) {
         logger.warn('[gravity] No auth token, skipping impression recording')
@@ -145,31 +141,6 @@ export const useGravityAd = (): GravityAdState => {
       }
     }
 
-    // Get the last assistant message and last user message
-    const lastAssistantMessage = [...adMessages]
-      .reverse()
-      .find((message) => message.role === 'assistant')
-    const lastUserMessage = [...adMessages]
-      .reverse()
-      .find((message) => message.role === 'user')
-
-    const messagesToSend: { role: string; content: string }[] = []
-    if (lastAssistantMessage) {
-      messagesToSend.push({
-        role: lastAssistantMessage.role,
-        content: lastAssistantMessage.content,
-      })
-    }
-    if (lastUserMessage) {
-      messagesToSend.push({
-        role: lastUserMessage.role,
-        content: lastUserMessage.content.replace(
-          /<user_message>(.*?)<\/user_message>/,
-          '$1',
-        ),
-      })
-    }
-
     try {
       const response = await fetch(`${WEBSITE_URL}/api/v1/ads`, {
         method: 'POST',
@@ -178,8 +149,9 @@ export const useGravityAd = (): GravityAdState => {
           Authorization: `Bearer ${authToken}`,
         },
         body: JSON.stringify({
-          messages: messagesToSend,
-          sessionId: loggerContext.clientSessionId,
+          messages: adMessages,
+          sessionId: useChatStore.getState().chatSessionId,
+          device: getDeviceInfo(),
         }),
       })
 
@@ -195,7 +167,7 @@ export const useGravityAd = (): GravityAdState => {
       const ad = data.ad as AdResponse | null
 
       logger.info(
-        { ad, request: { messages: messagesToSend } },
+        { ad, request: { messages: adMessages } },
         '[gravity] Received ad response',
       )
       return ad
@@ -219,13 +191,8 @@ export const useGravityAd = (): GravityAdState => {
 
     rotationTimerRef.current = setTimeout(async () => {
       adsShownRef.current += 1
-      logger.info(
-        { adsShown: adsShownRef.current, max: MAX_ADS_AFTER_ACTIVITY },
-        '[gravity] Ad cycle complete',
-      )
 
       if (adsShownRef.current >= MAX_ADS_AFTER_ACTIVITY) {
-        logger.info('[gravity] Max ads shown, pausing rotation')
         isPausedRef.current = true
         return
       }
@@ -245,7 +212,6 @@ export const useGravityAd = (): GravityAdState => {
     adsShownRef.current = 0
 
     if (wasPaused) {
-      logger.info('[gravity] User active, resuming ad rotation')
       isPausedRef.current = false
       scheduleRotation()
     }
@@ -282,7 +248,6 @@ export const useGravityAd = (): GravityAdState => {
 
       if (hasUserMessage) {
         unsubscribe()
-        logger.info('[gravity] First user message detected, starting ads')
         setIsActive(true)
       }
     })
@@ -340,4 +305,30 @@ const convertToAdMessages = (messages: Message[]): AdMessage[] => {
     .filter((message) => message.content !== '')
 
   return adMessages
+}
+
+/** Device info sent to the ads API for targeting */
+type DeviceInfo = {
+  os: 'macos' | 'windows' | 'linux'
+  timezone: string
+  locale: string
+}
+
+/** Get device info for ads API */
+function getDeviceInfo(): DeviceInfo {
+  // Map Node.js platform to Gravity API os values
+  const platformToOs: Record<string, 'macos' | 'windows' | 'linux'> = {
+    darwin: 'macos',
+    win32: 'windows',
+    linux: 'linux',
+  }
+  const os = platformToOs[process.platform] ?? 'linux'
+
+  // Get IANA timezone (e.g., "America/New_York")
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+
+  // Get locale (e.g., "en-US")
+  const locale = Intl.DateTimeFormat().resolvedOptions().locale
+
+  return { os, timezone, locale }
 }

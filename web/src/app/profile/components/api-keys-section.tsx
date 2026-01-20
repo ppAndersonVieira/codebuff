@@ -38,7 +38,10 @@ async function fetchTokens(): Promise<{
   }[]
 }> {
   const res = await fetch('/api/api-keys')
-  if (!res.ok) throw new Error(await res.text())
+  if (!res.ok) {
+    const errorText = await res.text()
+    throw new Error(errorText)
+  }
   return res.json()
 }
 
@@ -84,7 +87,10 @@ export function ApiKeysSection() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, expiresInDays }),
       })
-      if (!res.ok) throw new Error(await res.text())
+      if (!res.ok) {
+        const errorText = await res.text()
+        throw new Error(errorText)
+      }
       return res.json()
     },
     onSuccess: async (data) => {
@@ -99,7 +105,7 @@ export function ApiKeysSection() {
       toast({
         title: 'Creation failed',
         description: e.message ?? String(e),
-        variant: 'destructive' as any,
+        variant: 'destructive',
       })
     },
   })
@@ -111,7 +117,10 @@ export function ApiKeysSection() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tokenIds: [tokenId] }),
       })
-      if (!res.ok) throw new Error(await res.text())
+      if (!res.ok) {
+        const errorText = await res.text()
+        throw new Error(errorText)
+      }
       return res.json()
     },
     onSuccess: async () => {
@@ -124,7 +133,7 @@ export function ApiKeysSection() {
       toast({
         title: 'Revoke failed',
         description: e.message ?? String(e),
-        variant: 'destructive' as any,
+        variant: 'destructive',
       })
     },
   })
@@ -179,7 +188,9 @@ export function ApiKeysSection() {
         <div className="rounded-md border border-destructive/50 bg-destructive/10 text-destructive px-3 py-2 flex items-center justify-between mb-4">
           <span className="text-sm">
             Error loading API keys:{' '}
-            {(tokensError as any)?.message ?? 'Please try again.'}
+            {tokensError instanceof Error
+              ? tokensError.message
+              : 'Please try again.'}
           </span>
           <Button
             variant="outline"

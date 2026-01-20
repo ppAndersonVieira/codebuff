@@ -331,7 +331,8 @@ export function createCodebuffApiClient(
 
         if (response.ok) {
           try {
-            const data = (await response.json()) as T
+            const responseBody = await response.json()
+            const data = responseBody as T
             return { ok: true, status: response.status, data }
           } catch {
             // Response was OK but no JSON body (e.g., 204 No Content)
@@ -392,7 +393,15 @@ export function createCodebuffApiClient(
           continue
         }
 
-        // Don't retry, throw the error
+        // Don't retry, throw the error with URL context
+        if (error instanceof Error) {
+          const enhancedError = new Error(
+            `${error.message} (${method} ${url})`,
+          )
+          enhancedError.name = error.name
+          enhancedError.cause = error
+          throw enhancedError
+        }
         throw error
       }
     }

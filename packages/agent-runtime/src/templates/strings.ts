@@ -1,3 +1,4 @@
+import { KNOWLEDGE_FILE_NAMES_LOWERCASE } from '@codebuff/common/constants/knowledge'
 import { escapeString } from '@codebuff/common/util/string'
 import { z } from 'zod/v4'
 
@@ -117,9 +118,11 @@ export async function formatPrompt(
       Object.entries({
         ...Object.fromEntries(
           Object.entries(fileContext.knowledgeFiles)
-            .filter(([path]) =>
-              ['knowledge.md', 'CLAUDE.md'].includes(path),
-            )
+            .filter(([filePath]) => {
+              const lowerPath = filePath.toLowerCase()
+              // Root-level knowledge files only (knowledge.md, AGENTS.md, CLAUDE.md)
+              return KNOWLEDGE_FILE_NAMES_LOWERCASE.includes(lowerPath)
+            })
             .map(([path, content]) => [path, content.trim()]),
         ),
         ...fileContext.userKnowledgeFiles,
@@ -131,7 +134,8 @@ export async function formatPrompt(
   }
 
   for (const varName of placeholderValues) {
-    const value = await (toInject[varName] ?? (() => ''))()
+    const valueProvider = toInject[varName] ?? (() => '')
+    const value = await valueProvider()
     prompt = prompt.replaceAll(varName, value)
   }
   return prompt
@@ -192,18 +196,30 @@ export async function getAgentPrompt<T extends StringField>(
       // For subagents with inheritSystemPrompt, include full spawnable agents spec
       // since the parent's system prompt may not have these agents listed
       if (spawnableAgents.length > 0) {
-        addendum +=
-          '\n\n' +
-          (await buildFullSpawnableAgentsSpec({
-            ...params,
-            spawnableAgents,
-            agentTemplates,
-          }))
+        const spawnableAgentsSpec = await buildFullSpawnableAgentsSpec({
+          ...params,
+          spawnableAgents,
+          agentTemplates,
+        })
+        addendum += `\n\n${spawnableAgentsSpec}`
       }
     } else if (spawnableAgents.length > 0) {
       // For non-inherited tools, agents are already defined as tools with full schemas,
-      // so we just list the available agent IDs here
-      addendum += `\n\nYou can spawn the following agents: ${spawnableAgents.join(', ')}.`
+      // so we add the spawnerPrompt for each agent
+      const agentDescriptions = await Promise.all(
+        spawnableAgents.map(async (agentType) => {
+          const template = await getAgentTemplate({
+            ...params,
+            agentId: agentType,
+            localAgentTemplates: agentTemplates,
+          })
+          if (template?.spawnerPrompt) {
+            return `- ${agentType}: ${template.spawnerPrompt}`
+          }
+          return `- ${agentType}`
+        }),
+      )
+      addendum += `\n\nYou can spawn the following agents:\n\n${agentDescriptions.join('\n')}`
     }
 
     // Add output schema information if defined

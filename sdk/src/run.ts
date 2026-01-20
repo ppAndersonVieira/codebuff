@@ -7,7 +7,7 @@ import {
 } from '@codebuff/agent-runtime/util/messages'
 import { MAX_AGENT_STEPS_DEFAULT } from '@codebuff/common/constants/agents'
 import { getMCPClient, listMCPTools, callMCPTool } from '@codebuff/common/mcp/client'
-import { toOptionalFile } from '@codebuff/common/old-constants'
+import { toOptionalFile } from '@codebuff/common/constants/paths'
 import { toolNames } from '@codebuff/common/tools/constants'
 import { clientToolCallSchema } from '@codebuff/common/tools/list'
 import { AgentOutputSchema } from '@codebuff/common/types/session-state'
@@ -23,6 +23,8 @@ import { glob } from './tools/glob'
 import { listDirectory } from './tools/list-directory'
 import { getFiles } from './tools/read-files'
 import { runTerminalCommand } from './tools/run-terminal-command'
+
+import type { FileFilter } from './tools/read-files'
 
 import type { CustomToolDefinition } from './custom-tool'
 import type { RunState } from './run-state'
@@ -92,6 +94,9 @@ export type CodebuffClientOptions = {
           chunk: string
         },
   ) => void | Promise<void>
+
+  /** Optional filter to classify files before reading (runs before gitignore check) */
+  fileFilter?: FileFilter
 
   overrideTools?: Partial<
     {
@@ -183,6 +188,7 @@ async function runOnce({
   handleEvent,
   handleStreamChunk,
 
+  fileFilter,
   overrideTools,
   customToolDefinitions,
 
@@ -198,10 +204,15 @@ async function runOnce({
   extraToolResults,
   signal,
 }: RunExecutionOptions): Promise<RunState> {
-  const fs = await (typeof fsSource === 'function' ? fsSource() : fsSource)
-  const spawn: CodebuffSpawn = (
-    spawnSource ? await spawnSource : require('child_process').spawn
-  ) as CodebuffSpawn
+  const fsSourceValue = typeof fsSource === 'function' ? fsSource() : fsSource
+  const fs = await fsSourceValue
+  let spawn: CodebuffSpawn
+  if (spawnSource) {
+    const spawnSourceValue = await spawnSource
+    spawn = spawnSourceValue as CodebuffSpawn
+  } else {
+    spawn = require('child_process').spawn as CodebuffSpawn
+  }
   const preparedContent = wrapContentForUserMessage(content)
 
   // Init session state
@@ -365,7 +376,8 @@ async function runOnce({
     },
     requestMcpToolData: async ({ mcpConfig, toolNames }) => {
       const mcpClientId = await getMCPClient(mcpConfig)
-      const tools = (await listMCPTools(mcpClientId)).tools
+      const listToolsResult = await listMCPTools(mcpClientId)
+      const tools = listToolsResult.tools
       const filteredTools: typeof tools = []
       for (const tool of tools) {
         if (!toolNames) {
@@ -384,6 +396,7 @@ async function runOnce({
       readFiles({
         filePaths,
         override: overrideTools?.read_files,
+        fileFilter,
         cwd,
         fs,
       }),
@@ -391,6 +404,7 @@ async function runOnce({
       const files = await readFiles({
         filePaths: [filePath],
         override: overrideTools?.read_files,
+        fileFilter,
         cwd,
         fs,
       })
@@ -518,6 +532,7 @@ function requireCwd(cwd: string | undefined, toolName: string): string {
 async function readFiles({
   filePaths,
   override,
+  fileFilter,
   cwd,
   fs,
 }: {
@@ -525,13 +540,14 @@ async function readFiles({
   override?: NonNullable<
     Required<CodebuffClientOptions>['overrideTools']['read_files']
   >
+  fileFilter?: FileFilter
   cwd?: string
   fs: CodebuffFileSystem
 }) {
   if (override) {
     return await override({ filePaths })
   }
-  return getFiles({ filePaths, cwd: requireCwd(cwd, 'read_files'), fs })
+  return getFiles({ filePaths, cwd: requireCwd(cwd, 'read_files'), fs, fileFilter })
 }
 
 async function handleToolCall({

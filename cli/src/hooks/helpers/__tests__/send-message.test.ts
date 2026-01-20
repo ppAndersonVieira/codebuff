@@ -28,7 +28,7 @@ ensureEnv()
 
 const { useChatStore } = await import('../../../state/chat-store')
 const { createStreamController } = await import('../../stream-state')
-const { setupStreamingContext, handleRunError } = await import(
+const { setupStreamingContext, handleRunError, finalizeQueueState } = await import(
   '../send-message'
 )
 const { createBatchedMessageUpdater } = await import(
@@ -172,6 +172,94 @@ describe('setupStreamingContext', () => {
       expect(canProcessQueue).toBe(false)
     })
 
+    test('abort resets isProcessingQueueRef to false', () => {
+      let messages = createBaseMessages()
+      const streamRefs = createStreamController()
+      const timerController = createMockTimerController()
+      const abortControllerRef = { current: null as AbortController | null }
+      const isProcessingQueueRef = { current: true }
+
+      const { abortController } = setupStreamingContext({
+        aiMessageId: 'ai-1',
+        timerController,
+        setMessages: (fn: any) => {
+          messages = fn(messages)
+        },
+        streamRefs,
+        abortControllerRef,
+        setStreamStatus: () => {},
+        setCanProcessQueue: () => {},
+        isProcessingQueueRef,
+        updateChainInProgress: () => {},
+        setIsRetrying: () => {},
+      })
+
+      // Verify ref starts as true
+      expect(isProcessingQueueRef.current).toBe(true)
+
+      // Trigger abort
+      abortController.abort()
+
+      // Verify isProcessingQueueRef is reset to false after abort
+      expect(isProcessingQueueRef.current).toBe(false)
+    })
+
+    test('abort with both isProcessingQueueRef and isQueuePausedRef handles correctly', () => {
+      let messages = createBaseMessages()
+      const streamRefs = createStreamController()
+      const timerController = createMockTimerController()
+      const abortControllerRef = { current: null as AbortController | null }
+      const isProcessingQueueRef = { current: true }
+      const isQueuePausedRef = { current: true }
+      let streamStatus = 'streaming' as StreamStatus
+      let canProcessQueue = true
+      let chainInProgress = true
+      let isRetrying = true
+
+      const { abortController } = setupStreamingContext({
+        aiMessageId: 'ai-1',
+        timerController,
+        setMessages: (fn: any) => {
+          messages = fn(messages)
+        },
+        streamRefs,
+        abortControllerRef,
+        setStreamStatus: (status) => {
+          streamStatus = status
+        },
+        setCanProcessQueue: (can) => {
+          canProcessQueue = can
+        },
+        isQueuePausedRef,
+        isProcessingQueueRef,
+        updateChainInProgress: (value) => {
+          chainInProgress = value
+        },
+        setIsRetrying: (value) => {
+          isRetrying = value
+        },
+      })
+
+      // Sanity check initial state
+      expect(isProcessingQueueRef.current).toBe(true)
+      expect(isQueuePausedRef.current).toBe(true)
+      expect(streamStatus).toBe('streaming')
+      expect(canProcessQueue).toBe(true)
+      expect(chainInProgress).toBe(true)
+      expect(isRetrying).toBe(true)
+
+      // Trigger abort
+      abortController.abort()
+
+      // After abort, lock should be released, queue should respect pause state,
+      // chain and retry flags should be cleared, and stream should be idle.
+      expect(isProcessingQueueRef.current).toBe(false)
+      expect(canProcessQueue).toBe(false)
+      expect(chainInProgress).toBe(false)
+      expect(isRetrying).toBe(false)
+      expect(streamStatus).toBe('idle')
+    })
+
     test('abort handler stores abortController in ref', () => {
       let messages = createBaseMessages()
       const streamRefs = createStreamController()
@@ -230,6 +318,61 @@ describe('setupStreamingContext', () => {
   })
 })
 
+describe('finalizeQueueState', () => {
+  test('sets stream status to idle and resets queue state', () => {
+    let streamStatus = 'streaming' as StreamStatus
+    let canProcessQueue = false
+    let chainInProgress = true
+    const isProcessingQueueRef = { current: true }
+
+    finalizeQueueState({
+      setStreamStatus: (status) => { streamStatus = status },
+      setCanProcessQueue: (can) => { canProcessQueue = can },
+      updateChainInProgress: (value) => { chainInProgress = value },
+      isProcessingQueueRef,
+    })
+
+    expect(streamStatus).toBe('idle')
+    expect(canProcessQueue).toBe(true)
+    expect(chainInProgress).toBe(false)
+    expect(isProcessingQueueRef.current).toBe(false)
+  })
+
+  test('calls resumeQueue instead of setCanProcessQueue when provided', () => {
+    let streamStatus = 'streaming' as StreamStatus
+    let canProcessQueueCalled = false
+    let resumeQueueCalled = false
+    let chainInProgress = true
+
+    finalizeQueueState({
+      setStreamStatus: (status) => { streamStatus = status },
+      setCanProcessQueue: () => { canProcessQueueCalled = true },
+      updateChainInProgress: (value) => { chainInProgress = value },
+      resumeQueue: () => { resumeQueueCalled = true },
+    })
+
+    expect(streamStatus).toBe('idle')
+    expect(resumeQueueCalled).toBe(true)
+    expect(canProcessQueueCalled).toBe(false)
+    expect(chainInProgress).toBe(false)
+  })
+
+  test('respects isQueuePausedRef when no resumeQueue provided', () => {
+    let canProcessQueue = true
+    const isQueuePausedRef = { current: true }
+
+    finalizeQueueState({
+      setStreamStatus: () => {},
+      setCanProcessQueue: (can) => { canProcessQueue = can },
+      updateChainInProgress: () => {},
+      isQueuePausedRef,
+    })
+
+    // When queue is paused, canProcessQueue should be false
+    expect(canProcessQueue).toBe(false)
+  })
+})
+
 describe('handleRunError', () => {
   let originalGetState: typeof useChatStore.getState
 
@@ -241,7 +384,7 @@ describe('handleRunError', () => {
     useChatStore.getState = originalGetState
   })
 
-  test('appends error to existing streamed content for regular errors', () => {
+  test('stores error in userError field for regular errors', () => {
     let messages: ChatMessage[] = [
       {
         id: 'ai-1',
@@ -264,7 +407,6 @@ describe('handleRunError', () => {
 
     handleRunError({
       error: new Error('Network timeout'),
-      aiMessageId: 'ai-1',
       timerController,
       updater,
       setIsRetrying: (value: boolean) => {
@@ -281,15 +423,12 @@ describe('handleRunError', () => {
       },
     })
 
-    // Flush the batched updates
-    updater.flush()
-
     const aiMessage = messages.find((m) => m.id === 'ai-1')
     expect(aiMessage).toBeDefined()
 
-    // Content should be appended, not overwritten
-    expect(aiMessage!.content).toContain('Partial streamed content')
-    expect(aiMessage!.content).toContain('Network timeout')
+    // Content should be preserved, error stored in userError
+    expect(aiMessage!.content).toBe('Partial streamed content')
+    expect(aiMessage!.userError).toBe('Network timeout')
 
     // Verify state resets
     expect(streamStatus).toBe('idle')
@@ -322,7 +461,6 @@ describe('handleRunError', () => {
 
     handleRunError({
       error: new Error('Something failed'),
-      aiMessageId: 'ai-1',
       timerController,
       updater,
       setIsRetrying: () => {},
@@ -331,11 +469,9 @@ describe('handleRunError', () => {
       updateChainInProgress: () => {},
     })
 
-    updater.flush()
-
     const aiMessage = messages.find((m) => m.id === 'ai-1')
-    // Should contain error message
-    expect(aiMessage!.content).toContain('Something failed')
+    // Error should be in userError field
+    expect(aiMessage!.userError).toBe('Something failed')
     expect(aiMessage!.isComplete).toBe(true)
   })
 
@@ -363,7 +499,6 @@ describe('handleRunError', () => {
 
     handleRunError({
       error: new Error('Regular error'),
-      aiMessageId: 'ai-1',
       timerController,
       updater,
       setIsRetrying: () => {},
@@ -374,6 +509,152 @@ describe('handleRunError', () => {
 
     // Should NOT switch input mode for regular errors
     expect(setInputModeMock).not.toHaveBeenCalled()
+  })
+
+  test('resets isProcessingQueueRef to false on error', () => {
+    let messages: ChatMessage[] = [
+      {
+        id: 'ai-1',
+        variant: 'ai',
+        content: '',
+        blocks: [],
+        timestamp: 'now',
+      },
+    ]
+
+    const timerController = createMockTimerController()
+    const updater = createBatchedMessageUpdater('ai-1', (fn: any) => {
+      messages = fn(messages)
+    })
+    const isProcessingQueueRef = { current: true }
+
+    // Verify ref starts as true
+    expect(isProcessingQueueRef.current).toBe(true)
+
+    handleRunError({
+      error: new Error('Some error'),
+      timerController,
+      updater,
+      setIsRetrying: () => {},
+      setStreamStatus: () => {},
+      setCanProcessQueue: () => {},
+      updateChainInProgress: () => {},
+      isProcessingQueueRef,
+    })
+
+    // Verify isProcessingQueueRef is reset to false
+    expect(isProcessingQueueRef.current).toBe(false)
+  })
+
+  test('respects isQueuePausedRef when setting canProcessQueue on error', () => {
+    let messages: ChatMessage[] = [
+      {
+        id: 'ai-1',
+        variant: 'ai',
+        content: '',
+        blocks: [],
+        timestamp: 'now',
+      },
+    ]
+
+    const timerController = createMockTimerController()
+    const updater = createBatchedMessageUpdater('ai-1', (fn: any) => {
+      messages = fn(messages)
+    })
+    const isQueuePausedRef = { current: true }
+    let canProcessQueue = true
+
+    handleRunError({
+      error: new Error('Some error'),
+      timerController,
+      updater,
+      setIsRetrying: () => {},
+      setStreamStatus: () => {},
+      setCanProcessQueue: (can: boolean) => {
+        canProcessQueue = can
+      },
+      updateChainInProgress: () => {},
+      isQueuePausedRef,
+    })
+
+    // When queue is paused, canProcessQueue should be false
+    expect(canProcessQueue).toBe(false)
+  })
+
+  test('context length exceeded error (AI_APICallError) stores error in userError and preserves content', () => {
+    let messages: ChatMessage[] = [
+      {
+        id: 'ai-1',
+        variant: 'ai',
+        content: 'Partial streamed content before error',
+        blocks: [{ type: 'text', content: 'some block content' }],
+        timestamp: 'now',
+      },
+    ]
+
+    const timerController = createMockTimerController()
+    const updater = createBatchedMessageUpdater('ai-1', (fn: any) => {
+      messages = fn(messages)
+    })
+
+    // Create an error that matches the real AI_APICallError structure
+    const contextLengthError = Object.assign(
+      new Error(
+        "This endpoint's maximum context length is 200000 tokens. However, you requested about 201209 tokens (158536 of text input, 10673 of tool input, 32000 in the output). Please reduce the length of either one, or use the \"middle-out\" transform to compress your prompt automatically."
+      ),
+      {
+        name: 'AI_APICallError',
+        statusCode: 400,
+      }
+    )
+
+    let streamStatus = 'streaming' as StreamStatus
+    let canProcessQueue = false
+    let chainInProgress = true
+    let isRetrying = true
+
+    handleRunError({
+      error: contextLengthError,
+      timerController,
+      updater,
+      setIsRetrying: (value: boolean) => {
+        isRetrying = value
+      },
+      setStreamStatus: (status: StreamStatus) => {
+        streamStatus = status
+      },
+      setCanProcessQueue: (can: boolean) => {
+        canProcessQueue = can
+      },
+      updateChainInProgress: (value: boolean) => {
+        chainInProgress = value
+      },
+    })
+
+    const aiMessage = messages.find((m) => m.id === 'ai-1')
+    expect(aiMessage).toBeDefined()
+
+    // Content should be preserved
+    expect(aiMessage!.content).toBe('Partial streamed content before error')
+
+    // Blocks should be preserved
+    expect(aiMessage!.blocks).toEqual([{ type: 'text', content: 'some block content' }])
+
+    // Error should be stored in userError (displayed in UserErrorBanner)
+    expect(aiMessage!.userError).toContain('maximum context length is 200000 tokens')
+    expect(aiMessage!.userError).toContain('201209 tokens')
+
+    // Message should be marked complete
+    expect(aiMessage!.isComplete).toBe(true)
+
+    // State should be reset
+    expect(streamStatus).toBe('idle')
+    expect(canProcessQueue).toBe(true)
+    expect(chainInProgress).toBe(false)
+    expect(isRetrying).toBe(false)
+
+    // Timer should be stopped with error
+    expect(timerController.stopCalls).toContain('error')
   })
 
   test('Payment required error (402) uses setError, invalidates queries, and switches input mode', () => {
@@ -402,7 +683,6 @@ describe('handleRunError', () => {
 
     handleRunError({
       error: paymentError,
-      aiMessageId: 'ai-1',
       timerController,
       updater,
       setIsRetrying: () => {},
@@ -414,9 +694,10 @@ describe('handleRunError', () => {
     const aiMessage = messages.find((m) => m.id === 'ai-1')
     expect(aiMessage).toBeDefined()
 
-    // For PaymentRequiredError, setError is used which OVERWRITES content
-    expect(aiMessage!.content).not.toContain('Partial streamed content')
-    expect(aiMessage!.content).toContain('Out of credits')
+    // For PaymentRequiredError, setError sets userError (not content)
+    // Content is preserved, error is stored in userError field
+    expect(aiMessage!.content).toBe('Partial streamed content')
+    expect(aiMessage!.userError).toContain('Out of credits')
 
     // Blocks should be preserved for debugging context
     expect(aiMessage!.blocks).toEqual([{ type: 'text', content: 'some block' }])

@@ -3,66 +3,115 @@ import { memo, useCallback, useMemo, type ReactNode } from 'react'
 import React from 'react'
 
 import { Button } from './button'
+import { ErrorBoundary } from './error-boundary'
+import { GridLayout } from './grid-layout'
 import { MessageBlock } from './message-block'
 import { ModeDivider } from './mode-divider'
+import { useChatStore } from '../state/chat-store'
+import { useMessageBlockStore } from '../state/message-block-store'
 import {
   renderMarkdown,
   hasMarkdown,
   type MarkdownPalette,
 } from '../utils/markdown-renderer'
+import {
+  AGENT_CONTENT_HORIZONTAL_PADDING,
+  MAX_AGENT_DEPTH,
+} from '../utils/layout-helpers'
+import { getCliEnv } from '../utils/env'
 
 import type { ChatMessage } from '../types/chat'
-import type { ChatTheme } from '../types/theme-system'
+
+interface AgentChildrenGridProps {
+  agentChildren: ChatMessage[]
+  depth: number
+  availableWidth: number
+}
+
+const AgentChildrenGrid = memo(
+  ({ agentChildren, depth, availableWidth }: AgentChildrenGridProps) => {
+    const theme = useMessageBlockStore((state) => state.context.theme)
+
+    const getItemKey = useCallback((agent: ChatMessage) => agent.id, [])
+
+    const renderAgentChild = useCallback(
+      (agent: ChatMessage, _idx: number, columnWidth: number) => (
+        <MessageWithAgents
+          message={agent}
+          depth={depth + 1}
+          isLastMessage={false}
+          availableWidth={columnWidth}
+        />
+      ),
+      [depth],
+    )
+
+    if (agentChildren.length === 0) return null
+
+    if (depth >= MAX_AGENT_DEPTH) {
+      if (getCliEnv().NODE_ENV === 'development') {
+        console.warn(
+          `[AgentChildrenGrid] Depth limit (${MAX_AGENT_DEPTH}) reached, truncating agent tree`,
+        )
+      }
+      return (
+        <text fg={theme?.muted} attributes={TextAttributes.ITALIC}>
+          {`${agentChildren.length} nested agent${
+            agentChildren.length > 1 ? 's' : ''
+          } not shown (depth limit)`}
+        </text>
+      )
+    }
+
+    const errorFallback = (
+      <text fg={theme?.error}>Error rendering agent children</text>
+    )
+
+    return (
+      <ErrorBoundary fallback={errorFallback} componentName="AgentChildrenGrid">
+        <GridLayout
+          items={agentChildren}
+          availableWidth={availableWidth}
+          getItemKey={getItemKey}
+          renderItem={renderAgentChild}
+        />
+      </ErrorBoundary>
+    )
+  },
+)
 
 interface MessageWithAgentsProps {
   message: ChatMessage
   depth: number
   isLastMessage: boolean
-  theme: ChatTheme
-  markdownPalette: MarkdownPalette
-  streamingAgents: Set<string>
-  messageTree: Map<string, ChatMessage[]>
-  messages: ChatMessage[]
   availableWidth: number
-  setFocusedAgentId: React.Dispatch<React.SetStateAction<string | null>>
-  isWaitingForResponse: boolean
-  timerStartTime: number | null
-  onToggleCollapsed: (id: string) => void
-  onBuildFast: () => void
-  onBuildMax: () => void
-  onFeedback: (
-    messageId: string,
-    options?: {
-      category?: string
-      footerMessage?: string
-      errors?: Array<{ id: string; message: string }>
-    },
-  ) => void
-  onCloseFeedback: () => void
 }
 
 export const MessageWithAgents = memo(
-  ({
-    message,
-    depth,
-    isLastMessage,
-    theme,
-    markdownPalette,
-    streamingAgents,
-    messageTree,
-    messages,
-    availableWidth,
-    setFocusedAgentId,
-    isWaitingForResponse,
-    timerStartTime,
-    onToggleCollapsed,
-    onBuildFast,
-    onBuildMax,
-    onFeedback,
-    onCloseFeedback,
-  }: MessageWithAgentsProps): ReactNode => {
+  ({ message, depth, isLastMessage, availableWidth }: MessageWithAgentsProps): ReactNode => {
     const SIDE_GUTTER = 1
     const isAgent = message.variant === 'agent'
+
+    const context = useMessageBlockStore((state) => state.context)
+    const callbacks = useMessageBlockStore((state) => state.callbacks)
+    
+    const {
+      theme,
+      markdownPalette,
+      messageTree,
+      isWaitingForResponse,
+      timerStartTime,
+    } = context
+
+    const {
+      onToggleCollapsed,
+      onBuildFast,
+      onBuildMax,
+      onFeedback,
+      onCloseFeedback,
+    } = callbacks
+
+    const streamingAgents = useChatStore((state) => state.streamingAgents)
 
     // Memoize onOpenFeedback to prevent unnecessary re-renders
     const onOpenFeedback = useCallback(
@@ -78,7 +127,7 @@ export const MessageWithAgents = memo(
 
     const contentBoxStyle = useMemo(
       () => ({
-        backgroundColor: theme.background,
+        backgroundColor: theme?.background,
         padding: 0,
         paddingLeft: SIDE_GUTTER,
         paddingRight: SIDE_GUTTER,
@@ -89,30 +138,11 @@ export const MessageWithAgents = memo(
         flexGrow: 1,
         justifyContent: 'center' as const,
       }),
-      [theme.background],
+      [theme?.background],
     )
 
     if (isAgent) {
-      return (
-        <AgentMessage
-          message={message}
-          depth={depth}
-          theme={theme}
-          markdownPalette={markdownPalette}
-          streamingAgents={streamingAgents}
-          messageTree={messageTree}
-          messages={messages}
-          availableWidth={availableWidth}
-          setFocusedAgentId={setFocusedAgentId}
-          isWaitingForResponse={isWaitingForResponse}
-          timerStartTime={timerStartTime}
-          onToggleCollapsed={onToggleCollapsed}
-          onBuildFast={onBuildFast}
-          onBuildMax={onBuildMax}
-          onFeedback={onFeedback}
-          onCloseFeedback={onCloseFeedback}
-        />
-      )
+      return <AgentMessage message={message} depth={depth} availableWidth={availableWidth} />
     }
 
     const isAi = message.variant === 'ai'
@@ -133,31 +163,39 @@ export const MessageWithAgents = memo(
         />
       )
     }
-    const lineColor = isError ? 'red' : isAi ? theme.aiLine : theme.userLine
-    const textColor = isError
-      ? theme.foreground
+
+    const lineColor = isError
+      ? 'red'
       : isAi
-        ? theme.foreground
-        : theme.foreground
-    const timestampColor = isError ? 'red' : isAi ? theme.muted : theme.muted
+        ? theme?.aiLine ?? 'white'
+        : theme?.userLine ?? 'white'
+    const textColor = theme?.foreground ?? 'white'
+    const timestampColor = isError
+      ? 'red'
+      : isAi
+        ? theme?.muted ?? 'white'
+        : theme?.muted ?? 'white'
+
     const estimatedMessageWidth = availableWidth
     const codeBlockWidth = Math.max(10, estimatedMessageWidth - 8)
-    const paletteForMessage: MarkdownPalette = useMemo(
-      () => ({
+
+    const paletteForMessage: MarkdownPalette | undefined = useMemo(
+      () => markdownPalette ? {
         ...markdownPalette,
         codeTextFg: textColor,
-      }),
+      } : undefined,
       [markdownPalette, textColor],
     )
+
     const markdownOptions = useMemo(
-      () => ({ codeBlockWidth, palette: paletteForMessage }),
+      () => ({ codeBlockWidth, palette: paletteForMessage! }),
       [codeBlockWidth, paletteForMessage],
     )
 
     const isLoading =
       isAi && message.content === '' && !message.blocks && isWaitingForResponse
 
-    const agentChildren = messageTree.get(message.id) ?? []
+    const agentChildren = messageTree?.get(message.id) ?? []
     const hasAgentChildren = agentChildren.length > 0
     // Show vertical line for user messages (including bash commands which are now user messages)
     const showVerticalLine = isUser
@@ -213,7 +251,7 @@ export const MessageWithAgents = memo(
                   timestampColor={timestampColor}
                   markdownOptions={markdownOptions}
                   availableWidth={availableWidth}
-                  markdownPalette={markdownPalette}
+                  markdownPalette={markdownPalette!}
                   streamingAgents={streamingAgents}
                   onToggleCollapsed={onToggleCollapsed}
                   onBuildFast={onBuildFast}
@@ -221,8 +259,10 @@ export const MessageWithAgents = memo(
                   onFeedback={onFeedback}
                   onCloseFeedback={onCloseFeedback}
                   validationErrors={message.validationErrors}
+                  userError={message.userError}
                   onOpenFeedback={onOpenFeedback}
                   attachments={message.attachments}
+                  textAttachments={message.textAttachments}
                   metadata={message.metadata}
                   isLastMessage={isLastMessage}
                 />
@@ -246,14 +286,18 @@ export const MessageWithAgents = memo(
                 timestampColor={timestampColor}
                 markdownOptions={markdownOptions}
                 availableWidth={availableWidth}
-                markdownPalette={markdownPalette}
+                markdownPalette={markdownPalette!}
                 streamingAgents={streamingAgents}
                 onToggleCollapsed={onToggleCollapsed}
                 onBuildFast={onBuildFast}
                 onBuildMax={onBuildMax}
                 onFeedback={onFeedback}
                 onCloseFeedback={onCloseFeedback}
+                validationErrors={message.validationErrors}
+                userError={message.userError}
+                onOpenFeedback={onOpenFeedback}
                 attachments={message.attachments}
+                textAttachments={message.textAttachments}
                 metadata={message.metadata}
                 isLastMessage={isLastMessage}
               />
@@ -262,31 +306,11 @@ export const MessageWithAgents = memo(
         </box>
 
         {hasAgentChildren && (
-          <box style={{ flexDirection: 'column', width: '100%', gap: 0 }}>
-            {agentChildren.map((agent) => (
-              <box key={agent.id} style={{ width: '100%' }}>
-                <MessageWithAgents
-                  message={agent}
-                  depth={depth + 1}
-                  isLastMessage={false}
-                  theme={theme}
-                  markdownPalette={markdownPalette}
-                  streamingAgents={streamingAgents}
-                  messageTree={messageTree}
-                  messages={messages}
-                  availableWidth={availableWidth}
-                  setFocusedAgentId={setFocusedAgentId}
-                  isWaitingForResponse={isWaitingForResponse}
-                  timerStartTime={timerStartTime}
-                  onToggleCollapsed={onToggleCollapsed}
-                  onBuildFast={onBuildFast}
-                  onBuildMax={onBuildMax}
-                  onFeedback={onFeedback}
-                  onCloseFeedback={onCloseFeedback}
-                />
-              </box>
-            ))}
-          </box>
+          <AgentChildrenGrid
+            agentChildren={agentChildren}
+            depth={depth}
+            availableWidth={availableWidth}
+          />
         )}
       </box>
     )
@@ -296,55 +320,36 @@ export const MessageWithAgents = memo(
 interface AgentMessageProps {
   message: ChatMessage
   depth: number
-  theme: ChatTheme
-  markdownPalette: MarkdownPalette
-  streamingAgents: Set<string>
-  messageTree: Map<string, ChatMessage[]>
-  messages: ChatMessage[]
   availableWidth: number
-  setFocusedAgentId: React.Dispatch<React.SetStateAction<string | null>>
-  isWaitingForResponse: boolean
-  timerStartTime: number | null
-  onToggleCollapsed: (id: string) => void
-  onBuildFast: () => void
-  onBuildMax: () => void
-  onFeedback: (
-    messageId: string,
-    options?: {
-      category?: string
-      footerMessage?: string
-      errors?: Array<{ id: string; message: string }>
-    },
-  ) => void
-  onCloseFeedback: () => void
 }
 
 const AgentMessage = memo(
-  ({
-    message,
-    depth,
-    theme,
-    markdownPalette,
-    streamingAgents,
-    messageTree,
-    messages,
-    availableWidth,
-    setFocusedAgentId,
-    isWaitingForResponse,
-    timerStartTime,
-    onToggleCollapsed,
-    onBuildFast,
-    onBuildMax,
-    onFeedback,
-    onCloseFeedback,
-  }: AgentMessageProps): ReactNode => {
-    const agentInfo = message.agent!
+  ({ message, depth, availableWidth }: AgentMessageProps): ReactNode => {
+    // Get values from zustand stores
+    const context = useMessageBlockStore((state) => state.context)
+    const callbacks = useMessageBlockStore((state) => state.callbacks)
+    
+    const { theme, markdownPalette, messageTree } = context
+    const { onToggleCollapsed } = callbacks
+
+    const streamingAgents = useChatStore((state) => state.streamingAgents)
+    const setFocusedAgentId = useChatStore((state) => state.setFocusedAgentId)
+
+    // Guard against missing agent info (should not happen for agent variant messages)
+    if (!message.agent) {
+      return (
+        <text fg={theme?.error}>
+          Error: Missing agent info for agent message
+        </text>
+      )
+    }
+    const agentInfo = message.agent
 
     // Get or initialize collapse state from message metadata
     const isCollapsed = message.metadata?.isCollapsed ?? false
     const isStreaming = streamingAgents.has(message.id)
 
-    const agentChildren = messageTree.get(message.id) ?? []
+    const agentChildren = messageTree?.get(message.id) ?? []
 
     const bulletChar = '• '
     const fullPrefix = bulletChar
@@ -363,33 +368,28 @@ const AgentMessage = memo(
         ? lastLine.replace(/[#*_`~\[\]()]/g, '').trim()
         : ''
 
-    const agentCodeBlockWidth = Math.max(10, availableWidth - 12)
-    const agentPalette: MarkdownPalette = {
+    const agentCodeBlockWidth = Math.max(
+      10,
+      availableWidth - AGENT_CONTENT_HORIZONTAL_PADDING,
+    )
+    const agentPalette: MarkdownPalette | undefined = markdownPalette ? {
       ...markdownPalette,
-      codeTextFg: theme.foreground,
-    }
+      codeTextFg: theme?.foreground ?? markdownPalette.codeTextFg,
+    } : undefined
     const agentMarkdownOptions = {
       codeBlockWidth: agentCodeBlockWidth,
-      palette: agentPalette,
+      palette: agentPalette!,
     }
     const displayContent = hasMarkdown(rawDisplayContent)
       ? renderMarkdown(rawDisplayContent, agentMarkdownOptions)
       : rawDisplayContent
 
-    const handleTitleClick = (e: any): void => {
-      if (e && e.stopPropagation) {
-        e.stopPropagation()
-      }
-
+    const handleTitleClick = (): void => {
       onToggleCollapsed(message.id)
       setFocusedAgentId(message.id)
     }
 
-    const handleContentClick = (e: any): void => {
-      if (e && e.stopPropagation) {
-        e.stopPropagation()
-      }
-
+    const handleContentClick = (): void => {
       if (!isCollapsed) {
         return
       }
@@ -414,7 +414,7 @@ const AgentMessage = memo(
           }}
         >
           <text style={{ wrapMode: 'none' }}>
-            <span fg={theme.success}>{fullPrefix}</span>
+            <span fg={theme?.success}>{fullPrefix}</span>
           </text>
           <box
             style={{
@@ -428,15 +428,15 @@ const AgentMessage = memo(
               style={{
                 flexDirection: 'row',
                 alignSelf: 'flex-start',
-                backgroundColor: isCollapsed ? theme.muted : theme.success,
+                backgroundColor: isCollapsed ? theme?.muted : theme?.success,
                 paddingLeft: 1,
                 paddingRight: 1,
               }}
               onClick={handleTitleClick}
             >
               <text style={{ wrapMode: 'word' }}>
-                <span fg={theme.foreground}>{isCollapsed ? '▸ ' : '▾ '}</span>
-                <span fg={theme.foreground} attributes={TextAttributes.BOLD}>
+                <span fg={theme?.foreground}>{isCollapsed ? '▸ ' : '▾ '}</span>
+                <span fg={theme?.foreground} attributes={TextAttributes.BOLD}>
                   {agentInfo.agentName}
                 </span>
               </text>
@@ -447,7 +447,7 @@ const AgentMessage = memo(
             >
               {isStreaming && isCollapsed && streamingPreview && (
                 <text
-                  style={{ wrapMode: 'word', fg: theme.foreground }}
+                  style={{ wrapMode: 'word', fg: theme?.foreground }}
                   attributes={TextAttributes.ITALIC}
                 >
                   {streamingPreview}
@@ -455,7 +455,7 @@ const AgentMessage = memo(
               )}
               {!isStreaming && isCollapsed && finishedPreview && (
                 <text
-                  style={{ wrapMode: 'word', fg: theme.muted }}
+                  style={{ wrapMode: 'word', fg: theme?.muted }}
                   attributes={TextAttributes.ITALIC}
                 >
                   {finishedPreview}
@@ -464,7 +464,7 @@ const AgentMessage = memo(
               {!isCollapsed && (
                 <text
                   key={`agent-content-${message.id}`}
-                  style={{ wrapMode: 'word', fg: theme.foreground }}
+                  style={{ wrapMode: 'word', fg: theme?.foreground }}
                 >
                   {displayContent}
                 </text>
@@ -473,37 +473,11 @@ const AgentMessage = memo(
           </box>
         </box>
         {agentChildren.length > 0 && (
-          <box
-            style={{
-              flexDirection: 'column',
-              gap: 0,
-              flexShrink: 0,
-            }}
-          >
-            {agentChildren.map((childAgent) => (
-              <box key={childAgent.id} style={{ flexShrink: 0 }}>
-                <MessageWithAgents
-                  message={childAgent}
-                  depth={depth + 1}
-                  isLastMessage={false}
-                  theme={theme}
-                  markdownPalette={markdownPalette}
-                  streamingAgents={streamingAgents}
-                  messageTree={messageTree}
-                  messages={messages}
-                  availableWidth={availableWidth}
-                  setFocusedAgentId={setFocusedAgentId}
-                  isWaitingForResponse={isWaitingForResponse}
-                  timerStartTime={timerStartTime}
-                onToggleCollapsed={onToggleCollapsed}
-                onBuildFast={onBuildFast}
-                onBuildMax={onBuildMax}
-                onFeedback={onFeedback}
-                onCloseFeedback={onCloseFeedback}
-              />
-              </box>
-            ))}
-          </box>
+          <AgentChildrenGrid
+            agentChildren={agentChildren}
+            depth={depth}
+            availableWidth={availableWidth}
+          />
         )}
       </box>
     )

@@ -11,8 +11,13 @@ export const IMPLEMENTOR_AGENT_IDS = [
   'editor-implementor-gpt-5',
 ] as const
 
-// Edit tool names that count as edits (proposed versions too)
-const PROPOSED_EDIT_TOOL_NAMES = ['propose_str_replace', 'propose_write_file'] as const
+/** All edit tool names (both direct and proposed variants) */
+const ALL_EDIT_TOOL_NAMES = [
+  'str_replace',
+  'write_file',
+  'propose_str_replace',
+  'propose_write_file',
+] as const
 
 const isProposedToolName = (toolName: ToolContentBlock['toolName']): boolean =>
   typeof toolName === 'string' && toolName.startsWith('propose_')
@@ -29,8 +34,8 @@ const hasProposedTools = (blocks?: ContentBlock[]): boolean => {
 }
 
 /**
- * Check if an agent is an implementor agent
- * These agents are rendered differently (as simple status lines instead of full agent blocks)
+ * Check if an agent is an implementor agent.
+ * These agents are rendered differently (as simple status lines instead of full agent blocks).
  */
 export const isImplementorAgent = (
   agentBlock: Pick<AgentContentBlock, 'agentType' | 'blocks'>,
@@ -43,7 +48,7 @@ export const isImplementorAgent = (
 }
 
 /**
- * Get the display name for an implementor agent
+ * Get the display name for an implementor agent.
  */
 export const getImplementorDisplayName = (
   agentType: string,
@@ -67,8 +72,8 @@ export const getImplementorDisplayName = (
 }
 
 /**
- * Get the index of an implementor agent among its siblings
- * Returns the 0-based index among all implementor agents of the same type
+ * Get the index of an implementor agent among its siblings.
+ * Returns the 0-based index among all implementor agents of the same type.
  */
 export const getImplementorIndex = (
   currentAgent: AgentContentBlock,
@@ -96,19 +101,20 @@ export const getImplementorIndex = (
 }
 
 /**
- * Group consecutive implementor agents from a blocks array
- * Returns the group of implementors and the next index to process
+ * Group consecutive blocks from a blocks array that match the predicate.
+ * Returns the group and the next index to process.
  */
-export function groupConsecutiveImplementors(
+export function groupConsecutiveBlocks<T extends ContentBlock>(
   blocks: ContentBlock[],
   startIndex: number,
-): { group: AgentContentBlock[]; nextIndex: number } {
-  const group: AgentContentBlock[] = []
+  predicate: (block: ContentBlock) => block is T,
+): { group: T[]; nextIndex: number } {
+  const group: T[] = []
   let i = startIndex
 
   while (i < blocks.length) {
     const block = blocks[i]
-    if (block.type !== 'agent' || !isImplementorAgent(block)) {
+    if (!predicate(block)) {
       break
     }
     group.push(block)
@@ -118,15 +124,48 @@ export function groupConsecutiveImplementors(
   return { group, nextIndex: i }
 }
 
-// Edit tool names that count as edits
-const EDIT_TOOL_NAMES = ['str_replace', 'write_file'] as const
+/**
+ * Group consecutive implementor agents from a blocks array.
+ * Returns the group of implementors and the next index to process.
+ */
+export function groupConsecutiveImplementors(
+  blocks: ContentBlock[],
+  startIndex: number,
+): { group: AgentContentBlock[]; nextIndex: number } {
+  return groupConsecutiveBlocks(
+    blocks,
+    startIndex,
+    (block): block is AgentContentBlock =>
+      block.type === 'agent' && isImplementorAgent(block),
+  )
+}
 
-// All edit tool names (executed and proposed)
-const ALL_EDIT_TOOL_NAMES = [...EDIT_TOOL_NAMES, ...PROPOSED_EDIT_TOOL_NAMES] as const
+export function groupConsecutiveNonImplementorAgents(
+  blocks: ContentBlock[],
+  startIndex: number,
+): { group: AgentContentBlock[]; nextIndex: number } {
+  return groupConsecutiveBlocks(
+    blocks,
+    startIndex,
+    (block): block is AgentContentBlock =>
+      block.type === 'agent' && !isImplementorAgent(block),
+  )
+}
+
+export function groupConsecutiveToolBlocks(
+  blocks: ContentBlock[],
+  startIndex: number,
+): { group: ToolContentBlock[]; nextIndex: number } {
+  return groupConsecutiveBlocks(
+    blocks,
+    startIndex,
+    (block): block is ToolContentBlock => block.type === 'tool',
+  )
+}
 
 /**
- * Extract a value for a key from tool output (key: value format)
- * Supports multi-line values with pipe delimiter
+ * Extract a value for a key from tool output (key: value format).
+ * Supports multi-line values with pipe delimiter.
  */
 export function extractValueForKey(output: string, key: string): string | null {
   if (!output) return null
@@ -163,7 +202,7 @@ export function extractValueForKey(output: string, key: string): string | null {
 }
 
 /**
- * Extract file path from tool block
+ * Extract file path from tool block.
  */
 export function extractFilePath(toolBlock: ToolContentBlock): string | null {
   const outputStr = typeof toolBlock.output === 'string' ? toolBlock.output : ''
@@ -177,9 +216,9 @@ export function extractFilePath(toolBlock: ToolContentBlock): string | null {
 }
 
 /**
- * Extract unified diff from tool output, or construct from input
- * For executed tools: use outputRaw/output with unifiedDiff
- * For proposed tools (implementors): construct diff from input replacements
+ * Extract unified diff from tool output, or construct from input.
+ * For executed tools: use outputRaw/output with unifiedDiff.
+ * For proposed tools (implementors): construct diff from input replacements.
  */
 export function extractDiff(toolBlock: ToolContentBlock): string | null {
   // First try to get from outputRaw (for executed tool results)
@@ -233,7 +272,7 @@ export function extractDiff(toolBlock: ToolContentBlock): string | null {
 }
 
 /**
- * Construct a simple diff view from str_replace replacements
+ * Construct a simple diff view from str_replace replacements.
  */
 function constructDiffFromReplacements(
   replacements: { old: string; new: string }[],
@@ -261,7 +300,7 @@ function constructDiffFromReplacements(
 }
 
 /**
- * Construct a diff view from write_file content
+ * Construct a diff view from write_file content.
  */
 function constructDiffFromWriteFile(content: string): string {
   const lines = content.split('\n')
@@ -269,7 +308,7 @@ function constructDiffFromWriteFile(content: string): string {
 }
 
 /**
- * Check if a tool is a "create new file" operation
+ * Check if a tool is a "create new file" operation.
  */
 export function isCreateFile(toolBlock: ToolContentBlock): boolean {
   const outputStr = typeof toolBlock.output === 'string' ? toolBlock.output : ''
@@ -304,7 +343,7 @@ export interface FileStats {
 }
 
 /**
- * Parse diff text and extract statistics
+ * Parse diff text and extract statistics.
  */
 export function parseDiffStats(diff: string | undefined): DiffStats {
   if (!diff) return { linesAdded: 0, linesRemoved: 0, hunks: 0 }
@@ -338,7 +377,7 @@ export function parseDiffStats(diff: string | undefined): DiffStats {
 }
 
 /**
- * Determine file change type based on tool and context
+ * Determine file change type based on tool and context.
  */
 export function getFileChangeType(toolBlock: ToolContentBlock): FileChangeType {
   const baseToolName = getBaseToolName(toolBlock.toolName)
@@ -358,8 +397,8 @@ export function getFileChangeType(toolBlock: ToolContentBlock): FileChangeType {
 }
 
 /**
- * Get aggregated file stats from all edit blocks
- * Groups by file path and sums up the stats
+ * Get aggregated file stats from all edit blocks.
+ * Groups by file path and sums up the stats.
  */
 export function getFileStatsFromBlocks(blocks: ContentBlock[] | undefined): FileStats[] {
   if (!blocks || blocks.length === 0) return []
@@ -398,9 +437,9 @@ export function getFileStatsFromBlocks(blocks: ContentBlock[] | undefined): File
 }
 
 /**
- * Build an activity timeline from agent blocks
- * Interleaves commentary (text blocks) and edits (tool calls)
- * Includes both executed tools (str_replace, write_file) and proposed tools
+ * Build an activity timeline from agent blocks.
+ * Interleaves commentary (text blocks) and edits (tool calls).
+ * Includes both executed tools (str_replace, write_file) and proposed tools.
  */
 export function buildActivityTimeline(
   blocks: ContentBlock[] | undefined,
@@ -436,7 +475,7 @@ export function buildActivityTimeline(
 }
 
 /**
- * Truncate text to fit within maxWidth, adding ellipsis if needed
+ * Truncate text to fit within maxWidth, adding ellipsis if needed.
  */
 export function truncateWithEllipsis(text: string, maxWidth: number): string {
   if (text.length <= maxWidth) return text

@@ -1,6 +1,7 @@
 export {}
 
 import { describe, expect, it, setDefaultTimeout } from 'bun:test'
+import { getE2EDatabaseUrl } from '@codebuff/internal/db/e2e-constants'
 
 setDefaultTimeout(10 * 60 * 1000)
 
@@ -23,7 +24,7 @@ describe('playwright e2e suite', () => {
     env.OPENAI_API_KEY ||= 'test'
     env.LINKUP_API_KEY ||= 'test'
     env.PORT = env.NEXT_PUBLIC_WEB_PORT
-    env.DATABASE_URL ||= 'postgres://user:pass@localhost:5432/db'
+    env.DATABASE_URL = getE2EDatabaseUrl()
     env.CODEBUFF_GITHUB_ID ||= 'test-id'
     env.CODEBUFF_GITHUB_SECRET ||= 'test-secret'
     env.NEXTAUTH_URL ||= 'http://localhost:3000'
@@ -38,11 +39,12 @@ describe('playwright e2e suite', () => {
     env.DISCORD_APPLICATION_ID ||= 'test'
 
     const proc = Bun.spawn(
-      ['bunx', 'playwright', 'test', '-c', 'web/playwright.config.ts'],
+      ['bunx', 'playwright', 'test', '-c', 'playwright.config.ts'],
       {
         stdout: 'inherit',
         stderr: 'inherit',
         env,
+        cwd: import.meta.dir.replace('/src/__tests__', ''),
       },
     )
 

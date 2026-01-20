@@ -49,7 +49,9 @@ export type AskUserState = {
 
 export type PendingImageStatus = 'processing' | 'ready' | 'error'
 
-export type PendingImage = {
+/** Image attachment with processed data */
+export type PendingImageAttachment = {
+  kind: 'image'
   path: string
   filename: string
   status: PendingImageStatus
@@ -62,6 +64,21 @@ export type PendingImage = {
     mediaType: string
   }
 }
+
+/** Text attachment (large pasted text) */
+export type PendingTextAttachment = {
+  kind: 'text'
+  id: string
+  content: string
+  preview: string // First ~100 chars for display
+  charCount: number
+}
+
+/** Unified attachment type with discriminator */
+export type PendingAttachment = PendingImageAttachment | PendingTextAttachment
+
+/** @deprecated Use PendingImageAttachment instead */
+export type PendingImage = PendingImageAttachment
 
 export type PendingBashMessage = {
   id: string
@@ -95,6 +112,8 @@ export type SuggestedFollowupsState = {
 export type ClickedFollowupsMap = Map<string, Set<number>>
 
 export type ChatStoreState = {
+  /** Unique ID for this chat session, regenerated on /new */
+  chatSessionId: string
   messages: ChatMessage[]
   streamingAgents: Set<string>
   focusedAgentId: string | null
@@ -117,7 +136,7 @@ export type ChatStoreState = {
   inputMode: InputMode
   isRetrying: boolean
   askUserState: AskUserState
-  pendingImages: PendingImage[]
+  pendingAttachments: PendingAttachment[]
   pendingBashMessages: PendingBashMessage[]
   suggestedFollowups: SuggestedFollowupsState | null
   /** Persisted clicked indices per toolCallId */
@@ -187,9 +206,16 @@ type ChatStoreActions = {
   setAskUserState: (state: AskUserState) => void
   updateAskUserAnswer: (questionIndex: number, optionIndex: number) => void
   updateAskUserOtherText: (questionIndex: number, text: string) => void
-  addPendingImage: (image: PendingImage) => void
+  addPendingAttachment: (attachment: PendingAttachment) => void
+  removePendingAttachment: (id: string) => void
+  clearPendingAttachments: () => void
+  // Convenience aliases for backwards compatibility
+  addPendingImage: (image: Omit<PendingImageAttachment, 'kind'>) => void
   removePendingImage: (path: string) => void
   clearPendingImages: () => void
+  addPendingTextAttachment: (attachment: Omit<PendingTextAttachment, 'kind'>) => void
+  removePendingTextAttachment: (id: string) => void
+  clearPendingTextAttachments: () => void
   addPendingBashMessage: (message: PendingBashMessage) => void
   updatePendingBashMessage: (
     id: string,
@@ -204,7 +230,10 @@ type ChatStoreActions = {
 
 type ChatStore = ChatStoreState & ChatStoreActions
 
+const generateSessionId = () => crypto.randomUUID()
+
 const initialState: ChatStoreState = {
+  chatSessionId: generateSessionId(),
   messages: [],
   streamingAgents: new Set<string>(),
   focusedAgentId: null,
@@ -226,7 +255,7 @@ const initialState: ChatStoreState = {
   inputMode: 'default' as InputMode,
   isRetrying: false,
   askUserState: null,
-  pendingImages: [],
+  pendingAttachments: [],
   pendingBashMessages: [],
   suggestedFollowups: null,
   clickedFollowupsMap: new Map<string, Set<number>>(),
@@ -361,22 +390,59 @@ export const useChatStore = create<ChatStore>()(
         state.askUserState = askUserState
       }),
 
-    addPendingImage: (image) =>
+    addPendingAttachment: (attachment) =>
       set((state) => {
         // Don't add duplicates
-        if (!state.pendingImages.some((i) => i.path === image.path)) {
-          state.pendingImages.push(image)
+        const id = attachment.kind === 'image' ? attachment.path : attachment.id
+        const isDuplicate = state.pendingAttachments.some((a) =>
+          a.kind === 'image' ? a.path === id : a.id === id,
+        )
+        if (!isDuplicate) {
+          state.pendingAttachments.push(attachment)
         }
       }),
 
-    removePendingImage: (path) =>
+    removePendingAttachment: (id) =>
       set((state) => {
-        state.pendingImages = state.pendingImages.filter((i) => i.path !== path)
+        state.pendingAttachments = state.pendingAttachments.filter((a) =>
+          a.kind === 'image' ? a.path !== id : a.id !== id,
+        )
       }),
+
+    clearPendingAttachments: () =>
+      set((state) => {
+        state.pendingAttachments = []
+      }),
+
+    // Backwards-compatible convenience methods that delegate to canonical functions
+    addPendingImage: (image) => {
+      useChatStore.getState().addPendingAttachment({ ...image, kind: 'image' })
+    },
+
+    removePendingImage: (path) => {
+      useChatStore.getState().removePendingAttachment(path)
+    },
 
     clearPendingImages: () =>
       set((state) => {
-        state.pendingImages = []
+        state.pendingAttachments = state.pendingAttachments.filter(
+          (a) => a.kind !== 'image',
+        )
+      }),
+
+    addPendingTextAttachment: (attachment) => {
+      useChatStore.getState().addPendingAttachment({ ...attachment, kind: 'text' })
+    },
+
+    removePendingTextAttachment: (id) => {
+      useChatStore.getState().removePendingAttachment(id)
+    },
+
+    clearPendingTextAttachments: () =>
+      set((state) => {
+        state.pendingAttachments = state.pendingAttachments.filter(
+          (a) => a.kind !== 'text',
+        )
       }),
 
     updateAskUserAnswer: (questionIndex, optionIndex) =>
@@ -466,6 +532,7 @@ export const useChatStore = create<ChatStore>()(
 
     reset: () =>
       set((state) => {
+        state.chatSessionId = generateSessionId()
         state.messages = initialState.messages.slice()
         state.streamingAgents = new Set(initialState.streamingAgents)
         state.focusedAgentId = initialState.focusedAgentId
@@ -489,7 +556,7 @@ export const useChatStore = create<ChatStore>()(
         state.inputMode = initialState.inputMode
         state.isRetrying = initialState.isRetrying
         state.askUserState = initialState.askUserState
-        state.pendingImages = []
+        state.pendingAttachments = []
         state.pendingBashMessages = []
         state.suggestedFollowups = null
         state.clickedFollowupsMap = new Map<string, Set<number>>()

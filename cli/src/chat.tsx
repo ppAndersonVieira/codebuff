@@ -1,14 +1,12 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
-import { RECONNECTION_MESSAGE_DURATION_MS } from '@codebuff/sdk'
 import open from 'open'
-import { useQueryClient } from '@tanstack/react-query'
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  useTransition,
 } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -26,44 +24,37 @@ import { TopBanner } from './components/top-banner'
 import { SLASH_COMMANDS } from './data/slash-commands'
 import { useAgentValidation } from './hooks/use-agent-validation'
 import { useAskUserBridge } from './hooks/use-ask-user-bridge'
-import { authQueryKeys } from './hooks/use-auth-query'
 import { useChatInput } from './hooks/use-chat-input'
 import { useClaudeQuotaQuery } from './hooks/use-claude-quota-query'
 import {
   useChatKeyboard,
   type ChatKeyboardHandlers,
 } from './hooks/use-chat-keyboard'
+import { useChatMessages } from './hooks/use-chat-messages'
+import { useChatState } from './hooks/use-chat-state'
+import { useChatStreaming } from './hooks/use-chat-streaming'
+import { useChatUI } from './hooks/use-chat-ui'
 import { useClipboard } from './hooks/use-clipboard'
-import { useConnectionStatus } from './hooks/use-connection-status'
-import { useElapsedTime } from './hooks/use-elapsed-time'
 import { useGravityAd } from './hooks/use-gravity-ad'
 import { useEvent } from './hooks/use-event'
-import { useExitHandler } from './hooks/use-exit-handler'
 import { useInputHistory } from './hooks/use-input-history'
-import { useMessageQueue, type QueuedMessage } from './hooks/use-message-queue'
+import { type QueuedMessage } from './hooks/use-message-queue'
 import { usePublishMutation } from './hooks/use-publish-mutation'
-import { useQueueControls } from './hooks/use-queue-controls'
-import { useQueueUi } from './hooks/use-queue-ui'
-import { useChatScrollbox } from './hooks/use-scroll-management'
 import { useSendMessage } from './hooks/use-send-message'
 import { useSuggestionEngine } from './hooks/use-suggestion-engine'
-import { useTerminalDimensions } from './hooks/use-terminal-dimensions'
-import { useTerminalLayout } from './hooks/use-terminal-layout'
-import { useTheme } from './hooks/use-theme'
-import { useTimeout } from './hooks/use-timeout'
 import { useUsageMonitor } from './hooks/use-usage-monitor'
 import { WEBSITE_URL } from './login/constants'
 import { getProjectRoot } from './project-files'
 import { useChatStore } from './state/chat-store'
 import { useChatHistoryStore } from './state/chat-history-store'
 import { useFeedbackStore } from './state/feedback-store'
+import { useMessageBlockStore } from './state/message-block-store'
 import { usePublishStore } from './state/publish-store'
 import {
   addClipboardPlaceholder,
   addPendingImageFromFile,
   validateAndAddImage,
-} from './utils/add-pending-image'
-import { createChatScrollAcceleration } from './utils/chat-scroll-accel'
+} from './utils/pending-attachments'
 import { showClipboardMessage } from './utils/clipboard'
 import { readClipboardImage } from './utils/clipboard-image'
 import { getInputModeConfig } from './utils/input-modes'
@@ -72,7 +63,6 @@ import {
   createDefaultChatKeyboardState,
 } from './utils/keyboard-actions'
 import { loadLocalAgents } from './utils/local-agent-registry'
-import { buildMessageTree } from './utils/message-tree-utils'
 import {
   getStatusIndicatorState,
   type AuthStatus,
@@ -80,14 +70,12 @@ import {
 import { getClaudeOAuthStatus } from './utils/claude-oauth'
 import { createPasteHandler } from './utils/strings'
 import { computeInputLayoutMetrics } from './utils/text-layout'
-import { createMarkdownPalette } from './utils/theme-system'
 import { reportActivity } from './utils/activity-tracker'
 import { trackEvent } from './utils/analytics'
+import { logger } from './utils/logger'
 
 import type { CommandResult } from './commands/command-registry'
 import type { MultilineInputHandle } from './components/multiline-input'
-import type { ContentBlock } from './types/chat'
-import type { SendMessageFn } from './types/contracts/send-message'
 import type { User } from './utils/auth'
 import type { AgentMode } from './utils/constants'
 import type { FileTreeNode } from '@codebuff/common/util/file'
@@ -126,31 +114,7 @@ export const Chat = ({
   gitRoot?: string | null
   onSwitchToGitRoot?: () => void
 }) => {
-  const scrollRef = useRef<ScrollBoxRenderable | null>(null)
-  const [hasOverflow, setHasOverflow] = useState(false)
-  const hasOverflowRef = useRef(false)
-
-  // Message pagination - show last N messages with "Load previous" button
-  const MESSAGE_BATCH_SIZE = 15
-  const [visibleMessageCount, setVisibleMessageCount] =
-    useState(MESSAGE_BATCH_SIZE)
-
-  const queryClient = useQueryClient()
-  const [, startUiTransition] = useTransition()
-
-  const [showReconnectionMessage, setShowReconnectionMessage] = useState(false)
-  const reconnectionTimeout = useTimeout()
   const [forceFileOnlyMentions, setForceFileOnlyMentions] = useState(false)
-
-  const { separatorWidth, terminalWidth, terminalHeight } =
-    useTerminalDimensions()
-  const { height: heightLayout, width: widthLayout } = useTerminalLayout()
-  const isCompactHeight = heightLayout.is('xs')
-  const isNarrowWidth = widthLayout.is('xs')
-  const messageAvailableWidth = separatorWidth
-
-  const theme = useTheme()
-  const markdownPalette = useMemo(() => createMarkdownPalette(theme), [theme])
 
   const { validate: validateAgents } = useAgentValidation()
 
@@ -160,6 +124,7 @@ export const Chat = ({
   // Monitor usage data and auto-show banner when thresholds are crossed
   useUsageMonitor()
 
+  // Get chat state from extracted hook
   const {
     inputValue,
     cursorPosition,
@@ -171,7 +136,7 @@ export const Chat = ({
     setSlashSelectedIndex,
     agentSelectedIndex,
     setAgentSelectedIndex,
-    streamingAgents: rawStreamingAgents,
+    streamingAgents,
     focusedAgentId,
     setFocusedAgentId,
     messages,
@@ -182,80 +147,18 @@ export const Chat = ({
     setAgentMode,
     toggleAgentMode,
     isRetrying,
-  } = useChatStore(
-    useShallow((store) => ({
-      inputValue: store.inputValue,
-      cursorPosition: store.cursorPosition,
-      lastEditDueToNav: store.lastEditDueToNav,
-      setInputValue: store.setInputValue,
-      inputFocused: store.inputFocused,
-      setInputFocused: store.setInputFocused,
-      slashSelectedIndex: store.slashSelectedIndex,
-      setSlashSelectedIndex: store.setSlashSelectedIndex,
-      agentSelectedIndex: store.agentSelectedIndex,
-      setAgentSelectedIndex: store.setAgentSelectedIndex,
-      streamingAgents: store.streamingAgents,
-      focusedAgentId: store.focusedAgentId,
-      setFocusedAgentId: store.setFocusedAgentId,
-      messages: store.messages,
-      setMessages: store.setMessages,
-      activeSubagents: store.activeSubagents,
-      isChainInProgress: store.isChainInProgress,
-      agentMode: store.agentMode,
-      setAgentMode: store.setAgentMode,
-      toggleAgentMode: store.toggleAgentMode,
-      isRetrying: store.isRetrying,
-    })),
-  )
-
-  // Stabilize streamingAgents reference - only create new Set when content changes
-  const streamingAgentsKey = useMemo(
-    () => Array.from(rawStreamingAgents).sort().join(','),
-    [rawStreamingAgents],
-  )
-  const streamingAgents = useMemo(
-    () => rawStreamingAgents,
-    [streamingAgentsKey],
-  )
-  const pendingBashMessages = useChatStore((state) => state.pendingBashMessages)
-
-  // Refs for tracking state across renders
-  const activeAgentStreamsRef = useRef<number>(0)
-  const isChainInProgressRef = useRef<boolean>(isChainInProgress)
-  const activeSubagentsRef = useRef<Set<string>>(activeSubagents)
-  const abortControllerRef = useRef<AbortController | null>(null)
-  const sendMessageRef = useRef<SendMessageFn>()
+    pendingBashMessages,
+    refs: {
+      activeAgentStreamsRef,
+      isChainInProgressRef,
+      activeSubagentsRef,
+      abortControllerRef,
+      sendMessageRef,
+    },
+  } = useChatState()
 
   const { statusMessage } = useClipboard()
-
-  const handleReconnection = useCallback(
-    (isInitialConnection: boolean) => {
-      // Invalidate auth queries so we refetch with current credentials
-      queryClient.invalidateQueries({ queryKey: authQueryKeys.all })
-
-      startUiTransition(() => {
-        if (!isInitialConnection) {
-          setShowReconnectionMessage(true)
-          reconnectionTimeout.setTimeout(
-            'reconnection-message',
-            () => {
-              startUiTransition(() => {
-                setShowReconnectionMessage(false)
-              })
-            },
-            RECONNECTION_MESSAGE_DURATION_MS,
-          )
-        }
-      })
-    },
-    [queryClient, reconnectionTimeout, startUiTransition],
-  )
-
-  const isConnected = useConnectionStatus(handleReconnection)
-  const mainAgentTimer = useElapsedTime()
   const { ad } = useGravityAd()
-  // Use startTime for active timer display; when paused, timer hook maintains frozen value
-  const timerStartTime = mainAgentTimer.startTime
 
   // Set initial mode from CLI flag on mount
   useEffect(() => {
@@ -264,190 +167,40 @@ export const Chat = ({
     }
   }, [initialMode, setAgentMode])
 
-  // Sync refs with state
-  useEffect(() => {
-    isChainInProgressRef.current = isChainInProgress
-  }, [isChainInProgress])
-
-  useEffect(() => {
-    activeSubagentsRef.current = activeSubagents
-  }, [activeSubagents])
-
-  // Reset visible message count when messages are cleared or conversation changes
-  useEffect(() => {
-    if (messages.length <= MESSAGE_BATCH_SIZE) {
-      setVisibleMessageCount(MESSAGE_BATCH_SIZE)
-    }
-  }, [messages.length])
-
-  const isUserCollapsingRef = useRef<boolean>(false)
-
-  const handleCollapseToggle = useCallback(
-    (id: string) => {
-      // Set flag to prevent auto-scroll during user-initiated collapse
-      isUserCollapsingRef.current = true
-
-      // Find and toggle the block's isCollapsed property
-      setMessages((prevMessages) => {
-        return prevMessages.map((message) => {
-          // Handle agent variant messages
-          if (message.variant === 'agent' && message.id === id) {
-            const wasCollapsed = message.metadata?.isCollapsed ?? false
-            return {
-              ...message,
-              metadata: {
-                ...message.metadata,
-                isCollapsed: !wasCollapsed,
-                userOpened: wasCollapsed, // Mark as user-opened if expanding
-              },
-            }
-          }
-
-          // Handle blocks within messages
-          if (!message.blocks) return message
-
-          const updateBlocksRecursively = (
-            blocks: ContentBlock[],
-          ): ContentBlock[] => {
-            let foundTarget = false
-            const result = blocks.map((block) => {
-              // Handle thinking blocks - just match by thinkingId
-              if (block.type === 'text' && block.thinkingId === id) {
-                foundTarget = true
-                const wasCollapsed = block.isCollapsed ?? false
-                return {
-                  ...block,
-                  isCollapsed: !wasCollapsed,
-                  userOpened: wasCollapsed, // Mark as user-opened if expanding
-                }
-              }
-
-              // Handle agent blocks
-              if (block.type === 'agent' && block.agentId === id) {
-                foundTarget = true
-                const wasCollapsed = block.isCollapsed ?? false
-                return {
-                  ...block,
-                  isCollapsed: !wasCollapsed,
-                  userOpened: wasCollapsed, // Mark as user-opened if expanding
-                }
-              }
-
-              // Handle tool blocks
-              if (block.type === 'tool' && block.toolCallId === id) {
-                foundTarget = true
-                const wasCollapsed = block.isCollapsed ?? false
-                return {
-                  ...block,
-                  isCollapsed: !wasCollapsed,
-                  userOpened: wasCollapsed, // Mark as user-opened if expanding
-                }
-              }
-
-              // Handle agent-list blocks
-              if (block.type === 'agent-list' && block.id === id) {
-                foundTarget = true
-                const wasCollapsed = block.isCollapsed ?? false
-                return {
-                  ...block,
-                  isCollapsed: !wasCollapsed,
-                  userOpened: wasCollapsed, // Mark as user-opened if expanding
-                }
-              }
-
-              // Recursively update nested blocks inside agent blocks
-              if (block.type === 'agent' && block.blocks) {
-                const updatedBlocks = updateBlocksRecursively(block.blocks)
-                // Only create new block if nested blocks actually changed
-                if (updatedBlocks !== block.blocks) {
-                  foundTarget = true
-                  return {
-                    ...block,
-                    blocks: updatedBlocks,
-                  }
-                }
-              }
-
-              return block
-            })
-
-            // Return original array reference if nothing changed
-            return foundTarget ? result : blocks
-          }
-
-          return {
-            ...message,
-            blocks: updateBlocksRecursively(message.blocks),
-          }
-        })
-      })
-
-      // Reset flag after state update completes
-      setTimeout(() => {
-        isUserCollapsingRef.current = false
-      }, 0)
-    },
-    [setMessages],
-  )
-
-  const isUserCollapsing = useCallback(() => {
-    return isUserCollapsingRef.current
-  }, [])
-
-  const { scrollToLatest, scrollboxProps, isAtBottom } = useChatScrollbox(
-    scrollRef,
-    messages,
+  // Use extracted chat messages hook for message tree and pagination
+  const {
+    messageTree,
+    topLevelMessages,
+    visibleTopLevelMessages,
+    hiddenMessageCount,
+    handleCollapseToggle,
     isUserCollapsing,
-  )
+    handleLoadPreviousMessages,
+  } = useChatMessages({ messages, setMessages })
 
-  // Check if content has overflowed and needs scrolling
-  useEffect(() => {
-    const scrollbox = scrollRef.current
-    if (!scrollbox) return
-
-    const checkOverflow = () => {
-      const contentHeight = scrollbox.scrollHeight
-      const viewportHeight = scrollbox.viewport.height
-      const isOverflowing = contentHeight > viewportHeight
-
-      // Only update state if overflow status actually changed
-      if (hasOverflowRef.current !== isOverflowing) {
-        hasOverflowRef.current = isOverflowing
-        setHasOverflow(isOverflowing)
-      }
-    }
-
-    // Check initially and whenever scroll state changes
-    checkOverflow()
-    scrollbox.verticalScrollBar.on('change', checkOverflow)
-
-    return () => {
-      scrollbox.verticalScrollBar.off('change', checkOverflow)
-    }
-  }, [])
-
-  const inertialScrollAcceleration = useMemo(
-    () => createChatScrollAcceleration(),
-    [],
-  )
-
-  const appliedScrollboxProps = inertialScrollAcceleration
-    ? { ...scrollboxProps, scrollAcceleration: inertialScrollAcceleration }
-    : scrollboxProps
+  // Use extracted UI hook for scroll, terminal dimensions, and theme
+  const {
+    scrollRef,
+    scrollToLatest,
+    scrollUp,
+    scrollDown,
+    appliedScrollboxProps,
+    isAtBottom,
+    hasOverflow,
+    terminalWidth,
+    terminalHeight,
+    separatorWidth,
+    messageAvailableWidth,
+    isCompactHeight,
+    isNarrowWidth,
+    theme,
+    markdownPalette,
+  } = useChatUI({ messages, isUserCollapsing })
 
   const localAgents = useMemo(() => loadLocalAgents(agentMode), [agentMode])
   const inputMode = useChatStore((state) => state.inputMode)
   const setInputMode = useChatStore((state) => state.setInputMode)
   const askUserState = useChatStore((state) => state.askUserState)
-
-  // Pause/resume timer when ask_user tool becomes active/inactive
-  useEffect(() => {
-    if (askUserState !== null) {
-      mainAgentTimer.pause()
-    } else if (mainAgentTimer.isPaused) {
-      mainAgentTimer.resume()
-    }
-  }, [askUserState, mainAgentTimer])
 
   // Filter slash commands based on current ads state - only show the option that changes state
   const filteredSlashCommands = useMemo(() => {
@@ -570,60 +323,45 @@ export const Chat = ({
     { inputMode, setInputMode },
   )
 
+  // Use extracted streaming hook for connection, timer, queue, and exit handling
   const {
-    queuedMessages,
+    isConnected,
+    showReconnectionMessage,
+    mainAgentTimer,
+    timerStartTime,
     streamStatus,
+    isWaitingForResponse,
+    isStreaming,
+    setStreamStatus,
+    queuedMessages,
     queuePaused,
     streamMessageIdRef,
     addToQueue,
     stopStreaming,
-    setStreamStatus,
     setCanProcessQueue,
     pauseQueue,
     resumeQueue,
     clearQueue,
     isQueuePausedRef,
-  } = useMessageQueue(
-    (message: QueuedMessage) =>
-      sendMessageRef.current?.({
-        content: message.content,
-        agentMode,
-        images: message.images,
-      }) ?? Promise.resolve(),
-    isChainInProgressRef,
-    activeAgentStreamsRef,
-  )
-
-  const {
+    isProcessingQueueRef,
     queuedCount,
     shouldShowQueuePreview,
     queuePreviewTitle,
     pausedQueueText,
     inputPlaceholder,
-  } = useQueueUi({
-    queuePaused,
-    queuedMessages,
-    separatorWidth,
-    terminalWidth,
-  })
-
-  const { handleCtrlC: baseHandleCtrlC, nextCtrlCWillExit } = useExitHandler({
+    handleCtrlC,
+    ensureQueueActiveBeforeSubmit,
+    nextCtrlCWillExit,
+  } = useChatStreaming({
+    agentMode,
     inputValue,
     setInputValue,
+    terminalWidth,
+    separatorWidth,
+    isChainInProgressRef,
+    activeAgentStreamsRef,
+    sendMessageRef,
   })
-
-  const { handleCtrlC, ensureQueueActiveBeforeSubmit } = useQueueControls({
-    queuePaused,
-    queuedCount,
-    clearQueue,
-    resumeQueue,
-    inputHasText: Boolean(inputValue),
-    baseHandleCtrlC,
-  })
-
-  // Derive boolean flags from streamStatus for convenience
-  const isWaitingForResponse = streamStatus === 'waiting'
-  const isStreaming = streamStatus !== 'idle'
 
   // When streaming completes, flush any pending bash commands into history (ghost mode only)
   // Non-ghost mode commands are already in history and will be cleared when user sends next message
@@ -664,9 +402,6 @@ export const Chat = ({
     }
   }, [isStreaming, pendingBashMessages, setMessages])
 
-  // Timer events are currently tracked but not used for UI updates
-  // Future: Could be used for analytics or debugging
-
   const { sendMessage, clearMessages } = useSendMessage({
     inputRef,
     activeSubagentsRef,
@@ -678,8 +413,9 @@ export const Chat = ({
     onBeforeMessageSend: validateAgents,
     mainAgentTimer,
     scrollToLatest,
-    onTimerEvent: () => {}, // No-op for now
+    onTimerEvent: () => {},
     isQueuePausedRef,
+    isProcessingQueueRef,
     resumeQueue,
     continueChat,
     continueChatId,
@@ -706,14 +442,18 @@ export const Chat = ({
             return { text, cursorPosition, lastEditDueToNav }
           })()
         : null
-      const preservedPendingImages =
-        preserveInput && useChatStore.getState().pendingImages.length > 0
-          ? [...useChatStore.getState().pendingImages]
-          : null
 
-      if (preserveInput && preservedPendingImages) {
-        useChatStore.getState().clearPendingImages()
-      }
+      // Preserve attachments if needed (inline logic to avoid abstraction overhead)
+      const preservedAttachments = preserveInput
+        ? (() => {
+            const items = useChatStore.getState().pendingAttachments
+            if (items.length > 0) {
+              useChatStore.getState().clearPendingAttachments()
+              return [...items]
+            }
+            return null
+          })()
+        : null
 
       try {
         const result = await routeUserPrompt({
@@ -749,13 +489,11 @@ export const Chat = ({
           })
         }
 
-        if (preserveInput && preservedPendingImages) {
-          const currentPending = useChatStore.getState().pendingImages
-          if (currentPending.length === 0) {
-            useChatStore.setState((state) => {
-              state.pendingImages = preservedPendingImages
-            })
-          }
+        // Restore attachments if they were preserved and none have been added since
+        if (preservedAttachments && useChatStore.getState().pendingAttachments.length === 0) {
+          useChatStore.setState((state) => {
+            state.pendingAttachments = preservedAttachments
+          })
         }
       }
     },
@@ -771,13 +509,37 @@ export const Chat = ({
       }>
       const { prompt, index, toolCallId } = customEvent.detail
 
+      logger.info(
+        { promptLength: prompt.length, index, toolCallId, agentMode },
+        '[followup-click] Followup clicked',
+      )
+
+      // Track analytics event
+      trackEvent(AnalyticsEvent.FOLLOWUP_CLICKED, {
+        promptLength: prompt.length,
+        index,
+        agentMode,
+      })
+
       // Mark this followup as clicked (persisted per toolCallId)
       useChatStore.getState().markFollowupClicked(toolCallId, index)
 
       // Send the followup prompt directly, preserving the user's current input
-      void onSubmitPrompt(prompt, agentMode, {
+      onSubmitPrompt(prompt, agentMode, {
         preserveInputValue: true,
       })
+        .then((result) => {
+          logger.info(
+            { hasResult: !!result },
+            '[followup-click] onSubmitPrompt completed',
+          )
+        })
+        .catch((error) => {
+          logger.error(
+            { error },
+            '[followup-click] onSubmitPrompt failed with error',
+          )
+        })
     }
 
     globalThis.addEventListener('codebuff:send-followup', handleFollowupClick)
@@ -1275,6 +1037,8 @@ export const Chat = ({
           }
         })
       },
+      onScrollUp: scrollUp,
+      onScrollDown: scrollDown,
       onOpenBuyCredits: () => {
         // If credits have been restored, just return to default mode
         if (areCreditsRestored()) {
@@ -1314,6 +1078,8 @@ export const Chat = ({
       inputRef,
       handleCtrlC,
       clearQueue,
+      scrollUp,
+      scrollDown,
     ],
   )
 
@@ -1324,25 +1090,52 @@ export const Chat = ({
     disabled: askUserState !== null,
   })
 
-  const { tree: messageTree, topLevelMessages } = useMemo(
-    () => buildMessageTree(messages),
-    [messages],
+  // Sync message block context to zustand store for child components
+  const setMessageBlockContext = useMessageBlockStore(
+    (state) => state.setContext,
+  )
+  const setMessageBlockCallbacks = useMessageBlockStore(
+    (state) => state.setCallbacks,
   )
 
-  // Compute visible messages slice (from the end)
-  const visibleTopLevelMessages = useMemo(() => {
-    if (topLevelMessages.length <= visibleMessageCount) {
-      return topLevelMessages
-    }
-    return topLevelMessages.slice(-visibleMessageCount)
-  }, [topLevelMessages, visibleMessageCount])
+  // Update context when values change - useLayoutEffect ensures synchronous updates
+  // to prevent message loss during rapid streaming (race condition fix)
+  useLayoutEffect(() => {
+    setMessageBlockContext({
+      theme,
+      markdownPalette,
+      messageTree,
+      isWaitingForResponse,
+      timerStartTime,
+      availableWidth: messageAvailableWidth,
+    })
+  }, [
+    theme,
+    markdownPalette,
+    messageTree,
+    isWaitingForResponse,
+    timerStartTime,
+    messageAvailableWidth,
+    setMessageBlockContext,
+  ])
 
-  const hiddenMessageCount =
-    topLevelMessages.length - visibleTopLevelMessages.length
-
-  const handleLoadPreviousMessages = useCallback(() => {
-    setVisibleMessageCount((prev) => prev + MESSAGE_BATCH_SIZE)
-  }, [])
+  // Update callbacks once (they're stable)
+  useEffect(() => {
+    setMessageBlockCallbacks({
+      onToggleCollapsed: handleCollapseToggle,
+      onBuildFast: handleBuildFast,
+      onBuildMax: handleBuildMax,
+      onFeedback: handleMessageFeedback,
+      onCloseFeedback: handleCloseFeedback,
+    })
+  }, [
+    handleCollapseToggle,
+    handleBuildFast,
+    handleBuildMax,
+    handleMessageFeedback,
+    handleCloseFeedback,
+    setMessageBlockCallbacks,
+  ])
 
   const modeConfig = getInputModeConfig(inputMode)
   const hasSlashSuggestions =
@@ -1441,7 +1234,7 @@ export const Chat = ({
       }}
     >
       <scrollbox
-        ref={scrollRef}
+        ref={scrollRef as React.Ref<ScrollBoxRenderable>}
         stickyScroll
         stickyStart="bottom"
         scrollX={false}
@@ -1496,20 +1289,7 @@ export const Chat = ({
               message={message}
               depth={0}
               isLastMessage={isLast}
-              theme={theme}
-              markdownPalette={markdownPalette}
-              streamingAgents={streamingAgents}
-              messageTree={messageTree}
-              messages={messages}
               availableWidth={messageAvailableWidth}
-              setFocusedAgentId={setFocusedAgentId}
-              isWaitingForResponse={isWaitingForResponse}
-              timerStartTime={timerStartTime}
-              onToggleCollapsed={handleCollapseToggle}
-              onBuildFast={handleBuildFast}
-              onBuildMax={handleBuildMax}
-              onFeedback={handleMessageFeedback}
-              onCloseFeedback={handleCloseFeedback}
             />
           )
         })}
@@ -1578,6 +1358,21 @@ export const Chat = ({
             onChange: setInputValue,
             onPasteImage: chatKeyboardHandlers.onPasteImage,
             onPasteImagePath: chatKeyboardHandlers.onPasteImagePath,
+            onPasteLongText: (pastedText) => {
+              const id = crypto.randomUUID()
+              const preview = pastedText.slice(0, 100).replace(/\n/g, ' ')
+              useChatStore.getState().addPendingTextAttachment({
+                id,
+                content: pastedText,
+                preview,
+                charCount: pastedText.length,
+              })
+              // Show temporary status message
+              showClipboardMessage(
+                `📋 Pasted text (${pastedText.length.toLocaleString()} chars)`,
+                { durationMs: 5000 },
+              )
+            },
             cwd: getProjectRoot() ?? process.cwd(),
           })}
         />

@@ -20,11 +20,12 @@ type StreamState = { responseText: string; reasoningText: string }
  */
 const MODEL_MAPPING: Record<string, string> = {
   'gpt-5-mini': 'claude-haiku-4.5',
-  'gemini-2.5-flash': 'claude-haiku-4.5',
+  'gemini-2.5-flash': 'gemini-3-flash-preview',
+  'gemini-2.5-flash-lite': 'gemini-3-flash-preview',
   'grok-4.1-fast': 'grok-code-fast-1',
   'grok-4-fast': 'grok-code-fast-1',
   'gemini-2.0-flash-001': 'claude-haiku-4.5',
-  'gpt-5.1':'gpt-5'
+  'gpt-5.1':'gpt-5.2'
 }
 
 /**

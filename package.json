@@ -36,38 +36,38 @@
   },
   "dependencies": {
     "@t3-oss/env-nextjs": "^0.7.3",
-    "canvas": "^3.2.0",
+    "canvas": "^3.2.1",
     "gif-encoder-2": "^1.0.5",
-    "zod": "^4.2.1"
+    "zod": "^4.3.5"
   },
   "overrides": {
     "baseline-browser-mapping": "^2.9.14",
-    "zod": "^4.2.1",
+    "zod": "^4.3.5",
     "signal-exit": "3.0.7"
   },
   "devDependencies": {
-    "@tanstack/react-query": "^5.90.12",
-    "@types/bun": "^1.3.5",
+    "@tanstack/react-query": "^5.90.19",
+    "@types/bun": "^1.3.6",
     "@types/js-yaml": "^4.0.9",
-    "@types/lodash": "^4.17.21",
-    "@types/node": "^22.9.0",
-    "@types/node-fetch": "^2.6.12",
+    "@types/lodash": "^4.17.23",
+    "@types/node": "^22.19.7",
+    "@types/node-fetch": "^2.6.13",
     "@types/parse-path": "^7.1.0",
-    "@typescript-eslint/eslint-plugin": "^6.17",
-    "bun-types": "^1.3.5",
-    "eslint-config-prettier": "^9.1.0",
-    "eslint-plugin-import": "^2.29.1",
-    "eslint-plugin-unused-imports": "^4.1.4",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "bun-types": "^1.3.6",
+    "eslint-config-prettier": "^9.1.2",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-unused-imports": "^4.3.0",
     "ignore": "^6.0.2",
     "lodash": "4.17.21",
-    "prettier": "^3.7.4",
+    "prettier": "^3.8.0",
     "ts-node": "^10.9.2",
-    "ts-pattern": "^5.5.0",
+    "ts-pattern": "^5.9.0",
     "tsc-alias": "^1.8.16",
     "tsconfig-paths": "4.2.0",
     "types": "^0.1.1",
     "typescript": "5.5.4",
-    "typescript-eslint": "^7.17.0"
+    "typescript-eslint": "^7.18.0"
   },
   "engines": {
     "bun": ">=1.3.5"

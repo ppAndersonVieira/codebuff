@@ -43,7 +43,9 @@
   "overrides": {
     "baseline-browser-mapping": "^2.9.14",
     "zod": "^4.3.5",
-    "signal-exit": "3.0.7"
+    "signal-exit": "3.0.7",
+    "@ai-sdk/provider": "2.0.1",
+    "@ai-sdk/provider-utils": "3.0.20"
   },
   "devDependencies": {
     "@tanstack/react-query": "^5.90.19",
@@ -59,8 +61,8 @@
     "eslint-plugin-import": "^2.32.0",
     "eslint-plugin-unused-imports": "^4.3.0",
     "ignore": "^6.0.2",
-    "lodash": "4.17.21",
-    "prettier": "^3.8.0",
+    "lodash": "4.17.23",
+    "prettier": "^3.7.4",
     "ts-node": "^10.9.2",
     "ts-pattern": "^5.9.0",
     "tsc-alias": "^1.8.16",

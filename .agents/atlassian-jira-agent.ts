@@ -5,7 +5,7 @@ const definition: AgentDefinition = {
   id: 'atlassian-jira-agent',
   displayName: 'Atlassian Jira Agent',
   publisher,
-  model: 'x-ai/grok-4-fast',
+  model: 'anthropic/claude-haiku-4.5',
 
   spawnerPrompt:
     'Expert at querying and managing Jira issues, projects, sprints, and workflows. Can search, create, update issues, and provide insights about project status and team workload.',

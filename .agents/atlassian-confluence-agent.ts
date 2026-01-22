@@ -5,7 +5,7 @@ const definition: AgentDefinition = {
   id: 'atlassian-confluence-agent',
   displayName: 'Atlassian Confluence Agent',
   publisher,
-  model: 'x-ai/grok-4-fast',
+  model: 'anthropic/claude-haiku-4.5',
 
   spawnerPrompt:
     'Expert at searching and managing Confluence pages, spaces, and documentation. Can find information across wikis, create and update pages, and help organize knowledge.',

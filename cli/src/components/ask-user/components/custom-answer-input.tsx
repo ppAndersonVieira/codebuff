@@ -4,6 +4,7 @@
 
 import React, { memo } from 'react'
 
+import { useTheme } from '../../../hooks/use-theme'
 import { MultilineInput } from '../../multiline-input'
 
 export interface CustomAnswerInputProps {
@@ -26,8 +27,18 @@ export const CustomAnswerInput: React.FC<CustomAnswerInputProps> = memo(
     onSubmit,
     onPaste,
   }) => {
+    const theme = useTheme()
+
     return (
       <box style={{ flexDirection: 'column', paddingLeft: optionIndent + 2 }}>
+        <box
+          style={{
+            borderStyle: 'single',
+            borderColor: theme.muted,
+            paddingLeft: 1,
+            paddingRight: 1,
+          }}
+        >
         <MultilineInput
           value={value}
           cursorPosition={cursorPosition}
@@ -41,10 +52,12 @@ export const CustomAnswerInput: React.FC<CustomAnswerInputProps> = memo(
             }
           }}
           focused={focused}
-          maxHeight={3}
+          maxHeight={5}
           minHeight={1}
           placeholder="Type your answer..."
+          showScrollbar={true}
         />
+        </box>
       </box>
     )
   },

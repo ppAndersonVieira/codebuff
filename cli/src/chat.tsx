@@ -176,6 +176,7 @@ export const Chat = ({
     handleCollapseToggle,
     isUserCollapsing,
     handleLoadPreviousMessages,
+    handleToggleAll,
   } = useChatMessages({ messages, setMessages })
 
   // Use extracted UI hook for scroll, terminal dimensions, and theme
@@ -317,7 +318,7 @@ export const Chat = ({
     setForceFileOnlyMentions(true)
   }, [cursorPosition, inputValue, setInputValue])
 
-  const { saveToHistory, navigateUp, navigateDown } = useInputHistory(
+  const { saveToHistory, navigateUp, navigateDown, resetHistoryNavigation } = useInputHistory(
     inputValue,
     setInputValue,
     { inputMode, setInputMode },
@@ -747,7 +748,8 @@ export const Chat = ({
       lastEditDueToNav: false,
     })
     setInputFocused(true)
-  }, [restoreSavedInput, setInputValue, setInputFocused])
+    resetHistoryNavigation()
+  }, [restoreSavedInput, setInputValue, setInputFocused, resetHistoryNavigation])
 
   const handleCloseFeedback = useCallback(() => {
     closeFeedback()
@@ -1039,6 +1041,7 @@ export const Chat = ({
       },
       onScrollUp: scrollUp,
       onScrollDown: scrollDown,
+      onToggleAll: handleToggleAll,
       onOpenBuyCredits: () => {
         // If credits have been restored, just return to default mode
         if (areCreditsRestored()) {
@@ -1080,6 +1083,7 @@ export const Chat = ({
       clearQueue,
       scrollUp,
       scrollDown,
+      handleToggleAll,
     ],
   )
 

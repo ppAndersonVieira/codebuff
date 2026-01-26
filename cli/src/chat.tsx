@@ -21,7 +21,7 @@ import { MessageWithAgents } from './components/message-with-agents'
 import { PendingBashMessage } from './components/pending-bash-message'
 import { StatusBar } from './components/status-bar'
 import { TopBanner } from './components/top-banner'
-import { SLASH_COMMANDS } from './data/slash-commands'
+import { getSlashCommandsWithSkills } from './data/slash-commands'
 import { useAgentValidation } from './hooks/use-agent-validation'
 import { useAskUserBridge } from './hooks/use-ask-user-bridge'
 import { useChatInput } from './hooks/use-chat-input'
@@ -63,6 +63,7 @@ import {
   createDefaultChatKeyboardState,
 } from './utils/keyboard-actions'
 import { loadLocalAgents } from './utils/local-agent-registry'
+import { getLoadedSkills } from './utils/skill-registry'
 import {
   getStatusIndicatorState,
   type AuthStatus,
@@ -73,8 +74,10 @@ import { computeInputLayoutMetrics } from './utils/text-layout'
 import { reportActivity } from './utils/activity-tracker'
 import { trackEvent } from './utils/analytics'
 import { logger } from './utils/logger'
+import { setTerminalTitle } from './utils/terminal-title'
 
 import type { CommandResult } from './commands/command-registry'
+import type { MatchedSlashCommand } from './hooks/use-suggestion-engine'
 import type { MultilineInputHandle } from './components/multiline-input'
 import type { User } from './utils/auth'
 import type { AgentMode } from './utils/constants'
@@ -203,15 +206,20 @@ export const Chat = ({
   const setInputMode = useChatStore((state) => state.setInputMode)
   const askUserState = useChatStore((state) => state.askUserState)
 
+  // Get loaded skills for slash commands
+  const loadedSkills = useMemo(() => getLoadedSkills(), [])
+
   // Filter slash commands based on current ads state - only show the option that changes state
+  // Also merge in skill commands
   const filteredSlashCommands = useMemo(() => {
     const adsEnabled = getAdsEnabled()
-    return SLASH_COMMANDS.filter((cmd) => {
+    const allCommands = getSlashCommandsWithSkills(loadedSkills)
+    return allCommands.filter((cmd) => {
       if (cmd.id === 'ads:enable') return !adsEnabled
       if (cmd.id === 'ads:disable') return adsEnabled
       return true
     })
-  }, [inputValue]) // Re-evaluate when input changes (user may have just toggled)
+  }, [inputValue, loadedSkills]) // Re-evaluate when input changes (user may have just toggled)
 
   const {
     slashContext,
@@ -669,11 +677,35 @@ export const Chat = ({
     ],
   )
 
-  // Click handler for slash menu items - executes command immediately
+  // Helper to apply insertText for slash commands - returns true if handled
+  const applySlashInsertText = useCallback(
+    (selected: MatchedSlashCommand): boolean => {
+      if (selected.insertText != null && slashContext.startIndex >= 0) {
+        const before = inputValue.slice(0, slashContext.startIndex)
+        const after = inputValue.slice(
+          slashContext.startIndex + 1 + slashContext.query.length,
+        )
+        setInputValue({
+          text: before + selected.insertText + after,
+          cursorPosition: before.length + selected.insertText.length,
+          lastEditDueToNav: false,
+        })
+        setSlashSelectedIndex(0)
+        return true
+      }
+      return false
+    },
+    [slashContext, inputValue, setInputValue, setSlashSelectedIndex],
+  )
+
+  // Click handler for slash menu items - executes command or inserts text
   const handleSlashItemClick = useCallback(
     async (index: number) => {
       const selected = slashMatches[index]
       if (!selected) return
+
+      // If the command has insertText, insert it instead of executing
+      if (applySlashInsertText(selected)) return
 
       // Execute the selected slash command immediately
       const commandString = `/${selected.id}`
@@ -684,6 +716,7 @@ export const Chat = ({
     },
     [
       slashMatches,
+      applySlashInsertText,
       setSlashSelectedIndex,
       onSubmitPrompt,
       agentMode,
@@ -782,6 +815,10 @@ export const Chat = ({
   const handleSubmit = useCallback(async () => {
     // Report activity for ad rotation
     reportActivity()
+    // Update terminal title with truncated user input
+    if (inputValue.trim()) {
+      setTerminalTitle(inputValue)
+    }
     const result = await onSubmitPrompt(inputValue, agentMode)
     handleCommandResult(result)
   }, [onSubmitPrompt, inputValue, agentMode, handleCommandResult])
@@ -884,6 +921,9 @@ export const Chat = ({
         const selected = slashMatches[slashSelectedIndex] || slashMatches[0]
         if (!selected) return
 
+        // If the command has insertText, insert it instead of executing
+        if (applySlashInsertText(selected)) return
+
         // Execute the selected slash command immediately
         const commandString = `/${selected.id}`
         setSlashSelectedIndex(0)
@@ -896,6 +936,10 @@ export const Chat = ({
         // Complete the word without executing - same as clicking on the item
         const selected = slashMatches[slashSelectedIndex] || slashMatches[0]
         if (!selected || slashContext.startIndex < 0) return
+
+        // If the command has insertText, insert it instead of the command
+        if (applySlashInsertText(selected)) return
+
         const before = inputValue.slice(0, slashContext.startIndex)
         const after = inputValue.slice(
           slashContext.startIndex + 1 + slashContext.query.length,
@@ -1063,6 +1107,9 @@ export const Chat = ({
       setSlashSelectedIndex,
       slashMatches,
       slashSelectedIndex,
+      slashContext,
+      inputValue,
+      applySlashInsertText,
       onSubmitPrompt,
       agentMode,
       handleCommandResult,

@@ -1,4 +1,5 @@
 import { CodeSearchComponent } from './code-search'
+import { SkillComponent } from './skill'
 import { GlobComponent } from './glob'
 import { ListDirectoryComponent } from './list-directory'
 import { ReadDocsComponent } from './read-docs'
@@ -7,7 +8,7 @@ import { ReadSubtreeComponent } from './read-subtree'
 import { RunTerminalCommandComponent } from './run-terminal-command'
 import { StrReplaceComponent } from './str-replace'
 import { SuggestFollowupsComponent } from './suggest-followups'
-import { TaskCompleteComponent } from './task-complete'
+import { TaskCompleteComponent } from './task-completed'
 import { WriteFileComponent } from './write-file'
 import { WriteTodosComponent } from './write-todos'
 
@@ -40,6 +41,7 @@ const toolComponentRegistry = new Map<ToolName, ToolComponent>([
   // Propose tools reuse the same rendering as their base counterparts
   ['propose_str_replace', StrReplaceComponent],
   ['propose_write_file', WriteFileComponent],
+  [SkillComponent.toolName, SkillComponent],
 ])
 
 /**

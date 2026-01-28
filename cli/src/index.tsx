@@ -27,11 +27,11 @@ import { getAuthTokenDetails } from './utils/auth'
 import { resetCodebuffClient } from './utils/codebuff-client'
 import { getCliEnv } from './utils/env'
 import { initializeAgentRegistry } from './utils/local-agent-registry'
-import { initializeSkillRegistry } from './utils/skill-registry'
 import { clearLogFile, logger } from './utils/logger'
 import { shouldShowProjectPicker } from './utils/project-picker'
 import { saveRecentProject } from './utils/recent-projects'
 import { installProcessCleanupHandlers } from './utils/renderer-cleanup'
+import { initializeSkillRegistry } from './utils/skill-registry'
 import { detectTerminalTheme } from './utils/terminal-color-detection'
 import { setOscDetectedTheme } from './utils/theme-system'
 
@@ -311,7 +311,6 @@ async function main(): Promise<void> {
     // Callback for when user selects a new project from the picker
     const handleProjectChange = React.useCallback(
       async (newProjectPath: string) => {
-        const previousPath = process.cwd()
         // Change process working directory
         process.chdir(newProjectPath)
 

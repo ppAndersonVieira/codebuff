@@ -41,9 +41,7 @@ export async function setupBigQuery({
     client = new BigQuery()
 
     // Ensure dataset exists
-    const [ds] = await client
-      .dataset(resolvedDataset)
-      .get({ autoCreate: true })
+    const [ds] = await client.dataset(resolvedDataset).get({ autoCreate: true })
 
     // Ensure tables exist
     await ds.table(TRACES_TABLE).get({
@@ -80,14 +78,15 @@ export async function setupBigQuery({
       },
     })
   } catch (error) {
+    const err = error as Error & { code?: string; details?: unknown }
     logger.error(
       {
         error,
-        stack: (error as Error).stack,
-        message: (error as Error).message,
-        name: (error as Error).name,
-        code: (error as any).code,
-        details: (error as any).details,
+        stack: err.stack,
+        message: err.message,
+        name: err.name,
+        code: err.code,
+        details: err.details,
       },
       'Failed to initialize BigQuery',
     )

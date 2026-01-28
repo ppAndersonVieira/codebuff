@@ -1,10 +1,19 @@
-import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
 
 import * as mainPromptModule from '@codebuff/agent-runtime/main-prompt'
 import { withSystemTags } from '@codebuff/agent-runtime/util/messages'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
 import { getStubProjectFileContext } from '@codebuff/common/util/file'
 import { assistantMessage, userMessage } from '@codebuff/common/util/messages'
+import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test'
+
+// Type for tool call content blocks in message history
+interface ToolCallContentBlock {
+  type: 'tool-call'
+  toolCallId: string
+  toolName: string
+  input: Record<string, unknown>
+}
+
 import { CodebuffClient } from '../client'
 import * as databaseModule from '../impl/database'
 
@@ -46,7 +55,7 @@ describe('Run Cancellation Handling', () => {
           toolCallId: 'tool-1',
           toolName: 'read_files',
           input: { paths: ['file.ts'] },
-        } as any,
+        } as ToolCallContentBlock,
       ],
     })
     serverSessionState.mainAgentState.messageHistory.push({
@@ -336,7 +345,7 @@ describe('Run Cancellation Handling', () => {
             toolCallId: 'read-1',
             toolName: 'read_files',
             input: { paths: ['src/bug.ts'] },
-          } as any,
+          } as ToolCallContentBlock,
         ],
       },
       {
@@ -354,7 +363,7 @@ describe('Run Cancellation Handling', () => {
             toolCallId: 'write-1',
             toolName: 'write_file',
             input: { path: 'src/bug.ts', content: 'fixed code' },
-          } as any,
+          } as ToolCallContentBlock,
         ],
       },
       {

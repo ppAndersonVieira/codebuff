@@ -23,6 +23,8 @@ import type {
 } from '@codebuff/common/types/contracts/logger'
 import type { NextRequest } from 'next/server'
 
+import type { ChatCompletionRequestBody } from '@/llm-api/types'
+
 import {
   handleOpenAINonStream,
   OPENAI_SUPPORTED_MODELS,
@@ -113,8 +115,9 @@ export async function postChatCompletions(params: {
       )
     }
 
-    const bodyStream = 'stream' in body && body.stream
-    const runId = (body as any)?.codebuff_metadata?.run_id
+    const typedBody = body as unknown as ChatCompletionRequestBody
+    const bodyStream = typedBody.stream ?? false
+    const runId = typedBody.codebuff_metadata?.run_id
 
     // Extract and validate API key
     const apiKey = extractApiKeyFromHeader(req)
@@ -207,8 +210,7 @@ export async function postChatCompletions(params: {
     }
 
     // Extract and validate agent run ID
-    const runIdFromBody: string | undefined = (body as any).codebuff_metadata
-      ?.run_id
+    const runIdFromBody = typedBody.codebuff_metadata?.run_id
     if (!runIdFromBody || typeof runIdFromBody !== 'string') {
       trackEvent({
         event: AnalyticsEvent.CHAT_COMPLETIONS_VALIDATION_ERROR,
@@ -329,7 +331,7 @@ export async function postChatCompletions(params: {
           userId,
           agentId,
           runId: runIdFromBody,
-          model: (body as any)?.model,
+          model: typedBody.model,
           streaming: !!bodyStream,
           messageCount: Array.isArray((body as any)?.messages)
             ? (body as any).messages.length

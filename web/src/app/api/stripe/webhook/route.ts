@@ -23,23 +23,9 @@ import {
   evaluateBanConditions,
   getUserByStripeCustomerId,
 } from '@/lib/ban-conditions'
+import { ORG_BILLING_ENABLED } from '@/lib/billing-config'
 import { logger } from '@/util/logger'
-
-/**
- * Checks whether a Stripe customer ID belongs to an organization.
- *
- * Uses `org.stripe_customer_id` which is set at org creation time, making it
- * reliable regardless of webhook ordering (unlike `stripe_subscription_id`
- * which may not be populated yet when early invoice events arrive).
- */
-async function isOrgCustomer(stripeCustomerId: string): Promise<boolean> {
-  const orgs = await db
-    .select({ id: schema.org.id })
-    .from(schema.org)
-    .where(eq(schema.org.stripe_customer_id, stripeCustomerId))
-    .limit(1)
-  return orgs.length > 0
-}
+import { isOrgBillingEvent, isOrgCustomer } from './_helpers'
 
 async function handleCheckoutSessionCompleted(
   session: Stripe.Checkout.Session,
@@ -366,6 +352,22 @@ const webhookHandler = async (req: NextRequest): Promise<NextResponse> => {
   }
 
   logger.info({ type: event.type }, 'Received Stripe webhook event')
+
+  // BILLING_DISABLED: Acknowledge but ignore org-billing related events
+  // Return 200 to prevent Stripe from retrying (503 would cause retry storms)
+  if (!ORG_BILLING_ENABLED) {
+    const isOrgEvent = await isOrgBillingEvent(event)
+    if (isOrgEvent) {
+      logger.warn(
+        { type: event.type, eventId: event.id },
+        'BILLING_DISABLED: Ignoring org billing webhook event',
+      )
+      return NextResponse.json({
+        received: true,
+        ignored: 'org billing disabled',
+      })
+    }
+  }
 
   try {
     switch (event.type) {

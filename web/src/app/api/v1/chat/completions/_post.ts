@@ -21,6 +21,19 @@ import type {
   Logger,
   LoggerWithContextFn,
 } from '@codebuff/common/types/contracts/logger'
+
+import type {
+  BlockGrantResult,
+} from '@codebuff/billing/subscription'
+import {
+  isWeeklyLimitError,
+  isBlockExhaustedError,
+} from '@codebuff/billing/subscription'
+
+export type GetUserPreferencesFn = (params: {
+  userId: string
+  logger: Logger
+}) => Promise<{ fallbackToALaCarte: boolean }>
 import type { NextRequest } from 'next/server'
 
 import type { ChatCompletionRequestBody } from '@/llm-api/types'
@@ -82,6 +95,8 @@ export async function postChatCompletions(params: {
   getAgentRunFromId: GetAgentRunFromIdFn
   fetch: typeof globalThis.fetch
   insertMessageBigquery: InsertMessageBigqueryFn
+  ensureSubscriberBlockGrant?: (params: { userId: string; logger: Logger }) => Promise<BlockGrantResult | null>
+  getUserPreferences?: GetUserPreferencesFn
 }) {
   const {
     req,
@@ -92,6 +107,8 @@ export async function postChatCompletions(params: {
     getAgentRunFromId,
     fetch,
     insertMessageBigquery,
+    ensureSubscriberBlockGrant,
+    getUserPreferences,
   } = params
   let { logger } = params
 
@@ -267,7 +284,7 @@ export async function postChatCompletions(params: {
       )
     }
 
-    // Handle streaming vs non-streaming using localhost:4141
+// Handle streaming vs non-streaming using localhost:4141
     try {
       if (bodyStream) {
         // Streaming request

@@ -1,4 +1,5 @@
 import { AGENT_MODES } from '../utils/constants'
+import { CREDITS_REFERRAL_BONUS } from '@codebuff/common/old-constants'
 
 import type { SkillsMap } from '@codebuff/common/types/skill'
 
@@ -52,6 +53,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: 'Disable contextual ads and stop earning credits',
   },
   {
+    id: 'refer-friends',
+    label: 'refer-friends',
+    description: `Refer friends for ${CREDITS_REFERRAL_BONUS} bonus credits each`,
+    aliases: ['referral'],
+  },
+  {
     id: 'init',
     label: 'init',
     description: 'Create a starter knowledge.md file',
@@ -76,13 +83,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   {
     id: 'subscribe',
     label: 'subscribe',
-    description: 'Subscribe to Codebuff Strong',
-    aliases: ['strong'],
-  },
-  {
-    id: 'buy-credits',
-    label: 'buy-credits',
-    description: 'Open the usage page to buy credits',
+    description: 'Subscribe to get more usage',
+    aliases: ['strong', 'sub', 'buy-credits'],
   },
   {
     id: 'new',
@@ -132,12 +134,6 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     aliases: ['img', 'attach'],
   },
   ...MODE_COMMANDS,
-  {
-    id: 'referral',
-    label: 'referral',
-    description: 'Redeem a referral code for bonus credits',
-    aliases: ['redeem'],
-  },
   // {
   //   id: 'publish',
   //   label: 'publish',

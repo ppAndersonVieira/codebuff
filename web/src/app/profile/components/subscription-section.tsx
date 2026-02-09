@@ -96,7 +96,7 @@ function SubscriptionActive({ data }: { data: ActiveSubscriptionResponse }) {
       <CardHeader className="pb-5">
         <CardTitle className="flex items-baseline gap-2 text-lg">
           <span>💪</span>
-          {SUBSCRIPTION_DISPLAY_NAME}
+          {SUBSCRIPTION_DISPLAY_NAME} Subscription
           <span className="text-sm font-normal text-muted-foreground">
             ${subscription.tier}/mo
           </span>
@@ -164,7 +164,7 @@ function SubscriptionActive({ data }: { data: ActiveSubscriptionResponse }) {
             disabled={updatePreferenceMutation.isPending}
           />
           <Label htmlFor="always-use-credits" className="text-sm cursor-pointer">
-            Use a-la-carte credits when limit is reached
+            Automatically use credits when limit is reached
           </Label>
         </div>
       </CardContent>
@@ -190,7 +190,7 @@ function SubscriptionCta() {
           </div>
         </div>
         <Button asChild className="bg-acid-green text-black hover:bg-acid-green/90 shadow-[0_0_20px_rgba(0,255,149,0.2)] hover:shadow-[0_0_30px_rgba(0,255,149,0.3)] transition-all duration-200">
-          <Link href="/pricing">Learn More</Link>
+          <Link href="/subscribe">Learn More</Link>
         </Button>
       </CardContent>
     </Card>

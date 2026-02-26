@@ -207,30 +207,6 @@ export async function postChatCompletions(params: {
     const costMode = typedBody.codebuff_metadata?.cost_mode
     const isFreeModeRequest = isFreeMode(costMode)
 
-    // Check user credits (skip for FREE mode since those requests cost 0 credits)
-    const {
-      balance: { totalRemaining },
-      nextQuotaReset,
-    } = await getUserUsageData({ userId, logger })
-    if (totalRemaining <= 0 && !isFreeModeRequest) {
-      trackEvent({
-        event: AnalyticsEvent.CHAT_COMPLETIONS_INSUFFICIENT_CREDITS,
-        userId,
-        properties: {
-          totalRemaining,
-          nextQuotaReset,
-        },
-        logger,
-      })
-      const resetCountdown = formatQuotaResetCountdown(nextQuotaReset)
-      return NextResponse.json(
-        {
-          message: `Out of credits. Please add credits at ${env.NEXT_PUBLIC_CODEBUFF_APP_URL}/usage. Your free credits reset ${resetCountdown}.`,
-        },
-        { status: 402 },
-      )
-    }
-
     // Extract and validate agent run ID
     const runIdFromBody = typedBody.codebuff_metadata?.run_id
     if (!runIdFromBody || typeof runIdFromBody !== 'string') {

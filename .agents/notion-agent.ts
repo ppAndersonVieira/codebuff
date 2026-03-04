@@ -5,7 +5,7 @@ const definition: AgentDefinition = {
   id: 'notion-query-agent',
   displayName: 'Notion Query Agent',
   publisher,
-  model: 'x-ai/grok-4-fast',
+  model: 'google/gemini-3.1-flash-lite-preview',
 
   spawnerPrompt:
     'Expert at querying Notion databases and pages to find information and answer questions about content stored in Notion workspaces.',

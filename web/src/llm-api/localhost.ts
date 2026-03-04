@@ -27,7 +27,8 @@ const MODEL_MAPPING: Record<string, string> = {
   'gemini-2.0-flash-001': 'claude-haiku-4.5',
   'gpt-5.1':'gpt-5.2',
   'relace-apply-3':'gemini-3-flash-preview',  
-  'claude-3.5-haiku-20241022':'claude-haiku-4.5'
+  'claude-3.5-haiku-20241022':'claude-haiku-4.5',
+  'gemini-3.1-flash-lite-preview' : 'gemini-3.1-pro-preview'
 }
 
 /**

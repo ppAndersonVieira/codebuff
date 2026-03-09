@@ -40,6 +40,12 @@ import type { NextRequest } from 'next/server'
 import type { ChatCompletionRequestBody } from '@/llm-api/types'
 
 import {
+  FireworksError,
+  handleFireworksNonStream,
+  handleFireworksStream,
+  isFireworksModel,
+} from '@/llm-api/fireworks'
+import {
   handleOpenAINonStream,
   OPENAI_SUPPORTED_MODELS,
 } from '@/llm-api/openai'
@@ -321,7 +327,7 @@ export async function postChatCompletions(params: {
         return NextResponse.json(result)
       }
     } catch (error) {
-      
+
       logger.error(
         {
           error: getErrorObject(error),
@@ -349,6 +355,7 @@ export async function postChatCompletions(params: {
         },
         logger,
       })
+
 
 
       return NextResponse.json(

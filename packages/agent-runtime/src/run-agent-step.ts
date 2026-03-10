@@ -23,6 +23,7 @@ import { getAgentOutput } from './util/agent-output'
 import {
   createCacheDebugSnapshot,
   enrichCacheDebugSnapshotWithProviderRequest,
+  enrichCacheDebugSnapshotWithUsage,
 } from './util/cache-debug'
 import {
   withSystemInstructionTags,
@@ -39,7 +40,7 @@ import type {
   FinishAgentRunFn,
   StartAgentRunFn,
 } from '@codebuff/common/types/contracts/database'
-import type { PromptAiSdkFn } from '@codebuff/common/types/contracts/llm'
+import type { CacheDebugUsageData, PromptAiSdkFn } from '@codebuff/common/types/contracts/llm'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type {
   ParamsExcluding,
@@ -261,8 +262,10 @@ export const runAgentStep = async (
   const iterationNum = agentState.messageHistory.length
   const systemTokens = countTokensJson(system)
 
-  const cacheDebugCorrelation = CACHE_DEBUG_FULL_LOGGING
-    ? createCacheDebugSnapshot({
+  let cacheDebugCorrelation: ReturnType<typeof createCacheDebugSnapshot> | undefined
+  if (CACHE_DEBUG_FULL_LOGGING) {
+    try {
+      cacheDebugCorrelation = createCacheDebugSnapshot({
         agentType: String(agentType),
         system,
         toolDefinitions: params.tools
@@ -284,7 +287,10 @@ export const runAgentStep = async (
         agentStepId,
         model,
       })
-    : undefined
+    } catch (err) {
+      logger.warn({ error: err }, '[Cache Debug] Failed to create snapshot')
+    }
+  }
 
   const onCacheDebugProviderRequestBuilt =
     cacheDebugCorrelation
@@ -302,6 +308,17 @@ export const runAgentStep = async (
             provider,
             rawBody,
             normalized: normalizedBody ?? rawBody,
+            logger,
+          })
+        }
+      : undefined
+
+  const onCacheDebugUsageReceived =
+    cacheDebugCorrelation
+      ? (usage: CacheDebugUsageData) => {
+          enrichCacheDebugSnapshotWithUsage({
+            correlation: cacheDebugCorrelation,
+            usage,
             logger,
           })
         }
@@ -338,6 +355,7 @@ export const runAgentStep = async (
         ? serializeCacheDebugCorrelation(cacheDebugCorrelation)
         : undefined,
       onCacheDebugProviderRequestBuilt,
+      onCacheDebugUsageReceived,
     })
 
     if (result.aborted) {
@@ -394,6 +412,7 @@ export const runAgentStep = async (
     includeCacheControl: supportsCacheControl(agentTemplate.model),
     messages: [systemMessage(system), ...agentState.messageHistory],
     onCacheDebugProviderRequestBuilt,
+    onCacheDebugUsageReceived,
     template: agentTemplate,
     onCostCalculated,
   })

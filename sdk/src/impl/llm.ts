@@ -216,6 +216,30 @@ function emitCacheDebugProviderRequest(params: {
   })
 }
 
+function emitCacheDebugUsage(params: {
+  callback?: (usage: {
+    inputTokens: number
+    outputTokens: number
+    cachedInputTokens: number
+    totalTokens: number
+  }) => void
+  usage: {
+    inputTokens?: number
+    outputTokens?: number
+    totalTokens?: number
+    cachedInputTokens?: number
+  }
+}) {
+  if (!params.callback) return
+
+  params.callback({
+    inputTokens: params.usage.inputTokens ?? 0,
+    outputTokens: params.usage.outputTokens ?? 0,
+    cachedInputTokens: params.usage.cachedInputTokens ?? 0,
+    totalTokens: params.usage.totalTokens ?? 0,
+  })
+}
+
 export async function* promptAiSdkStream(
   params: ParamsOf<PromptAiSdkStreamFn> & {
     skipClaudeOAuth?: boolean
@@ -384,13 +408,6 @@ export async function* promptAiSdkStream(
       )
       return toolCall
     },
-  })
-
-  const requestMetadata = await response.request
-  emitCacheDebugProviderRequest({
-    callback: params.onCacheDebugProviderRequestBuilt,
-    provider: getModelProvider(aiSDKModel),
-    rawBody: requestMetadata.body,
   })
 
   const stopSequenceHandler = new StopSequenceHandler(params.stopSequences)
@@ -587,6 +604,19 @@ export async function* promptAiSdkStream(
   const responseValue = await response.response
   const messageId = responseValue.id
 
+  const requestMetadata = await response.request
+  emitCacheDebugProviderRequest({
+    callback: params.onCacheDebugProviderRequestBuilt,
+    provider: getModelProvider(aiSDKModel),
+    rawBody: requestMetadata.body,
+  })
+
+  const usageResult = await response.usage
+  emitCacheDebugUsage({
+    callback: params.onCacheDebugUsageReceived,
+    usage: usageResult,
+  })
+
   // Skip cost tracking for Claude OAuth (user is on their own subscription)
   if (!isClaudeOAuth) {
     const providerMetadataResult = await response.providerMetadata
@@ -654,6 +684,10 @@ export async function promptAiSdk(
     provider: getModelProvider(aiSDKModel),
     rawBody: response.request?.body,
   })
+  emitCacheDebugUsage({
+    callback: params.onCacheDebugUsageReceived,
+    usage: response.usage,
+  })
   const content = response.text
 
   const providerMetadata = response.providerMetadata ?? {}
@@ -718,6 +752,10 @@ export async function promptAiSdkStructured<T>(
     callback: params.onCacheDebugProviderRequestBuilt,
     provider: getModelProvider(aiSDKModel),
     rawBody: response.request?.body,
+  })
+  emitCacheDebugUsage({
+    callback: params.onCacheDebugUsageReceived,
+    usage: response.usage,
   })
 
   const content = response.object

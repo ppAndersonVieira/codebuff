@@ -30,11 +30,13 @@ export function createBase2(
     publisher,
     model: isFree ? 'minimax/minimax-m2.5' : 'anthropic/claude-opus-4.6',
     providerOptions: isFree ? {
-      only: ['fireworks'],
-      order: ['fireworks'],
+      only: ['inceptron/fp8'],
+      order: ['inceptron/fp8'],
       allow_fallbacks: false,
       data_collection: 'deny',
-    } : undefined,
+    } : {
+      only: ['amazon-bedrock'],
+    },
     displayName: 'Buffy the Orchestrator',
     spawnerPrompt:
       'Advanced base agent that orchestrates planning, editing, and reviewing for complex coding tasks',
@@ -63,18 +65,18 @@ export function createBase2(
       !isFast && !noAskUser && 'suggest_followups',
       'str_replace',
       'write_file',
-      'propose_str_replace',
-      'propose_write_file',
+      !isFree && 'propose_str_replace',
+      !isFree && 'propose_write_file',
       !noAskUser && 'ask_user',
       'skill',
       'set_output',
+      'code_search',
+      'list_directory',
+      'glob',
     ),
     spawnableAgents: buildArray(
       !isMax && 'file-picker',
       isMax && 'file-picker-max',
-      'code-searcher',
-      'directory-lister',
-      'glob-matcher',
       'researcher-web',
       'researcher-docs',
       isFree ? 'commander-lite' : 'commander',
@@ -86,6 +88,7 @@ export function createBase2(
       isFree && 'code-reviewer-lite',
       isDefault && 'code-reviewer',
       isMax && 'code-reviewer-multi-prompt',
+      isDefault && 'tmux-cli',
       'context-pruner',
     ),
 
@@ -106,6 +109,7 @@ export function createBase2(
       }
 - **Be careful about terminal commands:** Be careful about instructing subagents to run terminal commands that could be destructive or have effects that are hard to undo (e.g. git push, git commit, running any scripts -- especially ones that could alter production environments (!), installing packages globally, etc). Don't run any of these effectful commands unless the user explicitly asks you to.
 - **Do what the user asks:** If the user asks you to do something, even running a risky terminal command, do it.
+- **Don't use set_output:** The set_output tool is for spawned subagents to report results. Don't use it yourself.
 
 # Code Editing Mandates
 
@@ -137,7 +141,7 @@ Use the spawn_agents tool to spawn specialized agents to help you complete the u
 - **Spawn multiple agents in parallel:** This increases the speed of your response **and** allows you to be more comprehensive by spawning more total agents to synthesize the best response.
 - **Sequence agents properly:** Keep in mind dependencies when spawning different agents. Don't spawn agents in parallel that depend on each other.
   ${buildArray(
-        '- Spawn context-gathering agents (file pickers, code-searcher, directory-lister, glob-matcher, and web/docs researchers) before making edits.',
+        '- Spawn context-gathering agents (file pickers and web/docs researchers) before making edits. Use the code_search, list_directory, and glob tools directly for searching and exploring the codebase.',
         isFree &&
         '- Spawn the editor-lite agent to implement the changes after you have gathered all the context you need.',
         isDefault &&
@@ -193,11 +197,11 @@ ${buildArray(
 <user>please implement [a complex new feature]</user>
 
 <response>
-[ You spawn 3 file-pickers, a code-searcher, and a docs researcher in parallel to find relevant files and do research online ]
+[ You spawn 3 file-pickers and a docs researcher in parallel to find relevant files and do research online. You use the code_search, list_directory, and glob tools directly to search the codebase. ]
 
 [ You read a few of the relevant files using the read_files tool in two separate tool calls ]
 
-[ You spawn one more code-searcher and file-picker ]
+[ You use code_search and glob tools, and spawn another file-picker to find more relevant files ]
 
 [ You read a few other relevant files using the read_files tool ]${!noAskUser
         ? `\n\n[ You ask the user for important clarifications on their request or alternate implementation strategies using the ask_user tool ]`
@@ -296,7 +300,7 @@ ${PLACEHOLDER.GIT_CHANGES_PROMPT}
   }
 }
 
-const EXPLORE_PROMPT = `- Iteratively spawn file pickers, code-searchers, directory-listers, glob-matchers, commanders, and web/docs researchers to gather context as needed. The file-picker agent in particular is very useful to find relevant files -- try spawning multiple in parallel (say, 2-5) to explore different parts of the codebase. Use read_subtree if you need to grok a particular part of the codebase. Read all the relevant files using the read_files tool.`
+const EXPLORE_PROMPT = `- Iteratively spawn file pickers, commanders, and web/docs researchers to gather context as needed. Use the code_search, list_directory, and glob tools directly for searching and exploring the codebase. The file-picker agent in particular is very useful to find relevant files -- try spawning multiple in parallel (say, 2-5) to explore different parts of the codebase. Use read_subtree if you need to grok a particular part of the codebase. Read all the relevant files using the read_files tool.`
 
 function buildImplementationInstructionsPrompt({
   isSonnet,

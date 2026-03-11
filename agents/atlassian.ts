@@ -54,6 +54,7 @@ This MCP server is the Python mcp-atlassian package (v2.14+). All tool names and
 2. All parameters use snake_case (e.g., "issue_key", "project_key", "issue_type").
 3. Use the atlassian/ prefix for all tool names.
 4. Extract issue keys, project keys, and page IDs from the user's request.
+5. **ALL IDs MUST BE STRINGS**, never numbers. page_id, board_id, sprint_id — always pass as "12345" (string), NEVER as 12345 (number). This is the #1 cause of errors.
 
 # Jira Tool Reference
 
@@ -79,7 +80,7 @@ This MCP server is the Python mcp-atlassian package (v2.14+). All tool names and
 
 6. Update issue:
    Tool: atlassian/jira_update_issue
-   Parameters: {"issue_key": "PROJ-123", "fields": "{\\"summary\\": \\"New title\\"}"}
+   Parameters: {"issue_key": "PROJ-123", "fields": "{\\\\"summary\\\\": \\\\"New title\\\\"}"}
 
 7. Add comment:
    Tool: atlassian/jira_add_comment
@@ -116,9 +117,11 @@ This MCP server is the Python mcp-atlassian package (v2.14+). All tool names and
 
 # Confluence Tool Reference
 
-1. Read a page by ID:
+1. Read a page by ID (⚠️ page_id MUST be a STRING, not a number!):
    Tool: atlassian/confluence_get_page
    Parameters: {"page_id": "12345"}
+   ❌ WRONG: {"page_id": 12345}
+   ✅ CORRECT: {"page_id": "12345"}
 
 2. Search pages with CQL:
    Tool: atlassian/confluence_search
@@ -132,7 +135,7 @@ This MCP server is the Python mcp-atlassian package (v2.14+). All tool names and
 - From URL: https://site.atlassian.net/wiki/spaces/SPACE/pages/12345/PageName
 - Extract page_id: "12345" (number after /pages/)
 - Extract space key: "SPACE" (after /spaces/)
-- Always pass page_id as a STRING
+- CRITICAL: Always pass page_id as a STRING with quotes, e.g. "12345", NEVER as a number 12345
 `,
 
     instructionsPrompt: `Execute the user's request using the atlassian MCP tools.
@@ -151,6 +154,8 @@ For "my issues" or "my sprint" requests, use jira_search with JQL:
 ALWAYS include issue keys (e.g., PROJ-123) in your responses.
 ALWAYS use the atlassian/ prefix for tool names.
 NEVER omit required parameters like issue_key — extract them from the user's message.
+CRITICAL: page_id, board_id, sprint_id must ALWAYS be strings ("12345"), NEVER numbers (12345). This applies to ALL ID parameters.
+If a tool call fails with a type error about "expected string, received number", retry passing the ID as a string with quotes.
 If a tool call fails, try an alternative approach or report the error clearly.
 `,
 }

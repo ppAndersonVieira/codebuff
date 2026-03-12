@@ -30,9 +30,6 @@ export function createBase2(
     publisher,
     model: isFree ? 'minimax/minimax-m2.5' : 'anthropic/claude-opus-4.6',
     providerOptions: isFree ? {
-      only: ['inceptron/fp8'],
-      order: ['inceptron/fp8'],
-      allow_fallbacks: false,
       data_collection: 'deny',
     } : {
       only: ['amazon-bedrock'],
@@ -88,9 +85,10 @@ export function createBase2(
       isFree && 'code-reviewer-lite',
       isDefault && 'code-reviewer',
       isMax && 'code-reviewer-multi-prompt',
-      isDefault && 'tmux-cli',
+      'tmux-cli',
       'atlassian',
       'pai-researcher',
+      'picpay-pai-agent',
       'context-pruner',
     ),
 

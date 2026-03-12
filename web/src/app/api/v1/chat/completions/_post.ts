@@ -40,11 +40,23 @@ import type { NextRequest } from 'next/server'
 import type { ChatCompletionRequestBody } from '@/llm-api/types'
 
 import {
+  CanopyWaveError,
+  handleCanopyWaveNonStream,
+  handleCanopyWaveStream,
+  isCanopyWaveModel,
+} from '@/llm-api/canopywave'
+import {
   FireworksError,
   handleFireworksNonStream,
   handleFireworksStream,
   isFireworksModel,
 } from '@/llm-api/fireworks'
+import {
+  SiliconFlowError,
+  handleSiliconFlowNonStream,
+  handleSiliconFlowStream,
+  isSiliconFlowModel,
+} from '@/llm-api/siliconflow'
 import {
   handleOpenAINonStream,
   OPENAI_SUPPORTED_MODELS,
@@ -355,7 +367,6 @@ export async function postChatCompletions(params: {
         },
         logger,
       })
-
 
 
       return NextResponse.json(

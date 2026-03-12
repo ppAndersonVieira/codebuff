@@ -88,7 +88,6 @@ export function createBase2(
       'tmux-cli',
       'atlassian',
       'pai-researcher',
-      'picpay-pai-agent',
       'context-pruner',
     ),
 

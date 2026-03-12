@@ -90,6 +90,7 @@ export function createBase2(
       isMax && 'code-reviewer-multi-prompt',
       isDefault && 'tmux-cli',
       'atlassian',
+      'pai-researcher',
       'context-pruner',
     ),
 

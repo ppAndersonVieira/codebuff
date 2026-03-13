@@ -283,18 +283,64 @@ export async function postChatCompletions(params: {
       )
     }
 
-    // Handle streaming vs non-streaming using localhost:4141
+    // Handle streaming vs non-streaming
+    // Set useLocalhost = true to route all requests to localhost:4141 (PicPay fork)
+    const useLocalhost = true
+    const useSiliconFlow = false // isSiliconFlowModel(typedBody.model)
+    const useCanopyWave = false // isCanopyWaveModel(typedBody.model)
+    const useFireworks = isFireworksModel(typedBody.model)
     try {
       if (bodyStream) {
-        // Streaming request
-        const stream = await handleLocalhostStream({
-          body,
-          userId,
-          agentId,
-          fetch,
-          logger,
-          insertMessageBigquery,
-        })
+        // Streaming request — route to SiliconFlow/CanopyWave/Fireworks for supported models
+        const stream = useLocalhost
+          ? await handleLocalhostStream({
+              body,
+              userId,
+              agentId,
+              fetch,
+              logger,
+              insertMessageBigquery,
+            })
+          : useSiliconFlow
+          ? await handleSiliconFlowStream({
+              body: typedBody,
+              userId,
+              stripeCustomerId,
+              agentId,
+              fetch,
+              logger,
+              insertMessageBigquery,
+            })
+          : useCanopyWave
+          ? await handleCanopyWaveStream({
+              body: typedBody,
+              userId,
+              stripeCustomerId,
+              agentId,
+              fetch,
+              logger,
+              insertMessageBigquery,
+            })
+          : useFireworks
+          ? await handleFireworksStream({
+              body: typedBody,
+              userId,
+              stripeCustomerId,
+              agentId,
+              fetch,
+              logger,
+              insertMessageBigquery,
+            })
+          : await handleOpenRouterStream({
+              body: typedBody,
+              userId,
+              stripeCustomerId,
+              agentId,
+              openrouterApiKey,
+              fetch,
+              logger,
+              insertMessageBigquery,
+            })
 
         trackEvent({
           event: AnalyticsEvent.CHAT_COMPLETIONS_STREAM_STARTED,
@@ -315,15 +361,56 @@ export async function postChatCompletions(params: {
           },
         })
       } else {
-        // Non-streaming request - use localhost:4141
-        const result = await handleLocalhostNonStream({
-          body,
-          userId,
-          agentId,
-          fetch,
-          logger,
-          insertMessageBigquery,
-        })
+        // Non-streaming request
+        const result = useLocalhost
+          ? await handleLocalhostNonStream({
+              body,
+              userId,
+              agentId,
+              fetch,
+              logger,
+              insertMessageBigquery,
+            })
+          : useSiliconFlow
+          ? await handleSiliconFlowNonStream({
+              body: typedBody,
+              userId,
+              stripeCustomerId,
+              agentId,
+              fetch,
+              logger,
+              insertMessageBigquery,
+            })
+          : useCanopyWave
+          ? await handleCanopyWaveNonStream({
+              body: typedBody,
+              userId,
+              stripeCustomerId,
+              agentId,
+              fetch,
+              logger,
+              insertMessageBigquery,
+            })
+          : useFireworks
+          ? await handleFireworksNonStream({
+              body: typedBody,
+              userId,
+              stripeCustomerId,
+              agentId,
+              fetch,
+              logger,
+              insertMessageBigquery,
+            })
+          : await handleOpenRouterNonStream({
+              body: typedBody,
+              userId,
+              stripeCustomerId,
+              agentId,
+              openrouterApiKey,
+              fetch,
+              logger,
+              insertMessageBigquery,
+            })
 
         trackEvent({
           event: AnalyticsEvent.CHAT_COMPLETIONS_GENERATION_STARTED,

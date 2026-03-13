@@ -6,7 +6,7 @@ const definition: AgentDefinition = {
   id: 'pai-researcher',
   publisher,
   displayName: 'pAI Researcher',
-  model: 'google/gemini-3.1-flash-lite-preview',
+  model: 'google/gemini-2.5-flash',
 
   spawnerPrompt:
     'Expert at conducting comprehensive research across PicPay internal systems by spawning multiple pAI agents in parallel waves to gather information from different angles — logs, documentation, infrastructure, deploys, and service status.',

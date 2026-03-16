@@ -1,5 +1,7 @@
+import { CHATGPT_OAUTH_ENABLED } from '@codebuff/common/constants/chatgpt-oauth'
 import { CLAUDE_OAUTH_ENABLED } from '@codebuff/common/constants/claude-oauth'
 import { AGENT_MODES, IS_FREEBUFF } from '../utils/constants'
+import { getChatGptOAuthStatus } from '../utils/chatgpt-oauth'
 import { CREDITS_REFERRAL_BONUS } from '@codebuff/common/old-constants'
 
 import type { SkillsMap } from '@codebuff/common/types/skill'
@@ -38,11 +40,14 @@ const FREEBUFF_REMOVED_COMMAND_IDS = new Set([
   'refer-friends',
   'usage',
   'subscribe',
-  'review',
   'agent:gpt-5',
   'image',
   'publish',
   'init',
+])
+
+const FREEBUFF_ONLY_COMMAND_IDS = new Set([
+  'plan',
 ])
 
 const ALL_SLASH_COMMANDS: SlashCommand[] = [
@@ -60,6 +65,16 @@ const ALL_SLASH_COMMANDS: SlashCommand[] = [
           label: 'connect:claude (deprecated)',
           description: 'Claude subscription will be removed March 1st',
           aliases: ['claude'],
+        },
+      ]
+    : []),
+  ...(CHATGPT_OAUTH_ENABLED
+    ? [
+        {
+          id: 'connect',
+          label: 'connect',
+          description: 'Connect your ChatGPT account',
+          aliases: ['connect:chatgpt', 'chatgpt'],
         },
       ]
     : []),
@@ -109,6 +124,21 @@ const ALL_SLASH_COMMANDS: SlashCommand[] = [
     aliases: ['strong', 'sub', 'buy-credits'],
   },
   {
+    id: 'interview',
+    label: 'interview',
+    description: 'AI asks a series of questions to flesh out request into a spec',
+  },
+  {
+    id: 'plan',
+    label: 'plan',
+    description: 'Create a plan with GPT 5.4',
+  },
+  {
+    id: 'review',
+    label: 'review',
+    description: 'Review code changes with GPT 5.4',
+  },
+  {
     id: 'new',
     label: 'new',
     description: 'Clear the conversation history and start a new chat',
@@ -120,11 +150,6 @@ const ALL_SLASH_COMMANDS: SlashCommand[] = [
     label: 'history',
     description: 'Browse and resume past conversations',
     aliases: ['chats'],
-  },
-  {
-    id: 'review',
-    label: 'review',
-    description: 'Review code changes with GPT-5 Agent',
   },
   {
     id: 'agent:gpt-5',
@@ -186,7 +211,9 @@ export const SLASH_COMMANDS = IS_FREEBUFF
   ? ALL_SLASH_COMMANDS.filter(
       (cmd) => !FREEBUFF_REMOVED_COMMAND_IDS.has(cmd.id),
     )
-  : ALL_SLASH_COMMANDS
+  : ALL_SLASH_COMMANDS.filter(
+      (cmd) => !FREEBUFF_ONLY_COMMAND_IDS.has(cmd.id),
+    )
 
 export const SLASHLESS_COMMAND_IDS = new Set(
   SLASH_COMMANDS.filter((cmd) => cmd.implicitCommand).map((cmd) =>
@@ -215,5 +242,16 @@ export function getSlashCommandsWithSkills(skills: SkillsMap): SlashCommand[] {
     description: truncateDescription(skill.description),
   }))
 
-  return [...SLASH_COMMANDS, ...skillCommands]
+  let commands = [...SLASH_COMMANDS, ...skillCommands]
+
+  if (IS_FREEBUFF && !getChatGptOAuthStatus().connected) {
+    commands = commands.map((cmd) => {
+      if (cmd.id === 'review' || cmd.id === 'plan') {
+        return { ...cmd, description: 'Connect required. ' + cmd.description }
+      }
+      return cmd
+    })
+  }
+
+  return commands
 }

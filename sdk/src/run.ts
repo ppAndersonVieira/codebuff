@@ -15,6 +15,7 @@ import {
 import { toolNames } from '@codebuff/common/tools/constants'
 import { clientToolCallSchema } from '@codebuff/common/tools/list'
 import { AgentOutputSchema } from '@codebuff/common/types/session-state'
+import { parseApiErrorResponseBody } from '@codebuff/common/util/error'
 import { cloneDeep } from 'lodash'
 
 import { getErrorStatusCode } from './error-utils'
@@ -510,15 +511,28 @@ async function runOnce({
     userId,
     signal: signal ?? new AbortController().signal,
   }).catch((error) => {
-    const errorMessage =
+    let errorMessage =
       error instanceof Error ? error.message : String(error ?? '')
     const statusCode = getErrorStatusCode(error)
+
+    // Extract structured error details from the API response body
+    // (e.g., AI SDK's AI_APICallError includes a responseBody with the server's JSON response)
+    const responseBody =
+      error && typeof error === 'object' && 'responseBody' in error
+        ? (error as { responseBody: unknown }).responseBody
+        : undefined
+    const { errorCode, message: parsedMessage } = parseApiErrorResponseBody(responseBody)
+    if (parsedMessage) {
+      errorMessage = parsedMessage
+    }
+
     resolve({
       sessionState: getCancelledSessionState(errorMessage),
       output: {
         type: 'error',
         message: errorMessage,
         ...(statusCode !== undefined && { statusCode }),
+        ...(errorCode !== undefined && { error: errorCode }),
       },
     })
   })

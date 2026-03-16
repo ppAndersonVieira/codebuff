@@ -200,6 +200,11 @@ export const ChatInputBar = ({
     return <InputModeBanner />
   }
 
+  // ChatGPT connect mode: show only the connect panel (no input box)
+  if (inputMode === 'connect:chatgpt') {
+    return <InputModeBanner />
+  }
+
   // Handle input changes with special mode entry detection
   const handleInputChange = (value: InputValue) => {
     // Detect entering bash mode: user typed exactly '!' when in default mode
@@ -343,6 +348,13 @@ export const ChatInputBar = ({
             backgroundColor: theme.surface,
           }}
         >
+          {modeConfig.label && (
+            <box style={{ flexShrink: 0, paddingRight: 1 }}>
+              <text>
+                <span bg={theme.info} fg={theme.background}>{` ${modeConfig.label} `}</span>
+              </text>
+            </box>
+          )}
           {modeConfig.icon && (
             <box
               style={{
@@ -426,6 +438,13 @@ export const ChatInputBar = ({
               width: '100%',
             }}
           >
+            {modeConfig.label && (
+              <box style={{ flexShrink: 0, paddingRight: 1 }}>
+                <text>
+                  <span bg={theme.info} fg={theme.background}>{` ${modeConfig.label} `}</span>
+                </text>
+              </box>
+            )}
             {modeConfig.icon && (
               <box
                 style={{

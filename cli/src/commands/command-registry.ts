@@ -1,7 +1,9 @@
+import { CHATGPT_OAUTH_ENABLED } from '@codebuff/common/constants/chatgpt-oauth'
 import { CLAUDE_OAUTH_ENABLED } from '@codebuff/common/constants/claude-oauth'
 import open from 'open'
 
 import { handleAdsEnable, handleAdsDisable } from './ads'
+import { buildInterviewPrompt, buildPlanPrompt, buildReviewPromptFromArgs } from './prompt-builders'
 import { useThemeStore } from '../hooks/use-theme'
 import { handleHelpCommand } from './help'
 import { handleImageCommand } from './image'
@@ -14,6 +16,7 @@ import { WEBSITE_URL } from '../login/constants'
 import { useChatStore } from '../state/chat-store'
 import { useFeedbackStore } from '../state/feedback-store'
 import { useLoginStore } from '../state/login-store'
+import { getChatGptOAuthStatus } from '../utils/chatgpt-oauth'
 import { AGENT_MODES, IS_FREEBUFF } from '../utils/constants'
 import { getSystemMessage, getUserMessage } from '../utils/message-history'
 import { capturePendingAttachments } from '../utils/pending-attachments'
@@ -173,7 +176,10 @@ const FREEBUFF_REMOVED_COMMANDS = new Set([
   'publish',
   'gpt-5-agent',
   'connect:claude',
-  'review',
+])
+
+const FREEBUFF_ONLY_COMMANDS = new Set([
+  'plan',
 ])
 
 const ALL_COMMANDS: CommandDefinition[] = [
@@ -505,6 +511,19 @@ const ALL_COMMANDS: CommandDefinition[] = [
       clearInput(params)
     },
   }),
+  ...(CHATGPT_OAUTH_ENABLED
+    ? [
+        defineCommand({
+          name: 'connect',
+          aliases: ['connect:chatgpt', 'chatgpt'],
+          handler: (params) => {
+            useChatStore.getState().setInputMode('connect:chatgpt')
+            params.saveToHistory(params.inputValue.trim())
+            clearInput(params)
+          },
+        }),
+      ]
+    : []),
   defineCommand({
     name: 'history',
     aliases: ['chats'],
@@ -515,8 +534,86 @@ const ALL_COMMANDS: CommandDefinition[] = [
     },
   }),
   defineCommandWithArgs({
+    name: 'interview',
+    handler: (params, args) => {
+      const trimmedArgs = args.trim()
+
+      params.saveToHistory(params.inputValue.trim())
+      clearInput(params)
+
+      // If user provided text directly, send it immediately
+      if (trimmedArgs) {
+        params.sendMessage({
+          content: buildInterviewPrompt(trimmedArgs),
+          agentMode: params.agentMode,
+        })
+        setTimeout(() => {
+          params.scrollToLatest()
+        }, 0)
+        return
+      }
+
+      // Otherwise enter interview mode
+      useChatStore.getState().setInputMode('interview')
+    },
+  }),
+  defineCommandWithArgs({
+    name: 'plan',
+    handler: (params, args) => {
+      // In freebuff mode, require ChatGPT connection
+      if (IS_FREEBUFF && !getChatGptOAuthStatus().connected) {
+        params.setMessages((prev) => [
+          ...prev,
+          getUserMessage(params.inputValue.trim()),
+          getSystemMessage(
+            'Connect your ChatGPT account to use /plan. Use /connect to get started.',
+          ),
+        ])
+        params.saveToHistory(params.inputValue.trim())
+        clearInput(params)
+        useChatStore.getState().setInputMode('connect:chatgpt')
+        return
+      }
+
+      const trimmedArgs = args.trim()
+
+      params.saveToHistory(params.inputValue.trim())
+      clearInput(params)
+
+      // If user provided plan text directly, send it immediately
+      if (trimmedArgs) {
+        params.sendMessage({
+          content: buildPlanPrompt(trimmedArgs),
+          agentMode: params.agentMode,
+        })
+        setTimeout(() => {
+          params.scrollToLatest()
+        }, 0)
+        return
+      }
+
+      // Otherwise enter plan mode
+      useChatStore.getState().setInputMode('plan')
+    },
+  }),
+  defineCommandWithArgs({
     name: 'review',
     handler: (params, args) => {
+      // In freebuff mode, require ChatGPT connection
+      if (IS_FREEBUFF && !getChatGptOAuthStatus().connected) {
+        params.setMessages((prev) => [
+          ...prev,
+          getUserMessage(params.inputValue.trim()),
+          getSystemMessage(
+            'Connect your ChatGPT account to use /review. Use /connect to get started.',
+          ),
+        ])
+        params.saveToHistory(params.inputValue.trim())
+        clearInput(params)
+        useChatStore.getState().setInputMode('connect:chatgpt')
+        return
+      }
+
       const trimmedArgs = args.trim()
 
       params.saveToHistory(params.inputValue.trim())
@@ -524,9 +621,8 @@ const ALL_COMMANDS: CommandDefinition[] = [
 
       // If user provided review text directly, send it immediately without showing the screen
       if (trimmedArgs) {
-        const reviewPrompt = `@GPT-5 Agent Please review: ${trimmedArgs}`
         params.sendMessage({
-          content: reviewPrompt,
+          content: buildReviewPromptFromArgs(trimmedArgs),
           agentMode: params.agentMode,
         })
         setTimeout(() => {
@@ -557,7 +653,7 @@ const ALL_COMMANDS: CommandDefinition[] = [
 
 export const COMMAND_REGISTRY: CommandDefinition[] = IS_FREEBUFF
   ? ALL_COMMANDS.filter((cmd) => !FREEBUFF_REMOVED_COMMANDS.has(cmd.name))
-  : ALL_COMMANDS
+  : ALL_COMMANDS.filter((cmd) => !FREEBUFF_ONLY_COMMANDS.has(cmd.name))
 
 export function findCommand(cmd: string): CommandDefinition | undefined {
   const lowerCmd = cmd.toLowerCase()

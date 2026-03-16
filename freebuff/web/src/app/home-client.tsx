@@ -32,6 +32,11 @@ const faqs = [
       'MiniMax M2.5 as the main coding agent, Gemini 3.1 Flash Lite for finding files and research, and GPT-5.4 for deep thinking if you connect your ChatGPT subscription.',
   },
   {
+    question: 'Which countries is Freebuff available in?',
+    answer:
+      'Freebuff is currently available in the United States, Canada, United Kingdom, Australia, Norway, Sweden, Netherlands, Denmark, Germany, Finland, Belgium, Luxembourg, Switzerland, Ireland, and Iceland.',
+  },
+  {
     question: 'Are you training on my data?',
     answer:
       'No. We only use model providers that do not train on our requests. Your code stays yours.',
@@ -306,8 +311,8 @@ function FAQList() {
 
 const PHILOSOPHY_WORDS = [
   { word: 'SIMPLE', description: 'No modes. No config. Just works.' },
-  { word: 'FAST', description: 'Up to 3× the speed of Claude Code' },
-  { word: 'LOADED', description: 'Built-in web research, browser use, and more' },
+  { word: 'FAST', description: '5–10× speed up via fast models and quick context gathering.' },
+  { word: 'LOADED', description: 'Built in web research, plan/review using your ChatGPT subscription, and more.' },
 ]
 
 function PhilosophySection() {

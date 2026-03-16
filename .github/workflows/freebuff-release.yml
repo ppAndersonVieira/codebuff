@@ -12,6 +12,11 @@ on:
           - patch
           - minor
           - major
+      checkout_ref:
+        description: 'Git ref to build from (commit SHA, branch, or tag). Defaults to latest main.'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: freebuff-release
@@ -71,6 +76,11 @@ jobs:
           name: freebuff-updated-package
           path: freebuff/cli/release/
 
+  e2e-tests:
+    needs: prepare-and-commit
+    uses: ./.github/workflows/freebuff-e2e.yml
+    secrets: inherit
+
   build-binaries:
     needs: prepare-and-commit
     uses: ./.github/workflows/cli-release-build.yml
@@ -78,12 +88,12 @@ jobs:
       binary-name: freebuff
       new-version: ${{ needs.prepare-and-commit.outputs.new_version }}
       artifact-name: freebuff-updated-package
-      checkout-ref: ${{ github.sha }}
+      checkout-ref: ${{ inputs.checkout_ref || github.sha }}
       env-overrides: '{"FREEBUFF_MODE": "true", "NEXT_PUBLIC_CB_ENVIRONMENT": "prod"}'
     secrets: inherit
 
   create-release:
-    needs: [prepare-and-commit, build-binaries]
+    needs: [prepare-and-commit, build-binaries, e2e-tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

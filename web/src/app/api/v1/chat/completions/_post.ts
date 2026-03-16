@@ -4,6 +4,7 @@ import { isFreeMode } from '@codebuff/common/constants/free-agents'
 import { getErrorObject } from '@codebuff/common/util/error'
 import { pluralize } from '@codebuff/common/util/string'
 import { env } from '@codebuff/internal/env'
+import geoip from 'geoip-lite'
 import { NextResponse } from 'next/server'
 
 import {
@@ -59,7 +60,9 @@ import {
 } from '@/llm-api/siliconflow'
 import {
   handleOpenAINonStream,
-  OPENAI_SUPPORTED_MODELS,
+  handleOpenAIStream,
+  isOpenAIDirectModel,
+  OpenAIError,
 } from '@/llm-api/openai'
 import {
   handleOpenRouterNonStream,
@@ -67,6 +70,28 @@ import {
   OpenRouterError,
 } from '@/llm-api/openrouter'
 import { extractApiKeyFromHeader } from '@/util/auth'
+
+const FREE_MODE_ALLOWED_COUNTRIES = new Set([
+  'US', 'CA',
+  'GB', 'AU', 'NZ',
+  'NO', 'SE', 'NL', 'DK', 'DE', 'FI', 'BE', 'LU', 'CH', 'IE', 'IS',
+])
+
+function extractClientIp(req: NextRequest): string | undefined {
+  const forwardedFor = req.headers.get('x-forwarded-for')
+  if (forwardedFor) {
+    return forwardedFor.split(',')[0].trim()
+  }
+  return req.headers.get('x-real-ip') ?? undefined
+}
+
+function getCountryFromIp(clientIp: string | undefined): string | null {
+  if (!clientIp) {
+    return null
+  }
+  const geo = geoip.lookup(clientIp)
+  return geo?.country ?? null
+}
 
 export const formatQuotaResetCountdown = (
   nextQuotaReset: string | null | undefined,
@@ -225,6 +250,35 @@ export async function postChatCompletions(params: {
     const costMode = typedBody.codebuff_metadata?.cost_mode
     const isFreeModeRequest = isFreeMode(costMode)
 
+    // For free mode requests, check if user is in US or Canada
+    if (isFreeModeRequest) {
+      const clientIp = extractClientIp(req)
+      const countryCode = getCountryFromIp(clientIp)
+
+      // If we couldn't determine country (null), allow the request (fail open)
+      // This handles users behind VPNs, corporate proxies, or localhost
+      if (countryCode && !FREE_MODE_ALLOWED_COUNTRIES.has(countryCode)) {
+        trackEvent({
+          event: AnalyticsEvent.CHAT_COMPLETIONS_VALIDATION_ERROR,
+          userId,
+          properties: {
+            error: 'free_mode_not_available_in_country',
+            countryCode,
+            clientIp: clientIp ? '[redacted]' : undefined,
+          },
+          logger,
+        })
+
+        return NextResponse.json(
+          {
+            error: 'free_mode_unavailable',
+            message: 'Free mode is not available in your country.',
+          },
+          { status: 403 },
+        )
+      }
+    }
+
     // Extract and validate agent run ID
     const runIdFromBody = typedBody.codebuff_metadata?.run_id
     if (!runIdFromBody || typeof runIdFromBody !== 'string') {
@@ -292,17 +346,18 @@ export async function postChatCompletions(params: {
     try {
       if (bodyStream) {
         // Streaming request — route to SiliconFlow/CanopyWave/Fireworks for supported models
+        const useOpenAIDirect = !useFireworks && isOpenAIDirectModel(typedBody.model)
         const stream = useLocalhost
           ? await handleLocalhostStream({
-              body,
-              userId,
-              agentId,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            })
+            body,
+            userId,
+            agentId,
+            fetch,
+            logger,
+            insertMessageBigquery,
+          })
           : useSiliconFlow
-          ? await handleSiliconFlowStream({
+            ? await handleSiliconFlowStream({
               body: typedBody,
               userId,
               stripeCustomerId,
@@ -311,36 +366,46 @@ export async function postChatCompletions(params: {
               logger,
               insertMessageBigquery,
             })
-          : useCanopyWave
-          ? await handleCanopyWaveStream({
-              body: typedBody,
-              userId,
-              stripeCustomerId,
-              agentId,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            })
-          : useFireworks
-          ? await handleFireworksStream({
-              body: typedBody,
-              userId,
-              stripeCustomerId,
-              agentId,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            })
-          : await handleOpenRouterStream({
-              body: typedBody,
-              userId,
-              stripeCustomerId,
-              agentId,
-              openrouterApiKey,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            })
+            : useCanopyWave
+              ? await handleCanopyWaveStream({
+                body: typedBody,
+                userId,
+                stripeCustomerId,
+                agentId,
+                fetch,
+                logger,
+                insertMessageBigquery,
+              })
+              : useFireworks
+                ? await handleFireworksStream({
+                  body: typedBody,
+                  userId,
+                  stripeCustomerId,
+                  agentId,
+                  fetch,
+                  logger,
+                  insertMessageBigquery,
+                })
+                : useOpenAIDirect
+                  ? await handleOpenAIStream({
+                    body: typedBody,
+                    userId,
+                    stripeCustomerId,
+                    agentId,
+                    fetch,
+                    logger,
+                    insertMessageBigquery,
+                  })
+                  : await handleOpenRouterStream({
+                    body: typedBody,
+                    userId,
+                    stripeCustomerId,
+                    agentId,
+                    openrouterApiKey,
+                    fetch,
+                    logger,
+                    insertMessageBigquery,
+                  })
 
         trackEvent({
           event: AnalyticsEvent.CHAT_COMPLETIONS_STREAM_STARTED,
@@ -362,17 +427,18 @@ export async function postChatCompletions(params: {
         })
       } else {
         // Non-streaming request
+        const shouldUseOpenAIEndpoint = !useFireworks && isOpenAIDirectModel(typedBody.model)
         const result = useLocalhost
           ? await handleLocalhostNonStream({
-              body,
-              userId,
-              agentId,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            })
+            body,
+            userId,
+            agentId,
+            fetch,
+            logger,
+            insertMessageBigquery,
+          })
           : useSiliconFlow
-          ? await handleSiliconFlowNonStream({
+            ? await handleSiliconFlowNonStream({
               body: typedBody,
               userId,
               stripeCustomerId,
@@ -381,36 +447,36 @@ export async function postChatCompletions(params: {
               logger,
               insertMessageBigquery,
             })
-          : useCanopyWave
-          ? await handleCanopyWaveNonStream({
-              body: typedBody,
-              userId,
-              stripeCustomerId,
-              agentId,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            })
-          : useFireworks
-          ? await handleFireworksNonStream({
-              body: typedBody,
-              userId,
-              stripeCustomerId,
-              agentId,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            })
-          : await handleOpenRouterNonStream({
-              body: typedBody,
-              userId,
-              stripeCustomerId,
-              agentId,
-              openrouterApiKey,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            })
+            : useCanopyWave
+              ? await handleCanopyWaveNonStream({
+                body: typedBody,
+                userId,
+                stripeCustomerId,
+                agentId,
+                fetch,
+                logger,
+                insertMessageBigquery,
+              })
+              : useFireworks
+                ? await handleFireworksNonStream({
+                  body: typedBody,
+                  userId,
+                  stripeCustomerId,
+                  agentId,
+                  fetch,
+                  logger,
+                  insertMessageBigquery,
+                })
+                : await handleOpenRouterNonStream({
+                  body: typedBody,
+                  userId,
+                  stripeCustomerId,
+                  agentId,
+                  openrouterApiKey,
+                  fetch,
+                  logger,
+                  insertMessageBigquery,
+                })
 
         trackEvent({
           event: AnalyticsEvent.CHAT_COMPLETIONS_GENERATION_STARTED,
@@ -426,7 +492,30 @@ export async function postChatCompletions(params: {
         return NextResponse.json(result)
       }
     } catch (error) {
+      let openrouterError: OpenRouterError | undefined
+      if (error instanceof OpenRouterError) {
+        openrouterError = error
+      }
+      let fireworksError: FireworksError | undefined
+      if (error instanceof FireworksError) {
+        fireworksError = error
+      }
+      let canopywaveError: CanopyWaveError | undefined
+      if (error instanceof CanopyWaveError) {
+        canopywaveError = error
+      }
+      let siliconflowError: SiliconFlowError | undefined
+      if (error instanceof SiliconFlowError) {
+        siliconflowError = error
+      }
+      let openaiError: OpenAIError | undefined
+      if (error instanceof OpenAIError) {
+        openaiError = error
+      }
 
+      // Log detailed error information for debugging
+      const errorDetails = openrouterError?.toJSON()
+      const providerLabel = siliconflowError ? 'SiliconFlow' : canopywaveError ? 'CanopyWave' : fireworksError ? 'Fireworks' : openaiError ? 'OpenAI' : 'OpenRouter'
       logger.error(
         {
           error: getErrorObject(error),
@@ -439,7 +528,14 @@ export async function postChatCompletions(params: {
           messageCount: Array.isArray((body as any)?.messages)
             ? (body as any).messages.length
             : 0,
-          messages: (body as any)?.messages,
+          messages: typedBody.messages,
+          providerStatusCode: (openrouterError ?? fireworksError ?? canopywaveError ?? siliconflowError ?? openaiError)?.statusCode,
+          providerStatusText: (openrouterError ?? fireworksError ?? canopywaveError ?? siliconflowError ?? openaiError)?.statusText,
+          openrouterErrorCode: errorDetails?.error?.code,
+          openrouterErrorType: errorDetails?.error?.type,
+          openrouterErrorMessage: errorDetails?.error?.message,
+          openrouterProviderName: errorDetails?.error?.metadata?.provider_name,
+          openrouterProviderRaw: errorDetails?.error?.metadata?.raw,
         },
         'Error with localhost request',
       )
@@ -455,6 +551,22 @@ export async function postChatCompletions(params: {
         logger,
       })
 
+      // Pass through provider-specific errors
+      if (error instanceof OpenRouterError) {
+        return NextResponse.json(error.toJSON(), { status: error.statusCode })
+      }
+      if (error instanceof FireworksError) {
+        return NextResponse.json(error.toJSON(), { status: error.statusCode })
+      }
+      if (error instanceof CanopyWaveError) {
+        return NextResponse.json(error.toJSON(), { status: error.statusCode })
+      }
+      if (error instanceof SiliconFlowError) {
+        return NextResponse.json(error.toJSON(), { status: error.statusCode })
+      }
+      if (error instanceof OpenAIError) {
+        return NextResponse.json(error.toJSON(), { status: error.statusCode })
+      }
 
       return NextResponse.json(
         { error: 'Failed to process request' },

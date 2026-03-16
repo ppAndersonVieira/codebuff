@@ -1,4 +1,5 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
+import { CHATGPT_OAUTH_ENABLED } from '@codebuff/common/constants/chatgpt-oauth'
 import { CLAUDE_OAUTH_ENABLED } from '@codebuff/common/constants/claude-oauth'
 import { runTerminalCommand } from '@codebuff/sdk'
 
@@ -17,6 +18,8 @@ import {
   parseCommandInput,
 } from './router-utils'
 import { handleClaudeAuthCode } from '../components/claude-connect-banner'
+import { handleChatGptAuthCode } from '../components/chatgpt-connect-banner'
+import { buildInterviewPrompt, buildPlanPrompt, buildReviewPrompt } from './prompt-builders'
 import { getProjectRoot } from '../project-files'
 import { useChatStore } from '../state/chat-store'
 import { trackEvent } from '../utils/analytics'
@@ -29,6 +32,7 @@ import { getSystemProcessEnv } from '../utils/env'
 import { getSystemMessage, getUserMessage } from '../utils/message-history'
 import {
   capturePendingAttachments,
+  hasProcessingFiles,
   hasProcessingImages,
   validateAndAddImage,
 } from '../utils/pending-attachments'
@@ -309,6 +313,54 @@ export async function routeUserPrompt(
     return
   }
 
+  // Handle plan mode input
+  if (inputMode === 'plan') {
+    if (!trimmed) return
+    saveToHistory(trimmed)
+    setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
+    setInputMode('default')
+    setInputFocused(true)
+    inputRef.current?.focus()
+
+    sendMessage({ content: buildPlanPrompt(trimmed), agentMode })
+    setTimeout(() => {
+      scrollToLatest()
+    }, 0)
+    return
+  }
+
+  // Handle interview mode input
+  if (inputMode === 'interview') {
+    if (!trimmed) return
+    saveToHistory(trimmed)
+    setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
+    setInputMode('default')
+    setInputFocused(true)
+    inputRef.current?.focus()
+
+    sendMessage({ content: buildInterviewPrompt(trimmed), agentMode })
+    setTimeout(() => {
+      scrollToLatest()
+    }, 0)
+    return
+  }
+
+  // Handle review mode input
+  if (inputMode === 'review') {
+    if (!trimmed) return
+    saveToHistory(trimmed)
+    setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
+    setInputMode('default')
+    setInputFocused(true)
+    inputRef.current?.focus()
+
+    sendMessage({ content: buildReviewPrompt('custom', trimmed), agentMode })
+    setTimeout(() => {
+      scrollToLatest()
+    }, 0)
+    return
+  }
+
   // Handle bash commands from queue (starts with '!')
   if (trimmed.startsWith('!') && trimmed.length > 1) {
     const command = trimmed.slice(1)
@@ -355,6 +407,28 @@ export async function routeUserPrompt(
         getSystemMessage(result.message),
       ])
     }
+    saveToHistory(trimmed)
+    setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
+    setInputMode('default')
+    return
+  }
+
+  if (inputMode === 'connect:chatgpt') {
+    if (!CHATGPT_OAUTH_ENABLED) {
+      setInputMode('default')
+      return
+    }
+
+    const code = trimmed
+    if (code) {
+      const result = await handleChatGptAuthCode(code)
+      setMessages((prev) => [
+        ...prev,
+        getUserMessage(trimmed),
+        getSystemMessage(result.message),
+      ])
+    }
+
     saveToHistory(trimmed)
     setInputValue({ text: '', cursorPosition: 0, lastEditDueToNav: false })
     setInputMode('default')
@@ -449,9 +523,9 @@ export async function routeUserPrompt(
 
   // Regular message or unknown slash command - send to agent
 
-  // Block sending if images are still processing
-  if (hasProcessingImages()) {
-    showClipboardMessage('processing images...', {
+  // Block sending if attachments are still processing
+  if (hasProcessingImages() || hasProcessingFiles()) {
+    showClipboardMessage('processing attachments...', {
       durationMs: 2000,
     })
     return

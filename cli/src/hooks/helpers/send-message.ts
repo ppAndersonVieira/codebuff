@@ -6,7 +6,9 @@ import { processBashContext } from '../../utils/bash-context-processor'
 import { markRunningAgentsAsCancelled } from '../../utils/block-operations'
 import {
   isOutOfCreditsError,
+  isFreeModeUnavailableError,
   OUT_OF_CREDITS_MESSAGE,
+  FREE_MODE_UNAVAILABLE_MESSAGE,
 } from '../../utils/error-handling'
 import { formatElapsedTime } from '../../utils/format-elapsed-time'
 import { processImagesForMessage } from '../../utils/image-processor'
@@ -24,6 +26,7 @@ import { usageQueryKeys } from '../use-usage-query'
 
 import type {
   PendingAttachment,
+  PendingFileAttachment,
   PendingImageAttachment,
   PendingTextAttachment,
 } from '../../types/store'
@@ -142,6 +145,10 @@ export const prepareUserMessage = async (params: {
     (a): a is PendingTextAttachment => a.kind === 'text',
   )
 
+  const pendingFileAttachments = allAttachments.filter(
+    (a): a is PendingFileAttachment => a.kind === 'file',
+  )
+
   // Append text attachments to the content
   let finalContent = content
   if (pendingTextAttachments.length > 0) {
@@ -151,6 +158,23 @@ export const prepareUserMessage = async (params: {
     finalContent = content
       ? `${content}\n\n${textAttachmentContent}`
       : textAttachmentContent
+  }
+
+  // Append file/folder attachments to the content
+  if (pendingFileAttachments.length > 0) {
+    const fileAttachmentContent = pendingFileAttachments
+      .filter((att) => att.status === 'ready')
+      .map((att) =>
+        att.isDirectory
+          ? `[Directory: ${att.path}]\n${att.content}`
+          : `[File: ${att.path}]\n${att.content}`,
+      )
+      .join('\n\n')
+    if (fileAttachmentContent) {
+      finalContent = finalContent
+        ? `${finalContent}\n\n${fileAttachmentContent}`
+        : fileAttachmentContent
+    }
   }
 
   const { attachments: imageAttachments, messageContent } = await processImagesForMessage({
@@ -170,8 +194,18 @@ export const prepareUserMessage = async (params: {
     charCount: att.charCount,
   }))
 
+  // Convert pending file attachments to stored file attachments for display
+  const fileAttachmentsForMessage = pendingFileAttachments
+    .filter((att) => att.status === 'ready')
+    .map((att) => ({
+      path: att.path,
+      filename: att.filename,
+      isDirectory: att.isDirectory,
+      note: att.note,
+    }))
+
   // Pass original content (not finalContent) for display, but finalContent goes to agent
-  const userMessage = getUserMessage(content, imageAttachments, textAttachmentsForMessage)
+  const userMessage = getUserMessage(content, imageAttachments, textAttachmentsForMessage, fileAttachmentsForMessage)
   const userMessageId = userMessage.id
   if (imageAttachments.length > 0) {
     userMessage.attachments = imageAttachments
@@ -336,6 +370,12 @@ export const handleRunCompletion = (params: {
       return
     }
 
+    if (isFreeModeUnavailableError(output)) {
+      updater.setError(FREE_MODE_UNAVAILABLE_MESSAGE)
+      finalizeAfterError()
+      return
+    }
+
     // Pass the raw error message to setError (displayed in UserErrorBanner without additional wrapper formatting)
     updater.setError(output.message ?? DEFAULT_RUN_OUTPUT_ERROR_MESSAGE)
 
@@ -415,6 +455,11 @@ export const handleRunError = (params: {
     updater.setError(OUT_OF_CREDITS_MESSAGE)
     useChatStore.getState().setInputMode('outOfCredits')
     invalidateActivityQuery(usageQueryKeys.current())
+    return
+  }
+
+  if (isFreeModeUnavailableError(error)) {
+    updater.setError(FREE_MODE_UNAVAILABLE_MESSAGE)
     return
   }
 

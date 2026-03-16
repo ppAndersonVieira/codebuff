@@ -76,18 +76,21 @@ export function createBase2(
       isMax && 'file-picker-max',
       'researcher-web',
       'researcher-docs',
-      isFree ? 'commander-lite' : 'commander',
+      'basher',
       isDefault && 'thinker',
       (isDefault || isMax) && ['opus-agent', 'gpt-5-agent'],
       isMax && 'thinker-best-of-n-opus',
       isDefault && 'editor',
       isMax && 'editor-multi-prompt',
+      'tmux-cli',
+      'browser-use',
       isFree && 'code-reviewer-lite',
       isDefault && 'code-reviewer',
       isMax && 'code-reviewer-multi-prompt',
       'tmux-cli',
       'atlassian',
       'pai-researcher',
+      'thinker-gpt',
       'context-pruner',
     ),
 
@@ -125,7 +128,7 @@ export function createBase2(
     - Create an impressive demonstration showcasing web development capabilities
 -  **Refactoring Awareness:** Whenever you modify an exported symbol like a function or class or variable, you should find and update all the references to it appropriately using the code_search tool.
 -  **Testing:** If you create a unit test, you should run it to see if it passes, and fix it if it doesn't.
--  **Package Management:** When adding new packages, use the commander agent to install the package rather than editing the package.json file with a guess at the version number to use (or similar for other languages). This way, you will be sure to have the latest version of the package. Do not install packages globally unless asked by the user (e.g. Don't run \`npm install -g <package-name>\`). Always try to use the package manager associated with the project (e.g. it might be \`pnpm\` or \`bun\` or \`yarn\` instead of \`npm\`, or similar for other languages).
+-  **Package Management:** When adding new packages, use the basher agent to install the package rather than editing the package.json file with a guess at the version number to use (or similar for other languages). This way, you will be sure to have the latest version of the package. Do not install packages globally unless asked by the user (e.g. Don't run \`npm install -g <package-name>\`). Always try to use the package manager associated with the project (e.g. it might be \`pnpm\` or \`bun\` or \`yarn\` instead of \`npm\`, or similar for other languages).
 -  **Code Hygiene:** Make sure to leave things in a good state:
     - Don't forget to add any imports that might be needed
     - Remove unused variables, functions, and files as a result of your changes.
@@ -141,8 +144,7 @@ Use the spawn_agents tool to spawn specialized agents to help you complete the u
 - **Sequence agents properly:** Keep in mind dependencies when spawning different agents. Don't spawn agents in parallel that depend on each other.
   ${buildArray(
         '- Spawn context-gathering agents (file pickers and web/docs researchers) before making edits. Use the code_search, list_directory, and glob tools directly for searching and exploring the codebase.',
-        isFree &&
-        '- Spawn the editor-lite agent to implement the changes after you have gathered all the context you need.',
+        isFree && 'Do not spawn the thinker-gpt agent, unless the user asks. Not everyone has connected their ChatGPT subscription to Codebuff to allow for it.',
         isDefault &&
         '- Spawn the editor agent to implement the changes after you have gathered all the context you need.',
         (isDefault || isMax) &&
@@ -153,7 +155,7 @@ Use the spawn_agents tool to spawn specialized agents to help you complete the u
         '- Implement code changes using the str_replace or write_file tools directly.',
         isFree &&
         '- Spawn a code-reviewer-lite to review the changes after you have implemented the changes.',
-        '- Spawn commanders sequentially if the second command depends on the the first.',
+        '- Spawn bashers sequentially if the second command depends on the the first.',
         isDefault &&
         '- Spawn a code-reviewer to review the changes after you have implemented the changes.',
         isMax &&
@@ -214,12 +216,12 @@ ${isDefault
       }
 
 ${isDefault
-        ? `[ You spawn a code-reviewer, a commander to typecheck the changes, and another commander to run tests, all in parallel ]`
+        ? `[ You spawn a code-reviewer, a basher to typecheck the changes, and another basher to run tests, all in parallel ]`
         : isFree
-          ? `[ You spawn a code-reviewer-lite to review the changes, and a commander to typecheck the changes, and another commander to run tests, all in parallel ]`
+          ? `[ You spawn a code-reviewer-lite to review the changes, and a basher to typecheck the changes, and another basher to run tests, all in parallel ]`
           : isMax
-            ? `[  You spawn a commander to typecheck the changes, and another commander to run tests, in parallel. Then, you spawn a code-reviewer-multi-prompt to review the changes. ]`
-            : '[ You spawn a commander to typecheck the changes and another commander to run tests, all in parallel ]'
+            ? `[  You spawn a basher to typecheck the changes, and another basher to run tests, in parallel. Then, you spawn a code-reviewer-multi-prompt to review the changes. ]`
+            : '[ You spawn a basher to typecheck the changes and another basher to run tests, all in parallel ]'
       }
 
 ${isDefault
@@ -228,7 +230,7 @@ ${isDefault
           ? `[ You fix the issues found by the code-reviewer-lite and type/test errors ]`
           : isMax
             ? `[ You fix the issues found by the code-reviewer-multi-prompt and type/test errors ]`
-            : '[ You fix the issues found by the type/test errors and spawn more commanders to confirm ]'
+            : '[ You fix the issues found by the type/test errors and spawn more bashers to confirm ]'
       }
 
 [ All tests & typechecks pass -- you write a very short final summary of the changes you made ]
@@ -299,7 +301,7 @@ ${PLACEHOLDER.GIT_CHANGES_PROMPT}
   }
 }
 
-const EXPLORE_PROMPT = `- Iteratively spawn file pickers, commanders, and web/docs researchers to gather context as needed. Use the code_search, list_directory, and glob tools directly for searching and exploring the codebase. The file-picker agent in particular is very useful to find relevant files -- try spawning multiple in parallel (say, 2-5) to explore different parts of the codebase. Use read_subtree if you need to grok a particular part of the codebase. Read all the relevant files using the read_files tool.`
+const EXPLORE_PROMPT = `- Iteratively spawn file pickers, bashers, and web/docs researchers to gather context as needed. Use the code_search, list_directory, and glob tools directly for searching and exploring the codebase. The file-picker agent in particular is very useful to find relevant files -- try spawning multiple in parallel (say, 2-5) to explore different parts of the codebase. Use read_subtree if you need to grok a particular part of the codebase. Read all the relevant files using the read_files tool.`
 
 function buildImplementationInstructionsPrompt({
   isSonnet,

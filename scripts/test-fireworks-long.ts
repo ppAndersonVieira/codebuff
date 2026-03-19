@@ -13,7 +13,7 @@
 export { }
 
 const FIREWORKS_BASE_URL = 'https://api.fireworks.ai/inference/v1'
-// const FIREWORKS_MODEL = 'accounts/james-65d217/deployments/qne3jo8v'
+// const FIREWORKS_MODEL = 'accounts/james-65d217/deployments/lnfid5h9'
 const FIREWORKS_MODEL = 'accounts/fireworks/models/minimax-m2p5'
 
 // Pricing constants — https://fireworks.ai/pricing
@@ -22,6 +22,9 @@ const CACHED_INPUT_COST_PER_TOKEN = 0.03 / 1_000_000
 const OUTPUT_COST_PER_TOKEN = 1.20 / 1_000_000
 
 const MAX_TOKENS = 100
+
+// Stable session ID so all turns route to the same machine for prompt caching
+const SESSION_ID = `bench-${Math.random().toString(36).slice(2, 10)}`
 
 function computeCost(usage: Record<string, unknown>): { cost: number; breakdown: string } {
   const inputTokens = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : 0
@@ -175,6 +178,7 @@ async function makeConversationStreamRequest(
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
+      'x-session-affinity': SESSION_ID,
     },
     body: JSON.stringify({
       model: FIREWORKS_MODEL,
@@ -220,15 +224,12 @@ async function makeConversationStreamRequest(
         const chunk = JSON.parse(raw)
         chunkCount++
         const delta = chunk.choices?.[0]?.delta
-        if (delta?.content) {
-          if (firstContentChunkTime === undefined) {
-            firstContentChunkTime = Date.now()
-            ttftMs = firstContentChunkTime - startTime
-          }
-          streamContent += delta.content
+        if (delta && firstContentChunkTime === undefined) {
+          firstContentChunkTime = Date.now()
+          ttftMs = firstContentChunkTime - startTime
         }
-        if (delta?.reasoning_content) {
-          // Skip reasoning content for this test
+        if (delta?.content) {
+          streamContent += delta.content
         }
         if (chunk.usage) streamUsage = chunk.usage
       } catch {
@@ -242,12 +243,9 @@ async function makeConversationStreamRequest(
     ? streamUsage.completion_tokens
     : 0
 
-  const generationTimeMs = firstContentChunkTime !== undefined
-    ? Date.now() - firstContentChunkTime
-    : elapsedMs
-  const outputTokensPerSec = generationTimeMs > 0
-    ? (outputTokens / (generationTimeMs / 1000))
-    : 0
+  const outputTokensPerSec = firstContentChunkTime !== undefined
+    ? (outputTokens / ((Date.now() - firstContentChunkTime) / 1000))
+    : undefined
 
   // Print compact per-turn stats
   const inputTokens = streamUsage && typeof streamUsage.prompt_tokens === 'number' ? streamUsage.prompt_tokens : 0
@@ -256,7 +254,7 @@ async function makeConversationStreamRequest(
   const cacheRate = inputTokens > 0 ? ((cachedTokens / inputTokens) * 100).toFixed(1) : '0.0'
   const cost = streamUsage ? `$${computeCost(streamUsage).cost.toFixed(6)}` : 'err'
 
-  console.log(`   ✅ ${(elapsedMs / 1000).toFixed(2)}s | TTFT ${ttftMs !== undefined ? (ttftMs / 1000).toFixed(2) + 's' : 'n/a'} | ${inputTokens} in (${cachedTokens} cached, ${cacheRate}%) | ${outputTokens} out @ ${outputTokensPerSec.toFixed(1)} tok/s | ${cost}`)
+  console.log(`   ✅ ${(elapsedMs / 1000).toFixed(2)}s | TTFT ${ttftMs !== undefined ? (ttftMs / 1000).toFixed(2) + 's' : 'n/a'} | ${inputTokens} in (${cachedTokens} cached, ${cacheRate}%) | ${outputTokens} out @ ${outputTokensPerSec !== undefined ? outputTokensPerSec.toFixed(1) + ' tok/s' : 'n/a'} | ${cost}`)
   console.log(`   Response: ${streamContent.slice(0, 150)}${streamContent.length > 150 ? '...' : ''}`)
   console.log()
 
@@ -277,6 +275,7 @@ async function main() {
   console.log(`Max tokens:  ${MAX_TOKENS} (low output per turn)`)
   console.log(`Turns:       ${TURN_PROMPTS.length}`)
   console.log(`Pricing:     $0.30/M input, $0.03/M cached, $1.20/M output`)
+  console.log(`Session ID:  ${SESSION_ID} (x-session-affinity header)`)
   console.log('='.repeat(60))
   console.log()
 

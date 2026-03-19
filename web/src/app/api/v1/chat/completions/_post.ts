@@ -70,6 +70,8 @@ import {
   OpenRouterError,
 } from '@/llm-api/openrouter'
 import { extractApiKeyFromHeader } from '@/util/auth'
+import { withDefaultProperties } from '@codebuff/common/analytics'
+import { checkFreeModeRateLimit } from './free-mode-rate-limiter'
 
 const FREE_MODE_ALLOWED_COUNTRIES = new Set([
   'US', 'CA',
@@ -85,7 +87,13 @@ function extractClientIp(req: NextRequest): string | undefined {
   return req.headers.get('x-real-ip') ?? undefined
 }
 
-function getCountryFromIp(clientIp: string | undefined): string | null {
+function getCountryCode(req: NextRequest): string | null {
+  const cfCountry = req.headers.get('cf-ipcountry')
+  if (cfCountry && cfCountry !== 'XX' && cfCountry !== 'T1') {
+    return cfCountry.toUpperCase()
+  }
+
+  const clientIp = extractClientIp(req)
   if (!clientIp) {
     return null
   }
@@ -146,7 +154,6 @@ export async function postChatCompletions(params: {
     req,
     getUserInfoFromApiKey,
     loggerWithContext,
-    trackEvent,
     getUserUsageData,
     getAgentRunFromId,
     fetch,
@@ -155,6 +162,7 @@ export async function postChatCompletions(params: {
     getUserPreferences,
   } = params
   let { logger } = params
+  let { trackEvent } = params
 
   try {
     // Parse request body
@@ -179,6 +187,12 @@ export async function postChatCompletions(params: {
     const typedBody = body as unknown as ChatCompletionRequestBody
     const bodyStream = typedBody.stream ?? false
     const runId = typedBody.codebuff_metadata?.run_id
+
+    // Check if the request is in FREE mode (costs 0 credits for allowed agent+model combos)
+    const costMode = typedBody.codebuff_metadata?.cost_mode
+    const isFreeModeRequest = isFreeMode(costMode)
+
+    trackEvent = withDefaultProperties(trackEvent, { freebuff: isFreeModeRequest })
 
     // Extract and validate API key
     const apiKey = extractApiKeyFromHeader(req)
@@ -246,14 +260,17 @@ export async function postChatCompletions(params: {
       logger,
     })
 
-    // Check if the request is in FREE mode (costs 0 credits for allowed agent+model combos)
-    const costMode = typedBody.codebuff_metadata?.cost_mode
-    const isFreeModeRequest = isFreeMode(costMode)
-
     // For free mode requests, check if user is in US or Canada
     if (isFreeModeRequest) {
+      const countryCode = getCountryCode(req)
       const clientIp = extractClientIp(req)
-      const countryCode = getCountryFromIp(clientIp)
+
+      const cfHeader = req.headers.get('cf-ipcountry')
+      const geoipResult = clientIp ? geoip.lookup(clientIp)?.country ?? null : null
+      logger.info(
+        { cfHeader, geoipResult, resolvedCountry: countryCode, clientIp: clientIp ? '[redacted]' : undefined },
+        'Free mode country detection',
+      )
 
       // If we couldn't determine country (null), allow the request (fail open)
       // This handles users behind VPNs, corporate proxies, or localhost
@@ -277,6 +294,7 @@ export async function postChatCompletions(params: {
           { status: 403 },
         )
       }
+
     }
 
     // Extract and validate agent run ID
@@ -336,6 +354,121 @@ export async function postChatCompletions(params: {
         { status: 400 },
       )
     }
+
+    // Rate limit free mode requests (after validation so invalid requests don't consume quota)
+    if (isFreeModeRequest) {
+      const rateLimitResult = checkFreeModeRateLimit(userId)
+      if (rateLimitResult.limited) {
+        const retryAfterSeconds = Math.ceil(rateLimitResult.retryAfterMs / 1000)
+        const resetTime = new Date(Date.now() + rateLimitResult.retryAfterMs).toISOString()
+        const resetCountdown = formatQuotaResetCountdown(resetTime)
+
+        trackEvent({
+          event: AnalyticsEvent.CHAT_COMPLETIONS_VALIDATION_ERROR,
+          userId,
+          properties: {
+            error: 'free_mode_rate_limited',
+            windowName: rateLimitResult.windowName,
+            retryAfterSeconds,
+          },
+          logger,
+        })
+
+        return NextResponse.json(
+          {
+            error: 'free_mode_rate_limited',
+            message: `Free mode rate limit exceeded (${rateLimitResult.windowName} limit). Try again ${resetCountdown}.`,
+          },
+          {
+            status: 429,
+            headers: { 'Retry-After': String(retryAfterSeconds) },
+          },
+        )
+      }
+    }
+
+    // For subscribers, ensure a block grant exists before processing the request.
+    // This is done AFTER validation so malformed requests don't start a new 5-hour block.
+    // When the function is provided, always include subscription credits in the balance:
+    // error/null results mean subscription grants have 0 balance, so including them is harmless.
+    const includeSubscriptionCredits = !!ensureSubscriberBlockGrant
+    if (ensureSubscriberBlockGrant) {
+      try {
+        const blockGrantResult = await ensureSubscriberBlockGrant({ userId, logger })
+        
+        // Check if user hit subscription limit and should be rate-limited
+        if (blockGrantResult && (isWeeklyLimitError(blockGrantResult) || isBlockExhaustedError(blockGrantResult))) {
+          // Fetch user's preference for falling back to a-la-carte credits
+          const preferences = getUserPreferences
+            ? await getUserPreferences({ userId, logger })
+            : { fallbackToALaCarte: true } // Default to allowing a-la-carte if no preference function
+          
+          if (!preferences.fallbackToALaCarte && !isFreeModeRequest) {
+            const resetTime = blockGrantResult.resetsAt
+            const resetCountdown = formatQuotaResetCountdown(resetTime.toISOString())
+            const limitType = isWeeklyLimitError(blockGrantResult) ? 'weekly' : '5-hour session'
+            
+            trackEvent({
+              event: AnalyticsEvent.CHAT_COMPLETIONS_INSUFFICIENT_CREDITS,
+              userId,
+              properties: {
+                reason: 'subscription_limit_no_fallback',
+                limitType,
+                fallbackToALaCarte: false,
+              },
+              logger,
+            })
+            
+            return NextResponse.json(
+              {
+                error: 'rate_limit_exceeded',
+                message: `Subscription ${limitType} limit reached. Your limit resets ${resetCountdown}. Enable "Continue with credits" in the CLI to use a-la-carte credits.`,
+              },
+              { status: 429 },
+            )
+          }
+          // If fallbackToALaCarte is true, continue to use a-la-carte credits
+          logger.info(
+            { userId, limitType: isWeeklyLimitError(blockGrantResult) ? 'weekly' : 'session' },
+            'Subscriber hit limit, falling back to a-la-carte credits',
+          )
+        }
+      } catch (error) {
+        logger.error(
+          { error: getErrorObject(error), userId },
+          'Error ensuring subscription block grant',
+        )
+        // Fail open: proceed with subscription credits included in balance check
+      }
+    }
+
+    // Fetch user credit data (includes subscription credits when block grant was ensured)
+    const {
+      balance: { totalRemaining },
+      nextQuotaReset,
+    } = await getUserUsageData({ userId, logger, includeSubscriptionCredits })
+
+    // Credit check
+    if (totalRemaining <= 0 && !isFreeModeRequest) {
+      trackEvent({
+        event: AnalyticsEvent.CHAT_COMPLETIONS_INSUFFICIENT_CREDITS,
+        userId,
+        properties: {
+          totalRemaining,
+          nextQuotaReset,
+        },
+        logger,
+      })
+      const resetCountdown = formatQuotaResetCountdown(nextQuotaReset)
+      return NextResponse.json(
+        {
+          message: `Out of credits. Please add credits at ${env.NEXT_PUBLIC_CODEBUFF_APP_URL}/usage. Your free credits reset ${resetCountdown}.`,
+        },
+        { status: 402 },
+      )
+    }
+
+    const openrouterApiKey = req.headers.get(BYOK_OPENROUTER_HEADER)
 
     // Handle streaming vs non-streaming
     // Set useLocalhost = true to route all requests to localhost:4141 (PicPay fork)

@@ -1,4 +1,5 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
+import { BYOK_OPENROUTER_HEADER } from '@codebuff/common/constants/byok'
 import { isFreeMode } from '@codebuff/common/constants/free-agents'
 
 import { getErrorObject } from '@codebuff/common/util/error'

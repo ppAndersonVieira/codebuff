@@ -93,6 +93,7 @@ export function createBase2(
       'sonar-agent',
       'hoop-agent',
       'dynatrace-agent',
+      'github-agent',
       'thinker-gpt',
       'context-pruner',
     ),

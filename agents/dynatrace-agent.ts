@@ -406,11 +406,31 @@ curl -s -X GET "{APPS_URL}/platform/classic/environment-api/v2/problems?problemS
       // process.env may not be available in sandbox context
     }
 
-    // Fall back to run_terminal_command if process.env didn't have it
+    // Fall back to run_terminal_command with robust multi-source detection
+    // Tries: 1) direct env var, 2) .env.local file, 3) .env file, 4) shell profiles
     if (!token) {
+      const tokenScript = [
+        'TOKEN="$DT_PLATFORM_TOKEN"',
+        'if [ -z "$TOKEN" ] && [ -f ".env.local" ]; then',
+        '  TOKEN=$(grep "^DT_PLATFORM_TOKEN=" .env.local 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^[\"\x27]//;s/[\"\x27]$//")',
+        'fi',
+        'if [ -z "$TOKEN" ] && [ -f ".env" ]; then',
+        '  TOKEN=$(grep "^DT_PLATFORM_TOKEN=" .env 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^[\"\x27]//;s/[\"\x27]$//")',
+        'fi',
+        'if [ -z "$TOKEN" ]; then',
+        '  for f in ~/.zshrc ~/.bashrc ~/.bash_profile ~/.zprofile ~/.profile; do',
+        '    if [ -f "$f" ]; then',
+        '      set +e; . "$f" >/dev/null 2>&1; set -e',
+        '      TOKEN="$DT_PLATFORM_TOKEN"',
+        '      [ -n "$TOKEN" ] && break',
+        '    fi',
+        '  done',
+        'fi',
+        'printf "%s" "$TOKEN"',
+      ].join('\n')
       const { toolResult: tokenResult } = yield {
         toolName: 'run_terminal_command',
-        input: { command: 'printf "%s" "$DT_PLATFORM_TOKEN"', timeout_seconds: 5 },
+        input: { command: tokenScript, timeout_seconds: 10 },
       }
       token = extractStdout(tokenResult).trim()
     }

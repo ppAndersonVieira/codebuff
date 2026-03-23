@@ -92,6 +92,7 @@ export function createBase2(
       'pai-researcher',
       'sonar-agent',
       'hoop-agent',
+      'dynatrace-agent',
       'thinker-gpt',
       'context-pruner',
     ),

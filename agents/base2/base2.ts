@@ -90,6 +90,8 @@ export function createBase2(
       'tmux-cli',
       'atlassian',
       'pai-researcher',
+      'sonar-agent',
+      'hoop-agent',
       'thinker-gpt',
       'context-pruner',
     ),

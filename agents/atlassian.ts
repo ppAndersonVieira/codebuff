@@ -5,7 +5,7 @@ import type { AgentDefinition } from './types/agent-definition'
 const definition: AgentDefinition = {
     id: 'atlassian',
     publisher,
-    model: 'anthropic/claude-haiku-4.5',
+    model: 'anthropic/claude-sonnet-4.6',
     displayName: 'Atlassian',
     spawnerPrompt: `Expert at querying and managing Jira issues, Confluence pages, projects, sprints, and workflows via MCP.
 

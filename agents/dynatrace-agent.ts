@@ -398,13 +398,24 @@ curl -s -X GET "{APPS_URL}/platform/classic/environment-api/v2/problems?problemS
     logger.info('Target environment: ' + env + ' (' + envConfig.label + ')')
 
     // Step 1: Read DT_PLATFORM_TOKEN from environment
-    const { toolResult: tokenResult } = yield {
-      toolName: 'run_terminal_command',
-      input: { command: 'printf "%s" "$DT_PLATFORM_TOKEN"', timeout_seconds: 5 },
+    // Try process.env first (available when Bun loads .env.local)
+    let token = ''
+    try {
+      token = (typeof process !== 'undefined' && process.env?.DT_PLATFORM_TOKEN) || ''
+    } catch {
+      // process.env may not be available in sandbox context
     }
 
-    const envToken = extractStdout(tokenResult).trim()
-    const token = envToken || DEFAULT_PLATFORM_TOKEN
+    // Fall back to run_terminal_command if process.env didn't have it
+    if (!token) {
+      const { toolResult: tokenResult } = yield {
+        toolName: 'run_terminal_command',
+        input: { command: 'printf "%s" "$DT_PLATFORM_TOKEN"', timeout_seconds: 5 },
+      }
+      token = extractStdout(tokenResult).trim()
+    }
+
+    token = token || DEFAULT_PLATFORM_TOKEN
 
     if (!token) {
       logger.info('DT_PLATFORM_TOKEN not set')

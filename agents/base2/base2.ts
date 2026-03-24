@@ -94,6 +94,7 @@ export function createBase2(
       'hoop-agent',
       'dynatrace-agent',
       'github-agent',
+      'slack-agent',
       'thinker-gpt',
       'context-pruner',
     ),

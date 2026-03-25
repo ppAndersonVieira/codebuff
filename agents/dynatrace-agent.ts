@@ -29,6 +29,16 @@ function detectEnvironment(text: string): 'PRD' | 'QA' {
   return 'PRD'
 }
 
+const SMART_LOG_MESSAGE_BLOCK = `\
+| fieldsAdd __attributes_array = array(msg,message,event,description,details)
+| fieldsAdd __log_message_attr = arrayFirst(iCollectArray(if(__attributes_array[]!="", __attributes_array[])))
+| parse content, "JSON:'__parsed_json'", parsingPrerequisite: isNull(__log_message_attr) and startsWith(content, "{")
+| fieldsAdd __json_fields_array = array(__parsed_json[\`message\`],__parsed_json[\`@message\`],__parsed_json[\`msg\`],__parsed_json[\`@mt\`],__parsed_json[\`@m\`],__parsed_json[\`body\`],__parsed_json[\`eventName\`],__parsed_json[\`textPayload\`][\`message\`],__parsed_json[\`textPayload\`],__parsed_json[\`protoPayload\`][\`@type\`],__parsed_json[\`protoPayload\`][\`message\`],__parsed_json[\`jsonPayload\`][\`message\`],__parsed_json[\`messageObject\`][\`message\`],__parsed_json[\`properties\`][\`message\`],__parsed_json[\`properties\`][\`statusMessage\`],__parsed_json[\`properties\`][\`status\`][\`additionalDetails\`],__parsed_json[\`properties\`][\`log\`],__parsed_json[\`properties\`][\`Log\`],__parsed_json[\`properties\`][\`Result\`],__parsed_json[\`content\`][\`detail\`][\`event\`],__parsed_json[\`Body\`][\`Value\`])
+| fieldsAdd \`Log message\` = toString(coalesce(__log_message_attr,arrayFirst(iCollectArray(if(__json_fields_array[]!="", __json_fields_array[])))))
+| parse coalesce(\`Log message\`, content), "(DATA (' '|SPACE))? ('msg'|'message'|'Message') '=' DQS:'__log_message_kv'", parsingPrerequisite: matchesValue(coalesce(\`Log message\`, content), {"*msg=*","*message=*","*Message=*"}, caseSensitive:true)
+| fieldsAdd \`Log message\` = coalesce(__log_message_kv, \`Log message\`)
+| fieldsRemove __parsed_json, __log_message_attr, __log_message_kv, __attributes_array, __json_fields_array`
+
 const definition: AgentDefinition = {
   id: 'dynatrace-agent',
   publisher,
@@ -85,18 +95,44 @@ Toda chamada curl DEVE incluir o header de autenticação **exatamente como forn
 3. Redirecione stdin com \`< /dev/null\` em todas as chamadas curl.
 4. **DQL é o método principal** de consulta — use-o para logs, spans, events, metrics, entities.
 5. Use a API clássica v2 (via apps URL) apenas para endpoints que DQL não cobre bem (detalhes de problemas por ID, vulnerabilidades).
-6. **SEMPRE inclua filtros de bucket e namespace** em consultas DQL de logs e spans: \`| filter dt.system.bucket == "secmkp"\` e \`| filter contains(k8s.namespace.name, "consortium")\`.
+6. **SEMPRE inclua filtros de bucket e namespace** em consultas DQL de logs: \`| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false) AND contains(content, "<TERMO>", caseSensitive: false)\`. Para spans: \`| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false)\`.
+7. **SEMPRE inclua o bloco Smart Log Message** em consultas DQL de logs (veja seção abaixo).
 
 # 🎯 Configuração Padrão — Bucket e Namespace
 
-**TODAS as consultas DQL de logs e spans DEVEM incluir os seguintes filtros por padrão:**
+O valor padrão do namespace é \`"consortium"\`. Se o usuário pedir logs de um serviço específico (ex: "logs do ms-consortium-integration"), ajuste o filtro \`kubernetes.namespace_labels.name\` para o nome correspondente (ex: \`"consortium-integration"\`). Caso contrário, mantenha \`"consortium"\` como padrão.
+
+**TODAS as consultas DQL de logs DEVEM usar o seguinte padrão de filtro (em uma única linha com AND):**
 
 \`\`\`
-| filter dt.system.bucket == "secmkp"
-| filter contains(k8s.namespace.name, "consortium")
+| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false) AND contains(content, "<TERMO_DE_BUSCA>", caseSensitive: false)
 \`\`\`
 
-Esses filtros garantem que as consultas sejam direcionadas ao bucket correto (secmkp) e ao namespace do consórcio. Só omita esses filtros se o usuário **explicitamente** solicitar outro bucket ou namespace.
+O trecho \`contains(content, "...", caseSensitive: false)\` é a parte variável — ajuste conforme o que se deseja pesquisar.
+
+Filtros adicionais (ex: serviço, log level) podem ser adicionados como linhas \`| filter\` separadas após o filtro principal.
+
+Para **spans**, use:
+\`\`\`
+| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false)
+\`\`\`
+
+# 📋 Padrão de Query de Logs — Smart Log Message
+
+**TODAS as consultas DQL de logs DEVEM incluir o bloco Smart Log Message** abaixo, que transforma o conteúdo bruto dos logs em mensagens legíveis. Este bloco deve ser inserido APÓS os filtros e ANTES do \`| sort\`:
+
+\`\`\`
+${SMART_LOG_MESSAGE_BLOCK}
+\`\`\`
+
+### Template completo de query de logs:
+
+\`\`\`
+fetch logs, scanLimitGBytes: 1
+| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false) AND contains(content, "<TERMO_DE_BUSCA>", caseSensitive: false)
+${SMART_LOG_MESSAGE_BLOCK}
+| sort timestamp desc
+\`\`\`
 
 # ⚠️ CONSCIÊNCIA DE CUSTOS
 
@@ -108,7 +144,7 @@ Esses filtros garantem que as consultas sejam direcionadas ao bucket correto (se
 - Comece com consultas mais restritivas e amplie apenas se necessário
 - Use \`| limit\` para limitar resultados quando possível
 - Filtre por entidade específica quando o usuário mencionar um serviço
-- Use filtros por bucket quando apropriado: \`| filter dt.system.bucket == "secmkp"\`
+- Use filtros por bucket quando apropriado: \`matchesValue(dt.system.bucket, "secmkp")\`
 
 # Endpoints da API
 
@@ -161,42 +197,45 @@ Todos os endpoints usam a APPS_URL e AUTH_HEADER fornecidos no contexto.
 
 # Exemplos de DQL
 
-## Logs de um serviço (últimas 2h)
+## Logs com filtro por conteúdo (padrão completo)
 \`\`\`
 fetch logs, scanLimitGBytes: 1
-| filter dt.system.bucket == "secmkp"
-| filter contains(k8s.namespace.name, "consortium")
-| filter dt.entity.service == "SERVICE-XXXXXXXX"
+| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false) AND contains(content, "error", caseSensitive: false)
+${SMART_LOG_MESSAGE_BLOCK}
 | sort timestamp desc
-| limit 50
 \`\`\`
 
-## Logs com filtro por bucket e conteúdo
+## Logs de um serviço específico
 \`\`\`
 fetch logs, scanLimitGBytes: 1
-| filter dt.system.bucket == "secmkp"
-| filter contains(k8s.namespace.name, "consortium")
-| filter contains(content, "error")
-| sort timestamp desc
-| limit 100
-\`\`\`
-
-## Logs por nome de serviço (sem ID)
-\`\`\`
-fetch logs, scanLimitGBytes: 1
-| filter dt.system.bucket == "secmkp"
-| filter contains(k8s.namespace.name, "consortium")
+| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false) AND contains(content, "error", caseSensitive: false)
 | filter contains(dt.entity.service.name, "ms-payments")
-| filter loglevel == "ERROR"
+${SMART_LOG_MESSAGE_BLOCK}
 | sort timestamp desc
-| limit 50
+\`\`\`
+
+## Logs por nível de erro
+\`\`\`
+fetch logs, scanLimitGBytes: 1
+| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false) AND contains(content, "exception", caseSensitive: false)
+| filter loglevel == "ERROR"
+${SMART_LOG_MESSAGE_BLOCK}
+| sort timestamp desc
+\`\`\`
+
+## Logs por entity ID
+\`\`\`
+fetch logs, scanLimitGBytes: 1
+| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false) AND contains(content, "timeout", caseSensitive: false)
+| filter dt.entity.service == "SERVICE-XXXXXXXX"
+${SMART_LOG_MESSAGE_BLOCK}
+| sort timestamp desc
 \`\`\`
 
 ## Spans/traces com erro
 \`\`\`
 fetch spans, scanLimitGBytes: 1
-| filter dt.system.bucket == "secmkp"
-| filter contains(k8s.namespace.name, "consortium")
+| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false)
 | filter status_code == "ERROR"
 | sort timestamp desc
 | limit 50
@@ -206,8 +245,7 @@ fetch spans, scanLimitGBytes: 1
 ## Spans de um serviço específico
 \`\`\`
 fetch spans, scanLimitGBytes: 1
-| filter dt.system.bucket == "secmkp"
-| filter contains(k8s.namespace.name, "consortium")
+| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false)
 | filter contains(service.name, "ms-payments")
 | sort timestamp desc
 | limit 50
@@ -290,7 +328,7 @@ fetch security.events, scanLimitGBytes: 1
 Para investigar um incidente:
 1. Liste problemas ativos via DQL ou API clássica
 2. Identifique entidades afetadas
-3. Consulte logs via DQL com filtros por bucket e timeframe curto
+3. Consulte logs via DQL com o padrão completo (filtro + Smart Log Message + sort)
 4. Correlacione com spans/traces via DQL
 5. Verifique métricas relevantes
 
@@ -315,8 +353,23 @@ curl -s -X POST "{APPS_URL}/platform/storage/query/v1/query:execute" \\
   -H "Authorization: Bearer {TOKEN}" \\
   -H "Content-Type: application/json" \\
   -H "Accept: application/json" \\
-  -d '{"query": "fetch logs, scanLimitGBytes: 1 | filter dt.system.bucket == \\"secmkp\\" | filter contains(k8s.namespace.name, \\"consortium\\") | filter contains(content, \\"error\\") | sort timestamp desc | limit 50", "maxResultRecords": 1000, "fetchTimeoutSeconds": 60}' < /dev/null 2>&1
+  -d '{"query": "<DQL>", "maxResultRecords": 1000, "fetchTimeoutSeconds": 60}' < /dev/null 2>&1
 \`\`\`
+
+## ⚠️ Padrão obrigatório para queries de logs
+
+Toda query DQL de logs DEVE seguir este padrão completo:
+
+\`\`\`
+fetch logs, scanLimitGBytes: 1
+| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false) AND contains(content, "<TERMO>", caseSensitive: false)
+${SMART_LOG_MESSAGE_BLOCK}
+| sort timestamp desc
+\`\`\`
+
+- O trecho \`contains(content, "...", caseSensitive: false)\` é a parte variável — ajuste conforme a busca do usuário.
+- Filtros adicionais (serviço, log level) são adicionados como linhas \`| filter\` separadas, logo após o filtro principal.
+- O bloco Smart Log Message (fieldsAdd/parse/fieldsRemove) é OBRIGATÓRIO e deve ser incluído entre os filtros e o \`| sort\`.
 
 ## Template de curl para API Clássica v2
 
@@ -327,10 +380,12 @@ curl -s -X GET "{APPS_URL}/platform/classic/environment-api/v2/problems?problemS
 \`\`\`
 
 ## Regras importantes
-- Para DQL: SEMPRE inclua \`scanLimitGBytes\` e timeframes curtos (2h-12h) para reduzir custos
+- Para DQL de logs: SEMPRE inclua o bloco Smart Log Message e \`scanLimitGBytes\`
+- Use timeframes curtos (2h-12h) para reduzir custos
 - Se o usuário pedir logs ou métricas sem especificar timeframe, use as últimas 2h como padrão
 - Se uma consulta falhar, tente uma abordagem alternativa ou reporte o erro claramente
 - Inclua IDs de entidades (SERVICE-XXX, HOST-XXX) nos resultados quando disponíveis
+- Se o usuário pedir logs de um serviço específico, ajuste o namespace no filtro \`kubernetes.namespace_labels.name\` (ex: ms-consortium-integration → \`"consortium-integration"\`). O padrão é \`"consortium"\`
 - Use \`timeout_seconds: 30\` para API clássica, \`timeout_seconds: 60\` para DQL
 
 ## Exemplos por cenário
@@ -340,7 +395,23 @@ curl -s -X GET "{APPS_URL}/platform/classic/environment-api/v2/problems?problemS
 → Ou API clássica: GET .../problems?problemSelector=status(%22OPEN%22)
 
 **"Mostra os logs de erro do ms-payments"**
-→ DQL: \`fetch logs, scanLimitGBytes: 1 | filter dt.system.bucket == "secmkp" | filter contains(k8s.namespace.name, "consortium") | filter contains(dt.entity.service.name, "ms-payments") | filter loglevel == "ERROR"\`
+→ DQL com padrão completo:
+\`\`\`
+fetch logs, scanLimitGBytes: 1
+| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false) AND contains(content, "error", caseSensitive: false)
+| filter contains(dt.entity.service.name, "ms-payments")
+${SMART_LOG_MESSAGE_BLOCK}
+| sort timestamp desc
+\`\`\`
+
+**"Buscar logs com CLIENT ERROR"**
+→ DQL com padrão completo:
+\`\`\`
+fetch logs, scanLimitGBytes: 1
+| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false) AND contains(content, "[CLIENT ERROR]", caseSensitive: false)
+${SMART_LOG_MESSAGE_BLOCK}
+| sort timestamp desc
+\`\`\`
 
 **"Quais vulnerabilidades existem?"**
 → API clássica: GET .../securityProblems
@@ -349,7 +420,7 @@ curl -s -X GET "{APPS_URL}/platform/classic/environment-api/v2/problems?problemS
 → DQL: \`fetch dt.entity.service | fields entity.name, id | limit 100\`
 
 **"Mostra os spans com erro do ms-checkout"**
-→ DQL: \`fetch spans, scanLimitGBytes: 1 | filter dt.system.bucket == "secmkp" | filter contains(k8s.namespace.name, "consortium") | filter contains(service.name, "ms-checkout") | filter status_code == "ERROR"\`
+→ DQL: \`fetch spans, scanLimitGBytes: 1 | filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false) | filter contains(service.name, "ms-checkout") | filter status_code == "ERROR"\`
 
 **"Mostra os deploys recentes"**
 → DQL: \`fetch events, scanLimitGBytes: 1 | filter event.type == "CUSTOM_DEPLOYMENT" | sort timestamp desc\`
@@ -412,10 +483,10 @@ curl -s -X GET "{APPS_URL}/platform/classic/environment-api/v2/problems?problemS
       const tokenScript = [
         'TOKEN="$DT_PLATFORM_TOKEN"',
         'if [ -z "$TOKEN" ] && [ -f ".env.local" ]; then',
-        '  TOKEN=$(grep "^DT_PLATFORM_TOKEN=" .env.local 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^[\"\x27]//;s/[\"\x27]$//")',
+        '  TOKEN=$(grep "^DT_PLATFORM_TOKEN=" .env.local 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^[\"\\x27]//;s/[\"\\x27]$//")',
         'fi',
         'if [ -z "$TOKEN" ] && [ -f ".env" ]; then',
-        '  TOKEN=$(grep "^DT_PLATFORM_TOKEN=" .env 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^[\"\x27]//;s/[\"\x27]$//")',
+        '  TOKEN=$(grep "^DT_PLATFORM_TOKEN=" .env 2>/dev/null | head -1 | cut -d= -f2- | sed "s/^[\"\\x27]//;s/[\"\\x27]$//")',
         'fi',
         'if [ -z "$TOKEN" ]; then',
         '  for f in ~/.zshrc ~/.bashrc ~/.bash_profile ~/.zprofile ~/.profile; do',
@@ -600,13 +671,16 @@ curl -s -X GET "{APPS_URL}/platform/classic/environment-api/v2/problems?problemS
 
     contextMessage +=
       '### Dicas\n' +
-      '- **SEMPRE** filtre por bucket secmkp e namespace consortium: `| filter dt.system.bucket == "secmkp"` e `| filter contains(k8s.namespace.name, "consortium")`\n' +
+      '- **SEMPRE** filtre logs com: `| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false) AND contains(content, "<TERMO>", caseSensitive: false)`\n' +
+      '- **SEMPRE** inclua o bloco Smart Log Message (fieldsAdd/parse/fieldsRemove) em queries de logs\n' +
+      '- Para spans use: `| filter matchesValue(dt.system.bucket, "secmkp") AND contains(kubernetes.namespace_labels.name, "consortium", caseSensitive: false)`\n' +
       '- Use `timeout_seconds: 30` para API clássica, `timeout_seconds: 60` para DQL\n' +
       '- SEMPRE inclua `< /dev/null 2>&1` no final dos comandos curl\n' +
       '- Para DQL: SEMPRE inclua `scanLimitGBytes: 1` e timeframes curtos (2h-12h)\n' +
       '- URL-encode os parâmetros: `status("OPEN")` → `status(%22OPEN%22)`\n' +
       '- Prefira DQL para consultas de logs, spans, events, metrics e entidades\n' +
-      '- Use API clássica v2 para detalhes de problemas por ID ou vulnerabilidades'
+      '- Use API clássica v2 para detalhes de problemas por ID ou vulnerabilidades\n' +
+      '- Se o usuário pedir logs de um serviço específico, ajuste o namespace no filtro (ex: ms-consortium-integration → "consortium-integration")'
 
     yield {
       toolName: 'add_message',

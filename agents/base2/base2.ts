@@ -87,14 +87,7 @@ export function createBase2(
       isFree && 'code-reviewer-lite',
       isDefault && 'code-reviewer',
       isMax && 'code-reviewer-multi-prompt',
-      'tmux-cli',
-      'atlassian',
-      'pai-researcher',
-      'sonar-agent',
-      'hoop-agent',
-      'dynatrace-agent',
-      'github-agent',
-      'slack-agent',
+      'agent-monitor',
       'thinker-gpt',
       'context-pruner',
     ),
@@ -168,6 +161,7 @@ Use the spawn_agents tool to spawn specialized agents to help you complete the u
       ).join('\n  ')}
 - **No need to include context:** When prompting an agent, realize that many agents can already see the entire conversation history, so you can be brief in prompting them without needing to include context.
 - **Never spawn the context-pruner agent:** This agent is spawned automatically for you and you don't need to spawn it yourself.
+- **Use agent-monitor for infrastructure agents:** All interactions with infrastructure agents (Dynatrace, GitHub, Atlassian, Slack, SonarQube, Hoop, pAI) must go through the \`agent-monitor\` agent — spawn it instead of the individual agents. It coordinates the appropriate subagent and accumulates learnings to improve future responses.
 
 # Codebuff Meta-information
 

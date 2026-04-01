@@ -1,7 +1,8 @@
 import { execSync } from 'child_process'
 import fs from 'fs'
-import os from 'os'
 import path from 'path'
+
+import { generatePrompt } from './llm'
 
 export interface CommitTask {
   sha: string
@@ -13,6 +14,77 @@ export interface CommitTask {
 }
 
 const MAX_DIFF_CHARS = 200_000
+
+/**
+ * Commit message patterns that indicate trivial/automated commits not worth
+ * running agents on. Saves ~10 agent+judge invocations per skipped commit.
+ */
+const TRIVIAL_COMMIT_PATTERNS = [
+  /^bump\b.*\bversion\b/i,
+  /^v?\d+\.\d+\.\d+$/,           // version-only messages like "1.0.635"
+  /^release\s+v?\d+/i,
+  /^chore\(release\)/i,
+  /^update\s+(change|changelog)/i,
+  /^merge\s+(branch|pull request)/i,
+]
+
+/**
+ * Returns true if a commit is trivial and should be skipped.
+ * Checks commit message patterns and whether only package.json version fields changed.
+ */
+function isTrivialCommit(
+  message: string,
+  filesChanged: string[],
+  diff: string,
+): boolean {
+  const firstLine = message.split('\n')[0].trim()
+
+  // Check message patterns
+  if (TRIVIAL_COMMIT_PATTERNS.some((p) => p.test(firstLine))) return true
+
+  // Single package.json change that only touches "version" field
+  if (
+    filesChanged.length === 1 &&
+    filesChanged[0].endsWith('package.json') &&
+    diff.length < 1000
+  ) {
+    const addedLines = diff
+      .split('\n')
+      .filter((l) => l.startsWith('+') && !l.startsWith('+++'))
+    const removedLines = diff
+      .split('\n')
+      .filter((l) => l.startsWith('-') && !l.startsWith('---'))
+    const allVersionChanges =
+      [...addedLines, ...removedLines].every((l) =>
+        /^\s*[+-]\s*"version"/.test(l),
+      )
+    if (allVersionChanges) return true
+  }
+
+  return false
+}
+
+/**
+ * Files that add noise to diffs without useful signal.
+ * Lockfiles are huge and auto-generated — agents shouldn't replicate them.
+ */
+const NOISE_FILE_PATTERNS = [
+  'bun.lock',
+  'bun.lockb',
+  'package-lock.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'Gemfile.lock',
+  'Cargo.lock',
+  'poetry.lock',
+  'composer.lock',
+  'go.sum',
+]
+
+function isNoiseFile(filePath: string): boolean {
+  const basename = filePath.split('/').pop() || ''
+  return NOISE_FILE_PATTERNS.includes(basename)
+}
 
 /**
  * Get a list of commits from the repo, oldest first.
@@ -68,19 +140,24 @@ export function getCommitInfo(
       encoding: 'utf-8',
     }).trim()
 
-    // Get diff
-    const diff = execSync(`git diff ${parentSha} ${sha}`, {
-      cwd: repoPath,
-      encoding: 'utf-8',
-      maxBuffer: 10 * 1024 * 1024,
-    })
-
-    // Get files changed
+    // Get files changed (filter out noise files like lockfiles)
     const filesOutput = execSync(`git diff --name-only ${parentSha} ${sha}`, {
       cwd: repoPath,
       encoding: 'utf-8',
     }).trim()
-    const filesChanged = filesOutput ? filesOutput.split('\n') : []
+    const allFiles = filesOutput ? filesOutput.split('\n') : []
+    const filesChanged = allFiles.filter((f) => !isNoiseFile(f))
+
+    // Get diff, excluding noise files (lockfiles etc.)
+    const excludeArgs = NOISE_FILE_PATTERNS.map((p) => `':!${p}'`).join(' ')
+    const diff = execSync(
+      `git diff ${parentSha} ${sha} -- . ${excludeArgs}`,
+      {
+        cwd: repoPath,
+        encoding: 'utf-8',
+        maxBuffer: 10 * 1024 * 1024,
+      },
+    )
 
     return { parentSha, message, diff, filesChanged }
   } catch {
@@ -124,6 +201,7 @@ function readFilesAtParent(
 
   for (const filePath of filesChanged) {
     if (totalSize >= maxTotalSize) break
+    if (isNoiseFile(filePath)) continue
 
     const content = readFileAtCommit(repoPath, parentSha, filePath)
     if (content != null && content.length > 0) {
@@ -203,28 +281,14 @@ ${filesSection}## Diff
 ${diff}
 \`\`\``
 
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'evalbuff-promptgen-'))
-  const promptFile = path.join(tmpDir, 'PROMPT_GEN.md')
-
   try {
-    fs.writeFileSync(promptFile, `${PROMPT_GEN_SYSTEM}\n\n---\n\n${userPrompt}`)
-
-    const output = execSync(
-      `claude --dangerously-skip-permissions -p "Read ${promptFile} and follow all instructions. Respond with ONLY the task prompt text."`,
-      {
-        encoding: 'utf-8',
-        timeout: 2 * 60 * 1000,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        maxBuffer: 10 * 1024 * 1024,
-      },
-    ).trim()
-
+    // Use API directly — faster than spawning Claude CLI (~3s vs ~15s)
+    // and avoids CLAUDE.md/AGENTS.md context pollution
+    const output = await generatePrompt(PROMPT_GEN_SYSTEM, userPrompt)
     return output || message
   } catch {
     // Fallback to the commit message itself
     return message
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true })
   }
 }
 
@@ -239,14 +303,26 @@ export async function buildCommitTask(
   const info = getCommitInfo(repoPath, sha)
   if (!info) return null
 
+  // Skip trivial/automated commits (version bumps, releases, etc.)
+  if (isTrivialCommit(info.message, info.filesChanged, info.diff)) {
+    console.log(`Skipping ${sha.slice(0, 8)}: trivial commit (${info.message.split('\n')[0].slice(0, 50)})`)
+    return null
+  }
+
   // Skip commits with diffs that exceed our limit
   if (info.diff.length > MAX_DIFF_CHARS) {
     console.log(`Skipping ${sha.slice(0, 8)}: diff too large (${info.diff.length} chars)`)
     return null
   }
 
-  // Skip commits with no meaningful code changes
+  // Skip commits with no meaningful code changes (after filtering noise files)
   if (info.filesChanged.length === 0) {
+    return null
+  }
+
+  // Skip commits where the diff is empty after filtering noise files
+  if (info.diff.trim().length === 0) {
+    console.log(`Skipping ${sha.slice(0, 8)}: only noise files changed (lockfiles, etc.)`)
     return null
   }
 

@@ -2,8 +2,9 @@ import { execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 
+import { CodebuffClient, loadLocalAgents } from '@codebuff/sdk'
+
 import { buildCommitTask, getCommitList } from './commit-task-generator'
-import { runCliAgent } from './cli-runner'
 import {
   getCriteriaForLevel,
   loadCriteria,
@@ -22,6 +23,7 @@ import {
   appendLogEntry,
   generateMorningReport,
 } from './morning-report'
+import { CodebuffRunner } from './runners/codebuff'
 import { withTestRepo } from './test-repo-utils'
 
 import type { QualityCriteria } from './criteria'
@@ -58,7 +60,8 @@ function saveState(statePath: string, state: EvalbuffState): void {
 
 export interface EvalbuffOptions {
   repoPath: string
-  agentCommand: string
+  agentCommand?: string // deprecated — kept for backward compat with CLI runner
+  agentId: string // codebuff agent ID, e.g. 'base2-free-evals'
   parallelism: number
   maxCostUsd: number
   agentTimeoutMs: number
@@ -89,10 +92,13 @@ interface ParallelRunResult {
 }
 
 async function runAgentsInParallel(opts: {
-  agentCommand: string
+  client: CodebuffClient
+  agentId: string
+  agentDefinitions: any[]
   prompt: string
   repoPath: string
   repoUrl: string
+  localRepoPath?: string
   parentSha: string
   initCommand?: string
   groundTruthDiff?: string
@@ -103,9 +109,12 @@ async function runAgentsInParallel(opts: {
   docsSourcePath: string // path to the repo where docs/ lives
 }): Promise<ParallelRunResult> {
   const {
-    agentCommand,
+    client,
+    agentId,
+    agentDefinitions,
     prompt,
     repoUrl,
+    localRepoPath,
     parentSha,
     initCommand,
     groundTruthDiff,
@@ -118,20 +127,53 @@ async function runAgentsInParallel(opts: {
 
   const runOne = async (idx: number) => {
     return withTestRepo(
-      { repoUrl, parentSha, initCommand },
+      { repoUrl, localRepoPath, parentSha, initCommand },
       async (repoDir) => {
         // Copy current docs into the test repo
         copyDocsIntoRepo(docsSourcePath, repoDir)
 
-        console.log(`  [Run ${idx + 1}/${parallelism}] Running agent...`)
-        const result = await runCliAgent({
-          command: agentCommand,
-          prompt,
+        console.log(`  [Run ${idx + 1}/${parallelism}] Running agent via SDK...`)
+        const shortSha = parentSha.slice(0, 8)
+        const runner = new CodebuffRunner({
           cwd: repoDir,
-          timeoutMs: agentTimeoutMs,
+          client,
+          agentId,
+          localAgentDefinitions: agentDefinitions,
+          printEvents: false,
+          commitId: shortSha,
+          parentSha,
         })
 
-        const costEstimate = result.durationMs * 0.00001
+        let result: Awaited<ReturnType<typeof runner.run>>
+        try {
+          result = await runner.run(prompt)
+        } catch (runError) {
+          // Infrastructure errors (503s, timeouts) should not produce a 0 score.
+          // Return a sentinel so the caller can detect and handle it.
+          const errMsg = runError instanceof Error ? runError.message : String(runError)
+          console.warn(`  [Run ${idx + 1}/${parallelism}] Agent failed: ${errMsg.slice(0, 200)}`)
+          return {
+            score: -1, // sentinel: infrastructure failure
+            diff: '',
+            agentTrace: `Agent error: ${errMsg}`,
+            judging: {
+              analysis: `Agent failed: ${errMsg.slice(0, 500)}`,
+              strengths: [],
+              weaknesses: ['Agent failed due to infrastructure error'],
+              e2eTestsPerformed: [],
+              completionScore: -1,
+              codeQualityScore: -1,
+              e2eScore: -1,
+              overallScore: -1,
+            },
+            costEstimate: 0,
+          }
+        }
+
+        // Serialize trace steps as JSON for the doc writer to analyze
+        const agentTrace = result.steps
+          .map((step) => JSON.stringify(step))
+          .join('\n')
 
         console.log(`  [Run ${idx + 1}/${parallelism}] Judging...`)
         const judging = await judgeTaskResult({
@@ -139,7 +181,7 @@ async function runAgentsInParallel(opts: {
           agentDiff: result.diff,
           groundTruthDiff,
           repoDir,
-          error: result.exitCode !== 0 ? result.stderr : undefined,
+          error: result.diff === '' ? 'Agent made no changes' : undefined,
           criteria,
           reviewerAgents,
         })
@@ -147,21 +189,40 @@ async function runAgentsInParallel(opts: {
         return {
           score: judging.overallScore,
           diff: result.diff,
-          agentTrace: result.stdout,
+          agentTrace,
           judging,
-          costEstimate,
+          costEstimate: result.totalCostUsd,
         }
       },
     )
   }
 
-  const results = await Promise.all(
+  const allResults = await Promise.all(
     Array.from({ length: parallelism }, (_, i) => runOne(i)),
   )
 
+  // Filter out infrastructure failures (score === -1)
+  const results = allResults.filter((r) => r.score >= 0)
+  const totalCost = allResults.reduce((a, r) => a + r.costEstimate, 0)
+
+  if (results.length === 0) {
+    console.warn(`  All ${parallelism} agent runs failed (infrastructure errors)`)
+    return {
+      avgScore: -1,
+      scores: [],
+      diffs: [],
+      agentTraces: allResults.map((r) => r.agentTrace),
+      judgings: [],
+      costEstimate: totalCost,
+    }
+  }
+
+  if (results.length < allResults.length) {
+    console.warn(`  ${allResults.length - results.length}/${allResults.length} runs failed, using ${results.length} valid results`)
+  }
+
   const scores = results.map((r) => r.score)
   const avgScore = scores.reduce((a, b) => a + b, 0) / scores.length
-  const totalCost = results.reduce((a, r) => a + r.costEstimate, 0)
 
   return {
     avgScore,
@@ -173,6 +234,13 @@ async function runAgentsInParallel(opts: {
   }
 }
 
+/**
+ * Copy docs into a test repo and commit them so they don't appear in the agent's diff.
+ *
+ * Without this commit, `git diff HEAD` after the agent runs would include
+ * the pre-copied docs as "new files", corrupting the diff attribution —
+ * the judge would penalize or credit the agent for docs it didn't create.
+ */
 function copyDocsIntoRepo(
   sourceRepoPath: string,
   targetRepoPath: string,
@@ -182,11 +250,31 @@ function copyDocsIntoRepo(
   const targetDocsDir = path.join(targetRepoPath, 'docs')
   const targetAgentsMd = path.join(targetRepoPath, 'AGENTS.md')
 
+  let copied = false
   if (fs.existsSync(sourceDocsDir)) {
     fs.cpSync(sourceDocsDir, targetDocsDir, { recursive: true })
+    copied = true
   }
   if (fs.existsSync(sourceAgentsMd)) {
     fs.cpSync(sourceAgentsMd, targetAgentsMd)
+    copied = true
+  }
+
+  // Commit the docs so they become part of HEAD — otherwise git diff HEAD
+  // after the agent runs will include these docs as agent-created changes.
+  if (copied) {
+    try {
+      execSync('git add docs/ AGENTS.md 2>/dev/null; git add -u docs/ AGENTS.md 2>/dev/null', {
+        cwd: targetRepoPath,
+        stdio: 'ignore',
+      })
+      execSync('git commit -m "evalbuff: pre-load docs" --allow-empty', {
+        cwd: targetRepoPath,
+        stdio: 'ignore',
+      })
+    } catch {
+      // If nothing to commit, that's fine
+    }
   }
 }
 
@@ -200,12 +288,16 @@ function copyDocsIntoRepo(
 async function improveDocs(opts: {
   taskId: string
   prompt: string
+  commitMessage?: string
   repoPath: string
   repoUrl: string
+  localRepoPath?: string
   parentSha: string
   initCommand?: string
   groundTruthDiff?: string
-  agentCommand: string
+  client: CodebuffClient
+  agentId: string
+  agentDefinitions: any[]
   parallelism: number
   agentTimeoutMs: number
   criteria: QualityCriteria
@@ -213,19 +305,23 @@ async function improveDocs(opts: {
 }): Promise<{
   finalScore: number
   baselineScore: number
-  docsKept: Array<{ path: string; reasoning: string }>
-  docsRejected: Array<{ path: string; reasoning: string }>
+  docsKept: Array<{ path: string; reasoning: string; scoreBefore: number; scoreAfter: number }>
+  docsRejected: Array<{ path: string; reasoning: string; scoreBefore: number; scoreAfter: number }>
   totalCost: number
 }> {
   const {
     taskId,
     prompt,
+    commitMessage,
     repoPath,
     repoUrl,
+    localRepoPath,
     parentSha,
     initCommand,
     groundTruthDiff,
-    agentCommand,
+    client,
+    agentId,
+    agentDefinitions,
     parallelism,
     agentTimeoutMs,
     criteria,
@@ -233,16 +329,19 @@ async function improveDocs(opts: {
   } = opts
 
   let totalCost = 0
-  const docsKept: Array<{ path: string; reasoning: string }> = []
-  const docsRejected: Array<{ path: string; reasoning: string }> = []
+  const docsKept: Array<{ path: string; reasoning: string; scoreBefore: number; scoreAfter: number }> = []
+  const docsRejected: Array<{ path: string; reasoning: string; scoreBefore: number; scoreAfter: number }> = []
 
   // Step 1: Baseline run
   console.log(`\n  Running ${parallelism} agents in parallel (baseline)...`)
   const baseline = await runAgentsInParallel({
-    agentCommand,
+    client,
+    agentId,
+    agentDefinitions,
     prompt,
     repoPath,
     repoUrl,
+    localRepoPath,
     parentSha,
     initCommand,
     groundTruthDiff,
@@ -257,9 +356,41 @@ async function improveDocs(opts: {
   let currentScore = baseline.avgScore
   console.log(`  Baseline score: ${currentScore.toFixed(1)}/10 (scores: ${baseline.scores.map((s) => s.toFixed(1)).join(', ')})`)
 
+  // All agents failed — skip this task entirely
+  if (currentScore < 0) {
+    console.log(`  All agent runs failed, skipping task.`)
+    return {
+      finalScore: 0,
+      baselineScore: 0,
+      docsKept: [],
+      docsRejected: [],
+      totalCost,
+    }
+  }
+
+  // Early stopping: if baseline is already excellent, skip improvement loop
+  const EARLY_STOP_THRESHOLD = 9.0
+  if (currentScore >= EARLY_STOP_THRESHOLD) {
+    console.log(`  Baseline score ${currentScore.toFixed(1)} >= ${EARLY_STOP_THRESHOLD}, skipping improvement loop.`)
+    return {
+      finalScore: currentScore,
+      baselineScore: baseline.avgScore,
+      docsKept: [],
+      docsRejected: [],
+      totalCost: totalCost,
+    }
+  }
+
   // Step 2: Iterative doc improvement
   let improving = true
+  const MAX_IMPROVEMENT_ITERATIONS = 5
+  let iterationCount = 0
   while (improving) {
+    iterationCount++
+    if (iterationCount > MAX_IMPROVEMENT_ITERATIONS) {
+      console.log(`  Hit max improvement iterations (${MAX_IMPROVEMENT_ITERATIONS}), stopping.`)
+      break
+    }
     // Pick the worst-scoring judging for analysis
     const worstIdx = baseline.judgings.reduce(
       (minIdx, j, idx, arr) =>
@@ -273,6 +404,10 @@ async function improveDocs(opts: {
     const currentDocs = readCurrentDocs(repoPath)
 
     console.log(`  Analyzing for doc improvements...`)
+    const editHistory = [
+      ...docsKept.map((d) => ({ ...d, outcome: 'accepted' as const })),
+      ...docsRejected.map((d) => ({ ...d, outcome: 'rejected' as const })),
+    ]
     const docSuggestion = await analyzeFailure({
       judgeResult: worstJudging,
       taskPrompt: prompt,
@@ -280,6 +415,8 @@ async function improveDocs(opts: {
       agentTrace: worstTrace,
       groundTruthDiff,
       currentDocs,
+      editHistory,
+      commitMessage,
     })
 
     if (!docSuggestion) {
@@ -302,10 +439,13 @@ async function improveDocs(opts: {
     // Re-run with new docs
     console.log(`  Re-running ${parallelism} agents with new docs...`)
     const rerun = await runAgentsInParallel({
-      agentCommand,
+      client,
+      agentId,
+      agentDefinitions,
       prompt,
       repoPath,
       repoUrl,
+      localRepoPath,
       parentSha,
       initCommand,
       groundTruthDiff,
@@ -317,14 +457,30 @@ async function improveDocs(opts: {
     })
     totalCost += rerun.costEstimate
 
+    // If re-run failed entirely, don't count it as a rejection
+    if (rerun.avgScore < 0) {
+      console.log(`  Re-run failed (infrastructure errors), reverting doc and retrying later.`)
+      if (previousContent !== null) {
+        applyDocEdit(repoPath, docSuggestion.suggestedDocPath, previousContent)
+      } else {
+        revertDocEdit(repoPath, docSuggestion.suggestedDocPath)
+      }
+      break
+    }
+
     const comparison = compareScores(currentScore, rerun.avgScore)
     console.log(`  New score: ${rerun.avgScore.toFixed(1)}/10 (${comparison}) (scores: ${rerun.scores.map((s) => s.toFixed(1)).join(', ')})`)
 
-    if (comparison === 'improved') {
-      console.log(`  Keeping doc: ${docSuggestion.suggestedDocPath}`)
+    if (comparison === 'improved' || comparison === 'same') {
+      // 'improved' = clear signal the doc helps
+      // 'same' = within noise range — keep it (benefit of the doubt)
+      const reason = comparison === 'improved' ? 'score improved' : 'within noise range, keeping'
+      console.log(`  Keeping doc: ${docSuggestion.suggestedDocPath} (${reason})`)
       docsKept.push({
         path: docSuggestion.suggestedDocPath,
         reasoning: docSuggestion.reasoning,
+        scoreBefore: currentScore,
+        scoreAfter: rerun.avgScore,
       })
 
       // Commit the doc change
@@ -347,10 +503,12 @@ async function improveDocs(opts: {
 
       // Continue loop — try to improve more
     } else {
-      console.log(`  Rejecting doc: ${docSuggestion.suggestedDocPath} (score didn't improve)`)
+      console.log(`  Rejecting doc: ${docSuggestion.suggestedDocPath} (score dropped significantly)`)
       docsRejected.push({
         path: docSuggestion.suggestedDocPath,
         reasoning: docSuggestion.reasoning,
+        scoreBefore: currentScore,
+        scoreAfter: rerun.avgScore,
       })
 
       // Revert the doc edit — restore previous content if it existed
@@ -380,7 +538,7 @@ async function improveDocs(opts: {
 export async function runLearnMode(options: LearnOptions): Promise<void> {
   const {
     repoPath,
-    agentCommand,
+    agentId,
     parallelism,
     maxCostUsd,
     agentTimeoutMs,
@@ -397,6 +555,13 @@ export async function runLearnMode(options: LearnOptions): Promise<void> {
 
   const state = loadState(statePath)
   let criteria = loadCriteria(defaultCriteriaPath)
+
+  // Initialize codebuff SDK client and load agent definitions
+  const client = new CodebuffClient({ cwd: repoPath })
+  const agentsDir = path.resolve(__dirname, '../../agents')
+  const loadedAgents = await loadLocalAgents({ agentsPath: agentsDir })
+  const agentDefinitions = Object.values(loadedAgents)
+  console.log(`Loaded ${agentDefinitions.length} agent definitions from ${agentsDir}`)
 
   // Get the repo's remote URL
   let repoUrl: string
@@ -421,7 +586,7 @@ export async function runLearnMode(options: LearnOptions): Promise<void> {
   console.log(`Evalbuff Learn Mode:`)
   console.log(`  Repo: ${repoPath}`)
   console.log(`  Remote: ${repoUrl}`)
-  console.log(`  Agent: ${agentCommand}`)
+  console.log(`  Agent: ${agentId}`)
   console.log(`  Parallelism: ${parallelism}`)
   console.log(`  Reviewer agents: ${(reviewerAgents || ['claude', 'codex']).join(', ')}`)
   console.log(`  Commits to process: ${commits.length}`)
@@ -477,12 +642,16 @@ export async function runLearnMode(options: LearnOptions): Promise<void> {
       const result = await improveDocs({
         taskId: shortSha,
         prompt: task.prompt,
+        commitMessage: task.message,
         repoPath,
         repoUrl,
+        localRepoPath: repoPath,
         parentSha: task.parentSha,
         initCommand,
         groundTruthDiff: task.diff,
-        agentCommand,
+        client,
+        agentId,
+        agentDefinitions,
         parallelism,
         agentTimeoutMs,
         criteria,
@@ -549,7 +718,7 @@ export async function runLearnMode(options: LearnOptions): Promise<void> {
 export async function runPromptMode(options: PromptOptions): Promise<void> {
   const {
     repoPath,
-    agentCommand,
+    agentId,
     parallelism,
     maxCostUsd,
     agentTimeoutMs,
@@ -564,6 +733,12 @@ export async function runPromptMode(options: PromptOptions): Promise<void> {
     criteriaPath || path.join(repoPath, 'evalbuff-criteria.json')
 
   const criteria = loadCriteria(defaultCriteriaPath)
+
+  // Initialize codebuff SDK client and load agent definitions
+  const client = new CodebuffClient({ cwd: repoPath })
+  const agentsDir = path.resolve(__dirname, '../../agents')
+  const loadedAgents = await loadLocalAgents({ agentsPath: agentsDir })
+  const agentDefinitions = Object.values(loadedAgents)
 
   let repoUrl: string
   try {
@@ -586,7 +761,7 @@ export async function runPromptMode(options: PromptOptions): Promise<void> {
   console.log(`Evalbuff Prompt Mode:`)
   console.log(`  Repo: ${repoPath}`)
   console.log(`  Remote: ${repoUrl}`)
-  console.log(`  Agent: ${agentCommand}`)
+  console.log(`  Agent: ${agentId}`)
   console.log(`  Parallelism: ${parallelism}`)
   console.log(`  Reviewer agents: ${(reviewerAgents || ['claude', 'codex']).join(', ')}`)
   console.log(`  Max cost: $${maxCostUsd}`)
@@ -613,10 +788,13 @@ export async function runPromptMode(options: PromptOptions): Promise<void> {
       prompt,
       repoPath,
       repoUrl,
+      localRepoPath: repoPath,
       parentSha: headSha,
       initCommand,
       // No ground truth diff in prompt mode
-      agentCommand,
+      client,
+      agentId,
+      agentDefinitions,
       parallelism,
       agentTimeoutMs,
       criteria,
@@ -666,7 +844,7 @@ async function main() {
   const hasArg = (name: string): boolean => args.includes(`--${name}`)
 
   const repoPath = getArg('repo')
-  const agentCommand = getArg('agent', 'codebuff --agent base2-free')
+  const agentId = getArg('agent', 'base2-free-evals')
   const parallelism = parseInt(getArg('parallelism', '5'))
   const maxCostUsd = parseFloat(getArg('max-cost', '100'))
   const agentTimeoutMs = parseInt(getArg('agent-timeout', '300000'))
@@ -685,7 +863,7 @@ async function main() {
     await runPromptMode({
       mode: 'prompt',
       repoPath,
-      agentCommand,
+      agentId,
       parallelism,
       maxCostUsd,
       agentTimeoutMs,
@@ -700,7 +878,7 @@ async function main() {
     await runLearnMode({
       mode: 'learn',
       repoPath,
-      agentCommand,
+      agentId,
       parallelism,
       maxCostUsd,
       agentTimeoutMs,

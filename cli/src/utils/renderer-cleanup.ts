@@ -12,6 +12,7 @@ let terminalStateReset = false
  * These are written directly to stdout to ensure they're sent even if the renderer is in a bad state.
  *
  * Sequences:
+ * - \x1b[?1049l: Exit alternate screen buffer (restores main screen)
  * - \x1b[?1000l: Disable X10 mouse mode
  * - \x1b[?1002l: Disable button event mouse mode
  * - \x1b[?1003l: Disable any-event mouse mode (all motion tracking)
@@ -20,7 +21,8 @@ let terminalStateReset = false
  * - \x1b[?2004l: Disable bracketed paste mode
  * - \x1b[?25h: Show cursor (safety measure)
  */
-const TERMINAL_RESET_SEQUENCES =
+export const TERMINAL_RESET_SEQUENCES =
+  '\x1b[?1049l' + // Exit alternate screen buffer
   '\x1b[?1000l' + // Disable X10 mouse mode
   '\x1b[?1002l' + // Disable button event mouse mode
   '\x1b[?1003l' + // Disable any-event mouse mode (all motion)
@@ -42,11 +44,20 @@ function resetTerminalState(): void {
   terminalStateReset = true
 
   try {
+    if (process.stdin.isTTY && process.stdin.setRawMode) {
+      process.stdin.setRawMode(false)
+    }
+  } catch {
+    // Ignore errors - stdin may already be closed
+  }
+  try {
     // Reset terminal title to default
     resetTerminalTitle()
     // Write directly to stdout - this is synchronous and will complete
     // before the process exits, ensuring the terminal is reset
-    process.stdout.write(TERMINAL_RESET_SEQUENCES)
+    if (process.stdout.isTTY) {
+      process.stdout.write(TERMINAL_RESET_SEQUENCES)
+    }
   } catch {
     // Ignore errors - stdout may already be closed
   }
@@ -122,21 +133,23 @@ export function installProcessCleanupHandlers(cliRenderer: CliRenderer): void {
 
   // uncaughtException - Safety net for unhandled errors
   process.on('uncaughtException', (error) => {
+    cleanup() // Exit alt screen FIRST so error output is visible on the main screen
     try {
       console.error('Uncaught exception:', error)
     } catch {
       // Ignore logging errors
     }
-    cleanupAndExit(1)
+    process.exit(1)
   })
 
   // unhandledRejection - Safety net for unhandled promise rejections
   process.on('unhandledRejection', (reason) => {
+    cleanup() // Exit alt screen FIRST so error output is visible on the main screen
     try {
       console.error('Unhandled rejection:', reason)
     } catch {
       // Ignore logging errors
     }
-    cleanupAndExit(1)
+    process.exit(1)
   })
 }

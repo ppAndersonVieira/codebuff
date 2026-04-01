@@ -14,8 +14,11 @@
     "run": "bun run src/run-evalbuff.ts"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^2.0.50",
     "@codebuff/common": "workspace:*",
     "@codebuff/sdk": "workspace:*",
+    "ai": "^5.0.0",
+    "openai": "^6.33.0",
     "zod": "^4.2.1"
   }
 }

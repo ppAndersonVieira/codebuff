@@ -270,6 +270,22 @@ gh api repos/{owner}/{repo}/actions/runs --jq '.workflow_runs[:10]' < /dev/null 
 gh status < /dev/null 2>&1
 \`\`\`
 
+## Conteúdo de arquivos (para inspeção de código)
+
+\`\`\`bash
+# Buscar repositório por nome
+gh search repos {nome} --owner PicPay < /dev/null 2>&1
+
+# Obter conteúdo de um arquivo (base64 decode)
+gh api repos/PicPay/{repo}/contents/{path} --jq '.content' < /dev/null 2>&1 | base64 -d
+
+# Listar arquivos de um diretório
+gh api repos/PicPay/{repo}/contents/{dir_path} --jq '.[].name' < /dev/null 2>&1
+
+# Buscar código em repositório
+gh search code "query" --repo PicPay/{repo} < /dev/null 2>&1
+\`\`\`
+
 # Estratégia de Consulta
 
 Para análise completa de uma PR:
@@ -336,6 +352,14 @@ gh repo set-default <owner/repo>
 Use os comandos do \`gh\` CLI conforme documentado no system prompt.
 
 **Timeout:** Use \`timeout_seconds: 30\` para a maioria dos comandos, \`timeout_seconds: 60\` para operações que envolvem logs de workflow ou diffs grandes.
+
+## Fluxo de implementação de bug fix
+
+Para implementar correção de bug identificada em ticket Jira:
+1. Extrair nome do serviço e classe afetada da descrição do ticket
+2. Buscar repositório no GitHub: \`gh search repos {nome} --owner PicPay\`
+3. Obter código-fonte dos arquivos relevantes: \`gh api repos/PicPay/{repo}/contents/{path} --jq '.content' | base64 -d\`
+4. Propor alterações com base no código lido
 
 ## Operações destrutivas
 

@@ -91,6 +91,8 @@ Quando o usuário enviar uma URL do SonarCloud, extraia os parâmetros da query 
 | \`pullRequest\` | Número do Pull Request | \`--pull-request <pr>\` |
 | \`branch\` | Nome da branch | \`--branch <branch>\` |
 
+**Padrão de project keys no SonarCloud PicPay:** O nome do projeto no SonarCloud segue o padrão \`PicPay_ms-{nome-do-repo}\` (ex: \`PicPay_ms-consortium-orchestrator\`).
+
 ### Passo 3: Executar consultas
 
 Use exclusivamente o CLI \`sonar\` para todas as consultas.
@@ -343,6 +345,11 @@ Para uma análise completa de PR ou branch:
 1. Busque **issues** via CLI (\`sonar list issues --format json\`)
 2. Se necessário, busque issues em formato legível (\`sonar list issues --format toon\`)
 3. Apresente um resumo consolidado
+
+Para análise de PR específica (dual-context):
+1. Busque issues **específicas da PR** usando \`--pull-request <pr>\` para ver o que a PR introduziu
+2. Opcionalmente, busque issues **do branch principal (main)** para visão geral do projeto
+3. Diferencie claramente entre issues novas da PR e issues pré-existentes
 
 Para análise de um arquivo específico:
 - Use \`sonar verify --file <path>\` para obter issues do arquivo

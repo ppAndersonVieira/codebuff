@@ -221,7 +221,7 @@ SHOW TABLES;
 SELECT COUNT(*) FROM orders WHERE DATE(created_at) = CURDATE();
 \`\`\`
 
-## Paths conhecidos de runbooks PRD\n\nPara consultas em PRD, use os seguintes paths de runbooks no reposit\u00f3rio \`github.com/PicPay/database-automation-runbooks\`:\n\n| Servi\u00e7o | Path do runbook |\n|---|---|\n| Consortium / Cons\u00f3rcio | \`insurance/atlas-mgo-consortium-prd/\` |\n\nAo montar o \`file_name\` na chamada \`POST /api/runbooks/exec\`, use o path acima como prefixo. Exemplo: \`insurance/atlas-mgo-consortium-prd/<nome-do-runbook>.runbook.js\`\n\n## Segurança
+## Paths conhecidos de runbooks PRD\n\nPara consultas em PRD, use os seguintes paths de runbooks no reposit\u00f3rio \`github.com/PicPay/database-automation-runbooks\`:\n\n| Servi\u00e7o | Path do runbook |\n|---|---|\n| Consortium / Cons\u00f3rcio | \`insurance/atlas-mgo-consortium-prd/\` |\n\nAo montar o \`file_name\` na chamada \`POST /api/runbooks/exec\`, use o path acima como prefixo. Exemplo: \`insurance/atlas-mgo-consortium-prd/<nome-do-runbook>.runbook.js\`\n\n## Runbooks conhecidos\n\n| Runbook | Path | Parâmetros | Descrição |\n|---|---|---|---|\n| admin_GetIndexes | \`insurance/atlas-mgo-consortium-prd/admin_GetIndexes.runbook.js\` | \`collection_name\` (string, required) | Verificar índices de qualquer collection MongoDB |\n\n## Segurança
 
 - **NUNCA** execute comandos destrutivos (DELETE, DROP, TRUNCATE, etc.) sem confirmação explícita do usuário
 - Prefira connections RO para consultas de leitura
@@ -303,7 +303,7 @@ echo '<query>' > /tmp/hoop_query.tmp && hoop exec <connection> -f /tmp/hoop_quer
 
 **Timeout:** Use \`timeout_seconds: 60\` para queries simples, \`timeout_seconds: 90\` para complexas.
 
-## Paths de runbooks PRD conhecidos\n\nPara consultas de **consortium/cons\u00f3rcio em PRD**, os runbooks ficam no path:\n- \`insurance/atlas-mgo-consortium-prd/<nome>.runbook.js\`\n\nUse este path como \`file_name\` na chamada \`POST /api/runbooks/exec\`.\n\n## Convenção de nomes de connections
+## Paths de runbooks PRD conhecidos\n\nPara consultas de **consortium/cons\u00f3rcio em PRD**, os runbooks ficam no path:\n- \`insurance/atlas-mgo-consortium-prd/<nome>.runbook.js\`\n\nUse este path como \`file_name\` na chamada \`POST /api/runbooks/exec\`.\n\n## Runbooks conhecidos\n\n| Runbook | Path | Parâmetros | Descrição |\n|---|---|---|---|\n| admin_GetIndexes | \`insurance/atlas-mgo-consortium-prd/admin_GetIndexes.runbook.js\` | \`collection_name\` (string, required) | Verificar índices de qualquer collection MongoDB |\n\n## Convenção de nomes de connections
 
 - **MongoDB Atlas:** \`ATLAS-MGO-<SERVICE>-<ENV>-<MODE>\` (ex: ATLAS-MGO-CONSORTIUM-PRD-RO)
 - **MySQL RDS:** \`AWS-RDS-<SERVICE>-<REGION>-<ENV>-<MODE>\` (ex: AWS-RDS-CONSORTIUM-USE1-PRD-RO)

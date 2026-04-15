@@ -424,6 +424,7 @@ export type ModelName =
   | 'moonshotai/kimi-k2.5'
   | 'moonshotai/kimi-k2.5:nitro'
   | 'z-ai/glm-5'
+  | 'z-ai/glm-5.1'
   | 'z-ai/glm-4.6'
   | 'z-ai/glm-4.6:nitro'
   | 'z-ai/glm-4.7'
@@ -431,6 +432,7 @@ export type ModelName =
   | 'z-ai/glm-4.7-flash'
   | 'z-ai/glm-4.7-flash:nitro'
   | 'minimax/minimax-m2.5'
+  | 'minimax/minimax-m2.7'
   | (string & {})
 
 import type { ToolName, GetToolParams } from './tools'

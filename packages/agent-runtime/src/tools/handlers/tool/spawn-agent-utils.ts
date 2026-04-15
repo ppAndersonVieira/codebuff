@@ -5,6 +5,7 @@ import { generateCompactId } from '@codebuff/common/util/string'
 
 import { loopAgentSteps } from '../../../run-agent-step'
 import { getAgentTemplate } from '../../../templates/agent-registry'
+import { formatValueForError } from '../../../util/format-value'
 import {
   filterUnfinishedToolCalls,
   withSystemTags,
@@ -222,7 +223,7 @@ export function validateAgentInput(
     const result = inputSchema.prompt.safeParse(prompt ?? '')
     if (!result.success) {
       throw new Error(
-        `Invalid prompt for agent ${agentType}: ${JSON.stringify(result.error.issues, null, 2)}`,
+        `Invalid prompt for agent ${agentType}: ${JSON.stringify(result.error.issues, null, 2)}\n\nOriginal prompt value:\n${formatValueForError(prompt ?? '')}`,
       )
     }
   }
@@ -232,7 +233,7 @@ export function validateAgentInput(
     const result = inputSchema.params.safeParse(params ?? {})
     if (!result.success) {
       throw new Error(
-        `Invalid params for agent ${agentType}: ${JSON.stringify(result.error.issues, null, 2)}`,
+        `Invalid params for agent ${agentType}: ${JSON.stringify(result.error.issues, null, 2)}\n\nOriginal params value:\n${formatValueForError(params ?? {})}`,
       )
     }
   }

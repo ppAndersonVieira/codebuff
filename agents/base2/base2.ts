@@ -28,7 +28,7 @@ export function createBase2(
 
   return {
     publisher,
-    model: isFree ? 'minimax/minimax-m2.5' : 'anthropic/claude-opus-4.6',
+    model: isFree ? 'z-ai/glm-5.1' : 'anthropic/claude-opus-4.6',
     providerOptions: isFree ? {
       data_collection: 'deny',
     } : {
@@ -58,7 +58,7 @@ export function createBase2(
       'spawn_agents',
       'read_files',
       'read_subtree',
-      !isFast && !isFree && 'write_todos',
+      !isFast && 'write_todos',
       !isFast && !noAskUser && 'suggest_followups',
       'str_replace',
       'write_file',
@@ -67,13 +67,13 @@ export function createBase2(
       !noAskUser && 'ask_user',
       'skill',
       'set_output',
-      'code_search',
       'list_directory',
       'glob',
     ),
     spawnableAgents: buildArray(
       !isMax && 'file-picker',
       isMax && 'file-picker-max',
+      'code-searcher',
       'researcher-web',
       'researcher-docs',
       'basher',
@@ -88,6 +88,7 @@ export function createBase2(
       isDefault && 'code-reviewer',
       isMax && 'code-reviewer-multi-prompt',
       'agent-monitor',
+      isFree && 'thinker-with-files-gemini',
       'thinker-gpt',
       'context-pruner',
     ),
@@ -124,15 +125,15 @@ export function createBase2(
     - Add thoughtful details like hover states, transitions, and micro-interactions
     - Apply design principles: hierarchy, contrast, balance, and movement
     - Create an impressive demonstration showcasing web development capabilities
--  **Refactoring Awareness:** Whenever you modify an exported symbol like a function or class or variable, you should find and update all the references to it appropriately using the code_search tool.
+-  **Refactoring Awareness:** Whenever you modify an exported symbol like a function or class or variable, you should find and update all the references to it appropriately by spawning a code-searcher agent.
 -  **Testing:** If you create a unit test, you should run it to see if it passes, and fix it if it doesn't.
 -  **Package Management:** When adding new packages, use the basher agent to install the package rather than editing the package.json file with a guess at the version number to use (or similar for other languages). This way, you will be sure to have the latest version of the package. Do not install packages globally unless asked by the user (e.g. Don't run \`npm install -g <package-name>\`). Always try to use the package manager associated with the project (e.g. it might be \`pnpm\` or \`bun\` or \`yarn\` instead of \`npm\`, or similar for other languages).
 -  **Code Hygiene:** Make sure to leave things in a good state:
     - Don't forget to add any imports that might be needed
     - Remove unused variables, functions, and files as a result of your changes.
     - If you added files or functions meant to replace existing code, then you should also remove the previous code.
-- **Minimal new code comments:** Do not add many new comments while writing code, unless they were preexisting comments (keep those!) or unless the user asks you to add comments!
-- **Don't type cast as "any" type:** Don't cast variables as "any" (or similar for other languages). This is a bad practice as it leads to bugs. The code is more robust when every expression is typed.
+- **Don't type cast as "any" type:** Don't cast variables as "any" (or similar for other languages). This is a bad practice as it leads to bugs. Exception: when the value can truly be any type.
+- **Prefer str_replace to write_file:** str_replace is more efficient for targeted changes and gives more feedback. Only use write_file for new files or when necessary to rewrite the entire file.
 
 # Spawning agents guidelines
 
@@ -141,8 +142,9 @@ Use the spawn_agents tool to spawn specialized agents to help you complete the u
 - **Spawn multiple agents in parallel:** This increases the speed of your response **and** allows you to be more comprehensive by spawning more total agents to synthesize the best response.
 - **Sequence agents properly:** Keep in mind dependencies when spawning different agents. Don't spawn agents in parallel that depend on each other.
   ${buildArray(
-        '- Spawn context-gathering agents (file pickers and web/docs researchers) before making edits. Use the code_search, list_directory, and glob tools directly for searching and exploring the codebase.',
+        '- Spawn context-gathering agents (file pickers, code searchers, and web/docs researchers) before making edits. Use the list_directory and glob tools directly for searching and exploring the codebase.',
         isFree && 'Do not spawn the thinker-gpt agent, unless the user asks. Not everyone has connected their ChatGPT subscription to Codebuff to allow for it.',
+        isFree && `Spawn the thinker-with-files-gemini agent for complex problems — it's very smart. Skip it for routine edits and clearly-scoped changes. Pass the relevant filePaths since it has no conversation history.`,
         isDefault &&
         '- Spawn the editor agent to implement the changes after you have gathered all the context you need.',
         (isDefault || isMax) &&
@@ -197,11 +199,11 @@ ${buildArray(
 <user>please implement [a complex new feature]</user>
 
 <response>
-[ You spawn 3 file-pickers and a docs researcher in parallel to find relevant files and do research online. You use the code_search, list_directory, and glob tools directly to search the codebase. ]
+[ You spawn 3 file-pickers, 2 code-searchers, and a docs researcher in parallel to find relevant files and do research online. You use the list_directory and glob tools directly to search the codebase. ]
 
 [ You read a few of the relevant files using the read_files tool in two separate tool calls ]
 
-[ You use code_search and glob tools, and spawn another file-picker to find more relevant files ]
+[ You spawn another file-picker and code-searcher to find more relevant files, and use glob tools ]
 
 [ You read a few other relevant files using the read_files tool ]${!noAskUser
         ? `\n\n[ You ask the user for important clarifications on their request or alternate implementation strategies using the ask_user tool ]`
@@ -217,7 +219,7 @@ ${isDefault
 ${isDefault
         ? `[ You spawn a code-reviewer, a basher to typecheck the changes, and another basher to run tests, all in parallel ]`
         : isFree
-          ? `[ You spawn a code-reviewer-lite to review the changes, and a basher to typecheck the changes, and another basher to run tests, all in parallel ]`
+          ? `[ You spawn a code-reviewer-lite to review the changes, a basher to typecheck the local changes, a basher to typecheck the whole project, and another basher to run tests, all in parallel ]`
           : isMax
             ? `[  You spawn a basher to typecheck the changes, and another basher to run tests, in parallel. Then, you spawn a code-reviewer-multi-prompt to review the changes. ]`
             : '[ You spawn a basher to typecheck the changes and another basher to run tests, all in parallel ]'
@@ -300,7 +302,7 @@ ${PLACEHOLDER.GIT_CHANGES_PROMPT}
   }
 }
 
-const EXPLORE_PROMPT = `- Iteratively spawn file pickers, bashers, and web/docs researchers to gather context as needed. Use the code_search, list_directory, and glob tools directly for searching and exploring the codebase. The file-picker agent in particular is very useful to find relevant files -- try spawning multiple in parallel (say, 2-5) to explore different parts of the codebase. Use read_subtree if you need to grok a particular part of the codebase. Read all the relevant files using the read_files tool.`
+const EXPLORE_PROMPT = `- Iteratively spawn file pickers, code searchers, bashers, and web/docs researchers to gather context as needed. Use the list_directory and glob tools directly for searching and exploring the codebase. The file-picker and code-searcher agents are very useful to find relevant files -- try spawning multiple in parallel (say, 2-5 file-pickers and 1-3 code-searchers) to explore different parts of the codebase. Use read_subtree if you need to grok a particular part of the codebase. Read all the relevant files using the read_files tool.`
 
 function buildImplementationInstructionsPrompt({
   isSonnet,
@@ -331,8 +333,10 @@ ${buildArray(
     `- Important: Read as many files as could possibly be relevant to the task over several steps to improve your understanding of the user's request and produce the best possible code changes. Find more examples within the codebase similar to the user's request, dependencies that help with understanding how things work, tests, etc. This is frequently 12-20 files, depending on the task.`,
     !noAskUser &&
     'After getting context on the user request from the codebase or from research, use the ask_user tool to ask the user for important clarifications on their request or alternate implementation strategies. You should skip this step if the choice is obvious -- only ask the user if you need their help making the best choice.',
-    (isDefault || isMax) &&
+    (isDefault || isMax || isFree) &&
     `- For any task requiring 3+ steps, use the write_todos tool to write out your step-by-step implementation plan. Include ALL of the applicable tasks in the list.${isFast ? '' : ' You should include a step to review the changes after you have implemented the changes.'}:${hasNoValidation ? '' : ' You should include at least one step to validate/test your changes: be specific about whether to typecheck, run tests, run lints, etc.'} You may be able to do reviewing and validation in parallel in the same step. Skip write_todos for simple tasks like quick edits or answering questions.`,
+    isFree &&
+    `- For complex problems, spawn the thinker-with-files-gemini agent after gathering context. Skip it for routine edits and clearly-scoped changes. Pass the relevant filePaths.`,
     (isDefault || isMax) &&
     `- For quick problems, briefly explain your reasoning to the user. If you need to think longer, write your thoughts within the <think> tags. Finally, for complex problems, spawn the thinker agent to help find the best solution. (gpt-5-agent is a last resort for complex problems)`,
     isDefault &&
@@ -377,6 +381,8 @@ function buildImplementationStepPrompt({
     isMax &&
     `Keep working until the user's request is completely satisfied${!hasNoValidation ? ' and validated' : ''}, or until you require more information from the user.`,
     'You must use the skill tool to load any potentially relevant skills.',
+    isFree &&
+    `Spawn the thinker-with-files-gemini agent for complex problems, not routine edits. Pass the relevant filePaths.`,
     isMax &&
     `You must spawn the 'editor-multi-prompt' agent to implement code changes rather than using the str_replace or write_file tools, since it will generate the best code changes.`,
     (isDefault || isMax) &&

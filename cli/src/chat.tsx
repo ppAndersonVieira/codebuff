@@ -21,6 +21,7 @@ import { ReviewScreen } from './components/review-screen'
 import { MessageWithAgents } from './components/message-with-agents'
 import { areCreditsRestored } from './components/out-of-credits-banner'
 import { PendingBashMessage } from './components/pending-bash-message'
+import { SessionEndedBanner } from './components/session-ended-banner'
 import { StatusBar } from './components/status-bar'
 import { TopBanner } from './components/top-banner'
 import { getSlashCommandsWithSkills } from './data/slash-commands'
@@ -83,6 +84,7 @@ import { computeInputLayoutMetrics } from './utils/text-layout'
 import type { CommandResult } from './commands/command-registry'
 import type { MultilineInputHandle } from './components/multiline-input'
 import type { MatchedSlashCommand } from './hooks/use-suggestion-engine'
+import type { FreebuffSessionResponse } from './types/freebuff-session'
 import type { User } from './utils/auth'
 import type { AgentMode } from './utils/constants'
 import type { FileTreeNode } from '@codebuff/common/util/file'
@@ -105,6 +107,7 @@ export const Chat = ({
   initialMode,
   gitRoot,
   onSwitchToGitRoot,
+  freebuffSession,
 }: {
   headerContent: React.ReactNode
   initialPrompt: string | null
@@ -120,6 +123,7 @@ export const Chat = ({
   initialMode?: AgentMode
   gitRoot?: string | null
   onSwitchToGitRoot?: () => void
+  freebuffSession: FreebuffSessionResponse | null
 }) => {
   const [forceFileOnlyMentions, setForceFileOnlyMentions] = useState(false)
 
@@ -614,7 +618,7 @@ export const Chat = ({
     ],
   )
 
-  const { inputWidth, handleBuildFast, handleBuildMax, handleBuildFree } = useChatInput({
+  const { inputWidth, handleBuildFast, handleBuildMax, handleBuildLite } = useChatInput({
     setInputValue,
     agentMode,
     setAgentMode,
@@ -1242,7 +1246,7 @@ export const Chat = ({
       onToggleCollapsed: handleCollapseToggle,
       onBuildFast: handleBuildFast,
       onBuildMax: handleBuildMax,
-      onBuildFree: handleBuildFree,
+      onBuildLite: handleBuildLite,
       onFeedback: handleMessageFeedback,
       onCloseFeedback: handleCloseFeedback,
     })
@@ -1250,7 +1254,7 @@ export const Chat = ({
     handleCollapseToggle,
     handleBuildFast,
     handleBuildMax,
-    handleBuildFree,
+    handleBuildLite,
     handleMessageFeedback,
     handleCloseFeedback,
     setMessageBlockCallbacks,
@@ -1337,9 +1341,16 @@ export const Chat = ({
     return ` ${segments.join('   ')} `
   }, [queuePreviewTitle, pausedQueueText])
 
+  const hasActiveFreebuffSession =
+    IS_FREEBUFF && freebuffSession?.status === 'active'
+  const isFreebuffSessionOver =
+    IS_FREEBUFF && freebuffSession?.status === 'ended'
   const shouldShowStatusLine =
     !feedbackMode &&
-    (hasStatusIndicatorContent || shouldShowQueuePreview || !isAtBottom)
+    (hasStatusIndicatorContent ||
+      shouldShowQueuePreview ||
+      !isAtBottom ||
+      hasActiveFreebuffSession)
 
   // Track mouse movement for ad activity (throttled)
   const lastMouseActivityRef = useRef<number>(0)
@@ -1442,6 +1453,7 @@ export const Chat = ({
             scrollToLatest={scrollToLatest}
             statusIndicatorState={statusIndicatorState}
             onStop={chatKeyboardHandlers.onInterruptStream}
+            freebuffSession={freebuffSession}
           />
         )}
 
@@ -1455,16 +1467,25 @@ export const Chat = ({
             <AdBanner
               ad={ad}
               onDisableAds={handleDisableAds}
-              isFreeMode={IS_FREEBUFF || agentMode === 'FREE'}
+              isFreeMode={IS_FREEBUFF}
             />
           )
         )}
 
         {reviewMode ? (
+          // Review and ask_user take precedence over the session-ended banner:
+          // during the grace window the agent may still be asking to run tools
+          // or asking the user a question, and those approvals/answers must be
+          // reachable for the run to finish — otherwise the agent hangs
+          // waiting for input that can never be given.
           <ReviewScreen
             onSelectOption={handleReviewOptionSelect}
             onCustom={handleReviewCustom}
             onCancel={handleCloseReviewScreen}
+          />
+        ) : isFreebuffSessionOver && !askUserState ? (
+          <SessionEndedBanner
+            isStreaming={isStreaming || isWaitingForResponse}
           />
         ) : (
           <ChatInputBar

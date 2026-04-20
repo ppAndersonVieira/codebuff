@@ -4,6 +4,7 @@ import { PROFIT_MARGIN } from '@codebuff/common/constants/limits'
 import { getErrorObject } from '@codebuff/common/util/error'
 import { env } from '@codebuff/internal/env'
 
+import { FIREWORKS_DEPLOYMENT_MAP } from './fireworks-config'
 import {
   consumeCreditsForMessage,
   extractRequestMetadata,
@@ -19,7 +20,7 @@ const FIREWORKS_BASE_URL = 'https://api.fireworks.ai/inference/v1'
 
 // Extended timeout for deep-thinking models that can take
 // a long time to start streaming.
-const FIREWORKS_HEADERS_TIMEOUT_MS = 10 * 60 * 1000
+const FIREWORKS_HEADERS_TIMEOUT_MS = 30 * 60 * 1000
 
 const fireworksAgent = new Agent({
   headersTimeout: FIREWORKS_HEADERS_TIMEOUT_MS,
@@ -36,13 +37,6 @@ const FIREWORKS_MODEL_MAP: Record<string, string> = {
 
 /** Flag to enable custom Fireworks deployments (set to false to use global API only) */
 const FIREWORKS_USE_CUSTOM_DEPLOYMENT = true
-
-/** Custom deployment IDs for models with dedicated Fireworks deployments */
-const FIREWORKS_DEPLOYMENT_MAP: Record<string, string> = {
-  // 'minimax/minimax-m2.5': 'accounts/james-65d217/deployments/lnfid5h9',
-  'moonshotai/kimi-k2.5': 'accounts/james-65d217/deployments/mx8l5rq2',
-  'z-ai/glm-5.1': 'accounts/james-65d217/deployments/mjb4i7ea',
-}
 
 /** Check if current time is within deployment hours (always enabled) */
 export function isDeploymentHours(_now: Date = new Date()): boolean {
@@ -96,6 +90,20 @@ function createFireworksRequest(params: {
     ...body,
     model: modelIdOverride ?? getFireworksModelId(originalModel),
   }
+
+  // Transform OpenRouter-style `reasoning` object into Fireworks' `reasoning_effort`.
+  // Unlike OpenAI, Fireworks supports reasoning_effort together with function tools
+  // (e.g. GLM-4.5/5.1 and Kimi K2 are designed for interleaved reasoning + tool use).
+  if (fireworksBody.reasoning && typeof fireworksBody.reasoning === 'object') {
+    const reasoning = fireworksBody.reasoning as {
+      enabled?: boolean
+      effort?: 'high' | 'medium' | 'low'
+    }
+    if (reasoning.enabled ?? true) {
+      fireworksBody.reasoning_effort = reasoning.effort ?? 'medium'
+    }
+  }
+  delete fireworksBody.reasoning
 
   // Strip OpenRouter-specific / internal fields
   delete fireworksBody.provider

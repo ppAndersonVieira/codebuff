@@ -1,7 +1,9 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import { BYOK_OPENROUTER_HEADER } from '@codebuff/common/constants/byok'
-import { isFreeMode } from '@codebuff/common/constants/free-agents'
-
+import {
+  isFreeMode,
+  isFreeModeAllowedAgentModel,
+} from '@codebuff/common/constants/free-agents'
 import { getErrorObject } from '@codebuff/common/util/error'
 import { pluralize } from '@codebuff/common/util/string'
 import { env } from '@codebuff/internal/env'
@@ -70,37 +72,17 @@ import {
   handleOpenRouterStream,
   OpenRouterError,
 } from '@/llm-api/openrouter'
+import { checkSessionAdmissible } from '@/server/free-session/public-api'
+import {
+  FREE_MODE_ALLOWED_COUNTRIES,
+  extractClientIp,
+  getCountryCode,
+} from '@/server/free-mode-country'
+
+import type { SessionGateResult } from '@/server/free-session/public-api'
 import { extractApiKeyFromHeader } from '@/util/auth'
 import { withDefaultProperties } from '@codebuff/common/analytics'
 import { checkFreeModeRateLimit } from './free-mode-rate-limiter'
-
-const FREE_MODE_ALLOWED_COUNTRIES = new Set([
-  'US', 'CA',
-  'GB', 'AU', 'NZ',
-  'NO', 'SE', 'NL', 'DK', 'DE', 'FI', 'BE', 'LU', 'CH', 'IE', 'IS',
-])
-
-function extractClientIp(req: NextRequest): string | undefined {
-  const forwardedFor = req.headers.get('x-forwarded-for')
-  if (forwardedFor) {
-    return forwardedFor.split(',')[0].trim()
-  }
-  return req.headers.get('x-real-ip') ?? undefined
-}
-
-function getCountryCode(req: NextRequest): string | null {
-  const cfCountry = req.headers.get('cf-ipcountry')
-  if (cfCountry && cfCountry !== 'XX' && cfCountry !== 'T1') {
-    return cfCountry.toUpperCase()
-  }
-
-  const clientIp = extractClientIp(req)
-  if (!clientIp) {
-    return null
-  }
-  const geo = geoip.lookup(clientIp)
-  return geo?.country ?? null
-}
 
 export const formatQuotaResetCountdown = (
   nextQuotaReset: string | null | undefined,
@@ -138,6 +120,18 @@ export const formatQuotaResetCountdown = (
   return `in ${pluralize(minutes, 'minute')}`
 }
 
+export type CheckSessionAdmissibleFn = typeof checkSessionAdmissible
+
+type GateRejectCode = Extract<SessionGateResult, { ok: false }>['code']
+
+const STATUS_BY_GATE_CODE = {
+  waiting_room_required: 428,
+  waiting_room_queued: 429,
+  session_superseded: 409,
+  session_expired: 410,
+  freebuff_update_required: 426,
+} satisfies Record<GateRejectCode, number>
+
 export async function postChatCompletions(params: {
   req: NextRequest
   getUserInfoFromApiKey: GetUserInfoFromApiKeyFn
@@ -150,6 +144,9 @@ export async function postChatCompletions(params: {
   insertMessageBigquery: InsertMessageBigqueryFn
   ensureSubscriberBlockGrant?: (params: { userId: string; logger: Logger }) => Promise<BlockGrantResult | null>
   getUserPreferences?: GetUserPreferencesFn
+  /** Optional override for the freebuff waiting-room gate. Defaults to the
+   *  real check backed by Postgres; tests inject a no-op. */
+  checkSessionAdmissible?: CheckSessionAdmissibleFn
 }) {
   const {
     req,
@@ -161,6 +158,7 @@ export async function postChatCompletions(params: {
     insertMessageBigquery,
     ensureSubscriberBlockGrant,
     getUserPreferences,
+    checkSessionAdmissible: checkSession = checkSessionAdmissible,
   } = params
   let { logger } = params
   let { trackEvent } = params
@@ -243,7 +241,7 @@ export async function postChatCompletions(params: {
       return NextResponse.json(
         {
           error: 'account_suspended',
-          message: `Your account has been suspended due to billing issues. Please contact ${env.NEXT_PUBLIC_SUPPORT_EMAIL} to resolve this.`,
+          message: `Your account has been suspended. Please contact ${env.NEXT_PUBLIC_SUPPORT_EMAIL} if you did not expect this.`,
         },
         { status: 403 },
       )
@@ -356,6 +354,65 @@ export async function postChatCompletions(params: {
       )
     }
 
+    // Free-mode requests must use an allowlisted agent+model combination.
+    // Without this gate, an attacker on a brand-new unpaid account can set
+    // cost_mode='free' to bypass both the paid-account check and the balance
+    // check, then request an expensive model (Opus, etc). Our OpenRouter key
+    // pays for the call; the downstream credit-consumption step records an
+    // audit row but can't actually deduct from a user who has no grants —
+    // net result is free Opus for the attacker, real dollars for us. Check
+    // must happen here, before any call to OpenRouter.
+    if (
+      isFreeModeRequest &&
+      !isFreeModeAllowedAgentModel(agentId, typedBody.model)
+    ) {
+      trackEvent({
+        event: AnalyticsEvent.CHAT_COMPLETIONS_VALIDATION_ERROR,
+        userId,
+        properties: {
+          error: 'free_mode_invalid_agent_model',
+          agentId,
+          model: typedBody.model,
+        },
+        logger,
+      })
+      return NextResponse.json(
+        {
+          error: 'free_mode_invalid_agent_model',
+          message:
+            'Free mode is only available for specific agent and model combinations.',
+        },
+        { status: 403 },
+      )
+    }
+
+    // Freebuff waiting-room gate. Only enforced for free-mode requests, and
+    // only when FREEBUFF_WAITING_ROOM_ENABLED=true — otherwise this is a
+    // no-op that returns { ok: true, reason: 'disabled' } without a DB hit.
+    // Runs before the rate limiter so rejected requests don't burn a queued
+    // user's free-mode counters.
+    if (isFreeModeRequest) {
+      const claimedInstanceId =
+        typedBody.codebuff_metadata?.freebuff_instance_id
+      const gate = await checkSession({
+        userId,
+        userEmail: userInfo.email,
+        claimedInstanceId,
+      })
+      if (!gate.ok) {
+        trackEvent({
+          event: AnalyticsEvent.CHAT_COMPLETIONS_VALIDATION_ERROR,
+          userId,
+          properties: { error: gate.code },
+          logger,
+        })
+        return NextResponse.json(
+          { error: gate.code, message: gate.message },
+          { status: STATUS_BY_GATE_CODE[gate.code] },
+        )
+      }
+    }
+
     // Rate limit free mode requests (after validation so invalid requests don't consume quota)
     if (isFreeModeRequest) {
       const rateLimitResult = checkFreeModeRateLimit(userId)
@@ -396,19 +453,19 @@ export async function postChatCompletions(params: {
     if (ensureSubscriberBlockGrant) {
       try {
         const blockGrantResult = await ensureSubscriberBlockGrant({ userId, logger })
-        
+
         // Check if user hit subscription limit and should be rate-limited
         if (blockGrantResult && (isWeeklyLimitError(blockGrantResult) || isBlockExhaustedError(blockGrantResult))) {
           // Fetch user's preference for falling back to a-la-carte credits
           const preferences = getUserPreferences
             ? await getUserPreferences({ userId, logger })
             : { fallbackToALaCarte: true } // Default to allowing a-la-carte if no preference function
-          
+
           if (!preferences.fallbackToALaCarte && !isFreeModeRequest) {
             const resetTime = blockGrantResult.resetsAt
             const resetCountdown = formatQuotaResetCountdown(resetTime.toISOString())
             const limitType = isWeeklyLimitError(blockGrantResult) ? 'weekly' : '5-hour session'
-            
+
             trackEvent({
               event: AnalyticsEvent.CHAT_COMPLETIONS_INSUFFICIENT_CREDITS,
               userId,
@@ -419,7 +476,7 @@ export async function postChatCompletions(params: {
               },
               logger,
             })
-            
+
             return NextResponse.json(
               {
                 error: 'rate_limit_exceeded',
@@ -560,10 +617,16 @@ export async function postChatCompletions(params: {
           },
         })
       } else {
-        // Non-streaming request
-        const shouldUseOpenAIEndpoint = !useFireworks && isOpenAIDirectModel(typedBody.model)
-        const result = useLocalhost
-          ? await handleLocalhostNonStream({
+        // Non-streaming request — route to SiliconFlow/CanopyWave/Fireworks for supported models
+        // TEMPORARILY DISABLED: route through OpenRouter
+        const model = typedBody.model
+        const useSiliconFlow = false // isSiliconFlowModel(model)
+        const useCanopyWave = false // isCanopyWaveModel(model)
+        const useFireworks = isFireworksModel(model)
+        const shouldUseOpenAIEndpoint = !useFireworks && isOpenAIDirectModel(model)
+
+        const nonStreamRequest = useLocalhost
+          ? handleLocalhostNonStream({
             body,
             userId,
             agentId,
@@ -572,7 +635,7 @@ export async function postChatCompletions(params: {
             insertMessageBigquery,
           })
           : useSiliconFlow
-            ? await handleSiliconFlowNonStream({
+            ? handleSiliconFlowNonStream({
               body: typedBody,
               userId,
               stripeCustomerId,
@@ -582,7 +645,7 @@ export async function postChatCompletions(params: {
               insertMessageBigquery,
             })
             : useCanopyWave
-              ? await handleCanopyWaveNonStream({
+              ? handleCanopyWaveNonStream({
                 body: typedBody,
                 userId,
                 stripeCustomerId,
@@ -592,7 +655,7 @@ export async function postChatCompletions(params: {
                 insertMessageBigquery,
               })
               : useFireworks
-                ? await handleFireworksNonStream({
+                ? handleFireworksNonStream({
                   body: typedBody,
                   userId,
                   stripeCustomerId,
@@ -601,16 +664,27 @@ export async function postChatCompletions(params: {
                   logger,
                   insertMessageBigquery,
                 })
-                : await handleOpenRouterNonStream({
-                  body: typedBody,
-                  userId,
-                  stripeCustomerId,
-                  agentId,
-                  openrouterApiKey,
-                  fetch,
-                  logger,
-                  insertMessageBigquery,
-                })
+                : shouldUseOpenAIEndpoint
+                  ? handleOpenAINonStream({
+                    body: typedBody,
+                    userId,
+                    stripeCustomerId,
+                    agentId,
+                    fetch,
+                    logger,
+                    insertMessageBigquery,
+                  })
+                  : handleOpenRouterNonStream({
+                    body: typedBody,
+                    userId,
+                    stripeCustomerId,
+                    agentId,
+                    openrouterApiKey,
+                    fetch,
+                    logger,
+                    insertMessageBigquery,
+                  })
+        const result = await nonStreamRequest
 
         trackEvent({
           event: AnalyticsEvent.CHAT_COMPLETIONS_GENERATION_STARTED,

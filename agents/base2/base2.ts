@@ -7,7 +7,7 @@ import {
 } from '../types/secret-agent-definition'
 
 export function createBase2(
-  mode: 'default' | 'free' | 'max' | 'fast',
+  mode: 'default' | 'free' | 'lite' | 'max' | 'fast',
   options?: {
     hasNoValidation?: boolean
     planOnly?: boolean
@@ -22,13 +22,14 @@ export function createBase2(
   const isDefault = mode === 'default'
   const isFast = mode === 'fast'
   const isMax = mode === 'max'
-  const isFree = mode === 'free'
+  const isFree = mode === 'free' || mode === 'lite'
 
   const isSonnet = false
+  const model = isFree ? 'z-ai/glm-5.1' : 'anthropic/claude-opus-4.7'
 
   return {
     publisher,
-    model: isFree ? 'z-ai/glm-5.1' : 'anthropic/claude-opus-4.6',
+    model,
     providerOptions: isFree ? {
       data_collection: 'deny',
     } : {
@@ -144,7 +145,6 @@ Use the spawn_agents tool to spawn specialized agents to help you complete the u
   ${buildArray(
         '- Spawn context-gathering agents (file pickers, code searchers, and web/docs researchers) before making edits. Use the list_directory and glob tools directly for searching and exploring the codebase.',
         isFree && 'Do not spawn the thinker-gpt agent, unless the user asks. Not everyone has connected their ChatGPT subscription to Codebuff to allow for it.',
-        isFree && `Spawn the thinker-with-files-gemini agent for complex problems — it's very smart. Skip it for routine edits and clearly-scoped changes. Pass the relevant filePaths since it has no conversation history.`,
         isDefault &&
         '- Spawn the editor agent to implement the changes after you have gathered all the context you need.',
         (isDefault || isMax) &&
@@ -166,6 +166,8 @@ Use the spawn_agents tool to spawn specialized agents to help you complete the u
 - **Use agent-monitor for infrastructure agents:** All interactions with infrastructure agents (Dynatrace, GitHub, Atlassian, Slack, SonarQube, Hoop, pAI) must go through the \`agent-monitor\` agent — spawn it instead of the individual agents. It coordinates the appropriate subagent and accumulates learnings to improve future responses.
 
 # Codebuff Meta-information
+
+You are running on the ${model} model.
 
 Users send prompts to you in one of a few user-selected modes, like DEFAULT, MAX, or PLAN.
 
@@ -283,22 +285,40 @@ ${PLACEHOLDER.GIT_CHANGES_PROMPT}
         noAskUser,
       }),
 
-    handleSteps: function* ({ params }) {
-      while (true) {
-        // Run context-pruner before each step
-        yield {
-          toolName: 'spawn_agent_inline',
-          input: {
-            agent_type: 'context-pruner',
-            params: params ?? {},
-          },
-          includeToolCall: false,
-        } as any
+    // handleSteps is serialized via .toString() and re-eval'd, so closure
+    // variables like `isFree` are not in scope at runtime. Pick the right
+    // literal-baked function here instead.
+    handleSteps: isFree
+      ? function* ({ params }) {
+          while (true) {
+            yield {
+              toolName: 'spawn_agent_inline',
+              input: {
+                agent_type: 'context-pruner',
+                params: { ...(params ?? {}), cacheExpiryMs: 10 * 60 * 1000 },
+              },
+              includeToolCall: false,
+            } as any
 
-        const { stepsComplete } = yield 'STEP'
-        if (stepsComplete) break
-      }
-    },
+            const { stepsComplete } = yield 'STEP'
+            if (stepsComplete) break
+          }
+        }
+      : function* ({ params }) {
+          while (true) {
+            yield {
+              toolName: 'spawn_agent_inline',
+              input: {
+                agent_type: 'context-pruner',
+                params: params ?? {},
+              },
+              includeToolCall: false,
+            } as any
+
+            const { stepsComplete } = yield 'STEP'
+            if (stepsComplete) break
+          }
+        },
   }
 }
 
@@ -335,8 +355,6 @@ ${buildArray(
     'After getting context on the user request from the codebase or from research, use the ask_user tool to ask the user for important clarifications on their request or alternate implementation strategies. You should skip this step if the choice is obvious -- only ask the user if you need their help making the best choice.',
     (isDefault || isMax || isFree) &&
     `- For any task requiring 3+ steps, use the write_todos tool to write out your step-by-step implementation plan. Include ALL of the applicable tasks in the list.${isFast ? '' : ' You should include a step to review the changes after you have implemented the changes.'}:${hasNoValidation ? '' : ' You should include at least one step to validate/test your changes: be specific about whether to typecheck, run tests, run lints, etc.'} You may be able to do reviewing and validation in parallel in the same step. Skip write_todos for simple tasks like quick edits or answering questions.`,
-    isFree &&
-    `- For complex problems, spawn the thinker-with-files-gemini agent after gathering context. Skip it for routine edits and clearly-scoped changes. Pass the relevant filePaths.`,
     (isDefault || isMax) &&
     `- For quick problems, briefly explain your reasoning to the user. If you need to think longer, write your thoughts within the <think> tags. Finally, for complex problems, spawn the thinker agent to help find the best solution. (gpt-5-agent is a last resort for complex problems)`,
     isDefault &&
@@ -380,9 +398,7 @@ function buildImplementationStepPrompt({
   return buildArray(
     isMax &&
     `Keep working until the user's request is completely satisfied${!hasNoValidation ? ' and validated' : ''}, or until you require more information from the user.`,
-    'You must use the skill tool to load any potentially relevant skills.',
-    isFree &&
-    `Spawn the thinker-with-files-gemini agent for complex problems, not routine edits. Pass the relevant filePaths.`,
+    'Consider loading relevant skills with the skill tool if they might help with the current task. Do not reload skills that were already loaded earlier in this conversation.',
     isMax &&
     `You must spawn the 'editor-multi-prompt' agent to implement code changes rather than using the str_replace or write_file tools, since it will generate the best code changes.`,
     (isDefault || isMax) &&

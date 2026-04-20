@@ -6,6 +6,7 @@ import { getAdsEnabled } from '../commands/ads'
 import { useChatStore } from '../state/chat-store'
 import { isUserActive, subscribeToActivity } from '../utils/activity-tracker'
 import { getAuthToken } from '../utils/auth'
+import { IS_FREEBUFF } from '../utils/constants'
 import { logger } from '../utils/logger'
 
 import type { Message} from '@codebuff/sdk';
@@ -96,8 +97,14 @@ function nextFromChoiceCache(ctrl: GravityController): AdResponse[] | null {
  *
  * Activity is tracked via the global activity-tracker module.
  */
-export const useGravityAd = (options?: { enabled?: boolean }): GravityAdState => {
+export const useGravityAd = (options?: {
+  enabled?: boolean
+  /** Skip the "wait for first user message" gate. Used by the freebuff
+   *  waiting room, which has no conversation but still needs ads. */
+  forceStart?: boolean
+}): GravityAdState => {
   const enabled = options?.enabled ?? true
+  const forceStart = options?.forceStart ?? false
   const [ad, setAd] = useState<AdResponse | null>(null)
   const [adData, setAdData] = useState<AdData | null>(null)
   const [isLoading, setIsLoading] = useState(false)
@@ -106,18 +113,20 @@ export const useGravityAd = (options?: { enabled?: boolean }): GravityAdState =>
   const { terminalHeight } = useTerminalLayout()
   const isVeryCompactHeight = terminalHeight <= 17
 
-  // Get agent mode - FREE mode always shows ads even on compact screens
-  const agentMode = useChatStore((s) => s.agentMode)
-  const isFreeMode = agentMode === 'FREE'
+  // Freebuff always shows ads even on compact screens (ads are mandatory there).
+  const isFreeMode = IS_FREEBUFF
 
-  // Skip ads on very compact screens unless in FREE mode (where ads are mandatory)
+  // Skip ads on very compact screens unless we're in Freebuff (where ads are mandatory)
   // Also skip if explicitly disabled (e.g. user has a subscription)
   const shouldHideAds = !enabled || (isVeryCompactHeight && !isFreeMode)
 
   // Use Zustand selector instead of manual subscription - only rerenders when value changes
-  const hasUserMessaged = useChatStore((s) =>
+  const hasUserMessagedStore = useChatStore((s) =>
     s.messages.some((m) => m.variant === 'user'),
   )
+  // forceStart lets callers (e.g. the waiting room) opt out of the
+  // "wait for the first user message" gate.
+  const shouldStart = forceStart || hasUserMessagedStore
 
   // Single consolidated controller ref
   const ctrlRef = useRef<GravityController>({
@@ -154,7 +163,7 @@ export const useGravityAd = (options?: { enabled?: boolean }): GravityAdState =>
       return
     }
 
-    // Include mode in request - FREE mode should not grant credits
+    // Include mode in request - Freebuff should not grant credits (no balance concept).
     const agentMode = useChatStore.getState().agentMode
 
     fetch(`${WEBSITE_URL}/api/v1/ads/impression`, {
@@ -358,9 +367,9 @@ export const useGravityAd = (options?: { enabled?: boolean }): GravityAdState =>
     })
   }, [])
 
-  // Start rotation when user sends first message
+  // Start rotation when user sends first message (or immediately if forced).
   useEffect(() => {
-    if (!hasUserMessaged || !getAdsEnabled() || shouldHideAds) return
+    if (!shouldStart || !getAdsEnabled() || shouldHideAds) return
 
     setIsLoading(true)
 
@@ -390,10 +399,10 @@ export const useGravityAd = (options?: { enabled?: boolean }): GravityAdState =>
       clearInterval(id)
       ctrlRef.current.intervalId = null
     }
-  }, [hasUserMessaged, shouldHideAds])
+  }, [shouldStart, shouldHideAds])
 
   // Don't return ad when ads should be hidden
-  const visible = hasUserMessaged && !shouldHideAds
+  const visible = shouldStart && !shouldHideAds
   return {
     ad: visible ? ad : null,
     adData: visible ? adData : null,

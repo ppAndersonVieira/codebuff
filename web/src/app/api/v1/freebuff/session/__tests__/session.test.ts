@@ -12,6 +12,8 @@ import type { SessionDeps } from '@/server/free-session/public-api'
 import type { InternalSessionRow } from '@/server/free-session/types'
 import type { NextRequest } from 'next/server'
 
+const DEFAULT_MODEL = 'z-ai/glm-5.1'
+
 function makeReq(
   apiKey: string | null,
   opts: { instanceId?: string; cfCountry?: string } = {},
@@ -35,18 +37,33 @@ function makeSessionDeps(overrides: Partial<SessionDeps> = {}): SessionDeps & {
     rows,
     isWaitingRoomEnabled: () => true,
     graceMs: 30 * 60 * 1000,
+    sessionLengthMs: 60 * 60 * 1000,
+    // Keep instant-admit disabled in handler tests — they verify queue/state
+    // transitions, not admission policy. With capacity 0 the deps below
+    // aren't reached, so they're trivial stubs.
+    getInstantAdmitCapacity: () => 0,
+    activeCountForModel: async () => 0,
+    promoteQueuedUser: async () => null,
     now: () => now,
     getSessionRow: async (userId) => rows.get(userId) ?? null,
-    queueDepth: async () => [...rows.values()].filter((r) => r.status === 'queued').length,
+    queueDepthsByModel: async () => {
+      const out: Record<string, number> = {}
+      for (const r of rows.values()) {
+        if (r.status !== 'queued') continue
+        out[r.model] = (out[r.model] ?? 0) + 1
+      }
+      return out
+    },
     queuePositionFor: async () => 1,
     endSession: async (userId) => {
       rows.delete(userId)
     },
-    joinOrTakeOver: async ({ userId, now }) => {
+    joinOrTakeOver: async ({ userId, model, now }) => {
       const r: InternalSessionRow = {
         user_id: userId,
         status: 'queued',
         active_instance_id: `inst-${++instanceCounter}`,
+        model,
         queued_at: now,
         admitted_at: null,
         expires_at: null,
@@ -67,10 +84,17 @@ const LOGGER = {
   debug: () => {},
 }
 
-function makeDeps(sessionDeps: SessionDeps, userId: string | null): FreebuffSessionDeps {
+function makeDeps(
+  sessionDeps: SessionDeps,
+  userId: string | null,
+  opts: { banned?: boolean } = {},
+): FreebuffSessionDeps {
   return {
     logger: LOGGER as unknown as FreebuffSessionDeps['logger'],
-    getUserInfoFromApiKey: (async () => (userId ? { id: userId } : undefined)) as unknown as FreebuffSessionDeps['getUserInfoFromApiKey'],
+    getUserInfoFromApiKey: (async () =>
+      userId
+        ? { id: userId, banned: opts.banned ?? false }
+        : undefined) as unknown as FreebuffSessionDeps['getUserInfoFromApiKey'],
     sessionDeps,
   }
 }
@@ -128,6 +152,22 @@ describe('POST /api/v1/freebuff/session', () => {
     const body = await resp.json()
     expect(body.status).toBe('queued')
   })
+
+  // Banned bots with valid API keys were POSTing every few seconds and
+  // inflating queueDepth between the 15s admission-tick sweeps. Rejecting at
+  // the HTTP layer with 403 (terminal, like country_blocked) keeps them out
+  // entirely. Also verifies no queue row is created as a side effect.
+  test('returns banned 403 without joining the queue for banned user', async () => {
+    const sessionDeps = makeSessionDeps()
+    const resp = await postFreebuffSession(
+      makeReq('ok'),
+      makeDeps(sessionDeps, 'u1', { banned: true }),
+    )
+    expect(resp.status).toBe(403)
+    const body = await resp.json()
+    expect(body.status).toBe('banned')
+    expect(sessionDeps.rows.size).toBe(0)
+  })
 })
 
 describe('GET /api/v1/freebuff/session', () => {
@@ -151,12 +191,24 @@ describe('GET /api/v1/freebuff/session', () => {
     expect(body.countryCode).toBe('FR')
   })
 
+  test('returns banned 403 on GET for banned user', async () => {
+    const sessionDeps = makeSessionDeps()
+    const resp = await getFreebuffSession(
+      makeReq('ok'),
+      makeDeps(sessionDeps, 'u1', { banned: true }),
+    )
+    expect(resp.status).toBe(403)
+    const body = await resp.json()
+    expect(body.status).toBe('banned')
+  })
+
   test('returns superseded when active row exists with mismatched instance id', async () => {
     const sessionDeps = makeSessionDeps()
     sessionDeps.rows.set('u1', {
       user_id: 'u1',
       status: 'active',
       active_instance_id: 'real-id',
+      model: DEFAULT_MODEL,
       queued_at: new Date(),
       admitted_at: new Date(),
       expires_at: new Date(Date.now() + 60_000),
@@ -180,6 +232,7 @@ describe('DELETE /api/v1/freebuff/session', () => {
       user_id: 'u1',
       status: 'active',
       active_instance_id: 'x',
+      model: DEFAULT_MODEL,
       queued_at: new Date(),
       admitted_at: new Date(),
       expires_at: new Date(Date.now() + 60_000),

@@ -1,43 +1,58 @@
+import { FREEBUFF_MODELS } from '@codebuff/common/constants/freebuff-models'
+
 import {
   ADMISSION_TICK_MS,
   getSessionGraceMs,
   getSessionLengthMs,
   isWaitingRoomEnabled,
 } from './config'
-import { getFireworksHealth } from './fireworks-health'
-import { activeCount, admitFromQueue, queueDepth, sweepExpired } from './store'
+import { getFleetHealth } from './fireworks-health'
+import {
+  activeCountsByModel,
+  admitFromQueue,
+  evictBanned,
+  queueDepth,
+  sweepExpired,
+} from './store'
 
-import type { FireworksHealth } from './fireworks-health'
+import type { FireworksHealth, FleetHealth } from './fireworks-health'
 
 import { logger } from '@/util/logger'
 
 export interface AdmissionDeps {
   sweepExpired: (now: Date, graceMs: number) => Promise<number>
-  queueDepth: () => Promise<number>
-  activeCount: () => Promise<number>
+  evictBanned: () => Promise<number>
+  queueDepth: (params: { model: string }) => Promise<number>
+  activeCountsByModel: () => Promise<Record<string, number>>
   admitFromQueue: (params: {
+    model: string
     sessionLengthMs: number
     now: Date
-    getFireworksHealth: () => Promise<FireworksHealth>
+    health: FireworksHealth
   }) => Promise<{ admitted: { user_id: string }[]; skipped: FireworksHealth | null }>
-  getFireworksHealth: () => Promise<FireworksHealth>
+  getFleetHealth: () => Promise<FleetHealth>
   /** Plain values, not thunks — these never change at runtime. */
   sessionLengthMs: number
   graceMs: number
+  /** Models to run admission ticks for. Defaults to the full model registry. */
+  models?: readonly string[]
   now?: () => Date
 }
 
 const defaultDeps: AdmissionDeps = {
   sweepExpired,
+  evictBanned,
   queueDepth,
-  activeCount,
+  activeCountsByModel,
   admitFromQueue,
   // FREEBUFF_DEV_FORCE_ADMIT lets local `dev:freebuff` drive the full
-  // waiting-room → admitted → ended flow without a real upstream.
-  getFireworksHealth:
+  // waiting-room → admitted → ended flow without a real upstream. Returning
+  // an empty fleet means every model resolves to the absence-default of
+  // 'healthy' below.
+  getFleetHealth:
     process.env.FREEBUFF_DEV_FORCE_ADMIT === 'true'
-      ? async () => 'healthy'
-      : getFireworksHealth,
+      ? async () => ({})
+      : getFleetHealth,
   get sessionLengthMs() {
     return getSessionLengthMs()
   },
@@ -48,47 +63,79 @@ const defaultDeps: AdmissionDeps = {
 
 export interface AdmissionTickResult {
   expired: number
+  /** Free_session rows removed because the user is banned. */
+  evictedBanned: number
   admitted: number
-  queueDepth: number
-  activeCount: number
+  /** Per-model queue depth at the end of the tick. */
+  queueDepthByModel: Record<string, number>
+  /** Per-model active-session count at the end of the tick. Models with no
+   *  active sessions are omitted. */
+  activeCountByModel: Record<string, number>
   skipped: FireworksHealth | null
 }
 
 /**
  * Run a single admission tick:
  *   1. Expire sessions past their expires_at + grace.
- *   2. Attempt to admit one queued user. Admission proceeds only when the
- *      upstream health probe reports `healthy`; `degraded` and `unhealthy`
- *      both pause admission so the deployment can catch up.
+ *   2. For each model, attempt to admit one queued user. Admission proceeds
+ *      only when the upstream health probe reports `healthy`; `degraded` and
+ *      `unhealthy` both pause admission so the deployment can catch up.
  *
- * Admission drips at (1 / ADMISSION_TICK_MS), which drives utilization up
- * slowly; once the probe stops returning `healthy`, step 2 halts admission
- * until the upstream recovers.
+ * Per-model admission means heavier models can sit cold without starving
+ * lighter ones. Admission still drips at (1 / ADMISSION_TICK_MS) per model.
  *
  * Returns counts for observability. Safe to call concurrently across pods —
- * admitFromQueue takes an advisory xact lock.
+ * admitFromQueue takes a per-model advisory xact lock.
  */
 export async function runAdmissionTick(
   deps: AdmissionDeps = defaultDeps,
 ): Promise<AdmissionTickResult> {
   const now = (deps.now ?? (() => new Date()))()
-  const expired = await deps.sweepExpired(now, deps.graceMs)
-
-  const { admitted, skipped } = await deps.admitFromQueue({
-    sessionLengthMs: deps.sessionLengthMs,
-    now,
-    getFireworksHealth: deps.getFireworksHealth,
-  })
-
-  const [depth, active] = await Promise.all([
-    deps.queueDepth(),
-    deps.activeCount(),
+  // Run eviction before admission so a banned user freed from a slot in this
+  // tick frees room for a queued user to be admitted in the same tick.
+  const [expired, evictedBanned] = await Promise.all([
+    deps.sweepExpired(now, deps.graceMs),
+    deps.evictBanned(),
   ])
+
+  const models = deps.models ?? FREEBUFF_MODELS.map((m) => m.id)
+
+  // One probe per tick covers every model — the Fireworks metrics endpoint
+  // returns all deployments in a single response. Models without a dedicated
+  // deployment (e.g. serverless) aren't in the map; treat their absence as
+  // 'healthy' so admission continues. TODO: when those models move to their
+  // own deployments, drop the absence-default and require an explicit entry.
+  const fleet = await deps.getFleetHealth()
+
+  // Run per-model admission in parallel — they only contend on independent
+  // advisory locks and a single update each.
+  const perModel = await Promise.all(
+    models.map(async (model) => {
+      const health = fleet[model] ?? 'healthy'
+      const { admitted, skipped } = await deps.admitFromQueue({
+        model,
+        sessionLengthMs: deps.sessionLengthMs,
+        now,
+        health,
+      })
+      const depth = await deps.queueDepth({ model })
+      return { model, admittedCount: admitted.length, depth, skipped }
+    }),
+  )
+
+  const activeCountByModel = await deps.activeCountsByModel()
+  const totalAdmitted = perModel.reduce((s, r) => s + r.admittedCount, 0)
+  const queueDepthByModel = Object.fromEntries(
+    perModel.map((r) => [r.model, r.depth]),
+  )
+  const skipped = perModel.find((r) => r.skipped)?.skipped ?? null
+
   return {
     expired,
-    admitted: admitted.length,
-    queueDepth: depth,
-    activeCount: active,
+    evictedBanned,
+    admitted: totalAdmitted,
+    queueDepthByModel,
+    activeCountByModel,
     skipped,
   }
 }
@@ -101,16 +148,17 @@ function runTick() {
   inFlight = true
   runAdmissionTick()
     .then((result) => {
-      // Emit every tick so queueDepth/activeCount form a continuous time-series
-      // that can be charted over time. metric=freebuff_waiting_room makes it
-      // filterable in the log aggregator.
+      // Emit every tick so per-model queue depth and active counts form a
+      // continuous time-series that can be charted over time.
+      // metric=freebuff_waiting_room makes it filterable in the log aggregator.
       logger.info(
         {
           metric: 'freebuff_waiting_room',
           admitted: result.admitted,
           expired: result.expired,
-          queueDepth: result.queueDepth,
-          activeCount: result.activeCount,
+          evictedBanned: result.evictedBanned,
+          queueDepthByModel: result.queueDepthByModel,
+          activeCountByModel: result.activeCountByModel,
           skipped: result.skipped,
         },
         '[FreeSessionAdmission] tick',

@@ -5,6 +5,7 @@ import React, { useMemo, useState } from 'react'
 import { AdBanner } from './ad-banner'
 import { Button } from './button'
 import { ChoiceAdBanner } from './choice-ad-banner'
+import { FreebuffModelSelector } from './freebuff-model-selector'
 import { ShimmerText } from './shimmer-text'
 import { useFreebuffCtrlCExit } from '../hooks/use-freebuff-ctrl-c-exit'
 import { useGravityAd } from '../hooks/use-gravity-ad'
@@ -91,6 +92,11 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
   const elapsedMs = queuedAtMs ? now - queuedAtMs : 0
 
   const isQueued = session?.status === 'queued'
+  // 'none' = user hasn't joined any queue yet. We're in the pre-chat landing
+  // state: show the picker with live N-ahead hints and a prompt. Picking a
+  // model triggers joinFreebuffQueue, which POSTs and transitions us to
+  // 'queued' (waiting room) or straight to 'active' (chat) if no wait.
+  const isLanding = session?.status === 'none'
 
   return (
     <box
@@ -159,10 +165,19 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
             </text>
           )}
 
-          {((!session && !error) || session?.status === 'none') && (
+          {!session && !error && (
             <text style={{ fg: theme.muted }}>
-              <ShimmerText text="Joining the waiting room…" />
+              <ShimmerText text="Connecting…" />
             </text>
+          )}
+
+          {isLanding && (
+            <>
+              <text style={{ fg: theme.foreground, marginBottom: 1 }}>
+                Pick a model to start
+              </text>
+              <FreebuffModelSelector />
+            </>
           )}
 
           {isQueued && session && (
@@ -173,11 +188,14 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                   : "You're in the waiting room"}
               </text>
 
+              <FreebuffModelSelector />
+
               <box
                 style={{
                   flexDirection: 'column',
                   alignItems: 'flex-start',
                   gap: 0,
+                  marginTop: 1,
                 }}
               >
                 <text style={{ fg: theme.foreground, alignSelf: 'flex-start' }}>
@@ -187,13 +205,11 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                   </span>
                   <span fg={theme.muted}> / {session.queueDepth}</span>
                 </text>
-                <text style={{ fg: theme.foreground, alignSelf: 'flex-start' }}>
-                  <span fg={theme.muted}>Wait     </span>
-                  <span fg={theme.primary}>
-                    {session.position === 1
-                      ? 'any moment now'
-                      : formatWait(session.estimatedWaitMs)}
-                  </span>
+                <text style={{ fg: theme.muted, alignSelf: 'flex-start' }}>
+                  <span>Wait     </span>
+                  {session.position === 1
+                    ? 'any moment now'
+                    : formatWait(session.estimatedWaitMs)}
                 </text>
                 <text style={{ fg: theme.muted, alignSelf: 'flex-start' }}>
                   <span>Elapsed  </span>
@@ -223,6 +239,21 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                 <span fg={theme.foreground}>{session.countryCode}</span>,
                 which is outside the countries where freebuff is currently
                 offered. Press Ctrl+C to exit.
+              </text>
+            </>
+          )}
+
+          {/* Account banned. Terminal — polling has stopped. Blocking here
+              stops banned bots from re-entering the queue every few seconds
+              and inflating queueDepth between admission-tick sweeps. */}
+          {session?.status === 'banned' && (
+            <>
+              <text style={{ fg: theme.secondary, marginBottom: 1 }}>
+                ⚠ Account unavailable
+              </text>
+              <text style={{ fg: theme.muted, wrapMode: 'word' }}>
+                This account can't use freebuff. If you think this is a
+                mistake, contact support@codebuff.com. Press Ctrl+C to exit.
               </text>
             </>
           )}

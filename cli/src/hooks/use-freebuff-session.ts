@@ -1,6 +1,10 @@
 import { env } from '@codebuff/common/env'
 import { useEffect } from 'react'
 
+import {
+  getSelectedFreebuffModel,
+  useFreebuffModelStore,
+} from '../state/freebuff-model-store'
 import { useFreebuffSessionStore } from '../state/freebuff-session-store'
 import { getAuthTokenDetails } from '../utils/auth'
 import { IS_FREEBUFF } from '../utils/constants'
@@ -15,6 +19,9 @@ const POLL_INTERVAL_ERROR_MS = 10_000
 /** Header sent on GET so the server can detect when another CLI on the same
  *  account has rotated the id and respond with `{ status: 'superseded' }`. */
 const FREEBUFF_INSTANCE_HEADER = 'x-freebuff-instance-id'
+
+/** Header sent on POST telling the server which model's queue to join. */
+const FREEBUFF_MODEL_HEADER = 'x-freebuff-model'
 
 /** Play the terminal bell so users get an audible notification on admission. */
 const playAdmissionSound = () => {
@@ -33,11 +40,14 @@ const sessionEndpoint = (): string => {
 async function callSession(
   method: 'POST' | 'GET' | 'DELETE',
   token: string,
-  opts: { instanceId?: string; signal?: AbortSignal } = {},
+  opts: { instanceId?: string; model?: string; signal?: AbortSignal } = {},
 ): Promise<FreebuffSessionResponse> {
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` }
   if (method === 'GET' && opts.instanceId) {
     headers[FREEBUFF_INSTANCE_HEADER] = opts.instanceId
+  }
+  if (method === 'POST' && opts.model) {
+    headers[FREEBUFF_MODEL_HEADER] = opts.model
   }
   const resp = await fetch(sessionEndpoint(), {
     method,
@@ -50,17 +60,29 @@ async function callSession(
   if (resp.status === 404) {
     return { status: 'disabled' }
   }
-  // 403 with a country_blocked body is a terminal signal, not an error — the
-  // server rejects non-allowlist countries up front (see session _handlers.ts)
-  // so users don't wait through the queue only to be rejected at chat time.
-  // The 403 status (rather than 200) is deliberate: older CLIs that don't
-  // know this status treat it as a generic error and back off on the 10s
-  // error-retry cadence instead of tight-polling an unrecognized 200 body.
+  // 403 with a country_blocked or banned body is a terminal signal, not an
+  // error — the server rejects non-allowlist countries and banned accounts up
+  // front (see session _handlers.ts) so they don't wait through the queue only
+  // to be rejected at chat time. The 403 status (rather than 200) is
+  // deliberate: older CLIs that don't know these statuses treat them as a
+  // generic error and back off on the 10s error-retry cadence instead of
+  // tight-polling an unrecognized 200 body.
   if (resp.status === 403) {
     const body = (await resp.json().catch(() => null)) as
       | FreebuffSessionResponse
       | null
-    if (body && body.status === 'country_blocked') {
+    if (body && (body.status === 'country_blocked' || body.status === 'banned')) {
+      return body
+    }
+  }
+  // 409 from POST means the user picked a different model than their active
+  // session is bound to. Surface as a non-throw `model_locked` so the UI can
+  // show a confirmation prompt (DELETE then re-POST to switch).
+  if (resp.status === 409 && method === 'POST') {
+    const body = (await resp.json().catch(() => null)) as
+      | FreebuffSessionResponse
+      | null
+    if (body && body.status === 'model_locked') {
       return body
     }
   }
@@ -95,6 +117,8 @@ function nextDelayMs(next: FreebuffSessionResponse): number | null {
     case 'disabled':
     case 'superseded':
     case 'country_blocked':
+    case 'banned':
+    case 'model_locked':
       return null
   }
 }
@@ -102,15 +126,22 @@ function nextDelayMs(next: FreebuffSessionResponse): number | null {
 // --- Poll-loop control surface ---------------------------------------------
 //
 // The hook below registers a controller object here on mount; module-level
-// imperative functions (refresh / mark superseded / mark ended / etc.) talk
+// imperative functions (restart / mark superseded / mark ended / etc.) talk
 // to it without going through React. Non-React callers (chat-completions
 // gate, exit paths) hit those functions directly.
 
+/** How the next tick should behave after a forced restart.
+ *   - 'rejoin'  → POST: claim/rotate a seat (used after explicit end-and-rejoin
+ *                 or when the chat gate kicks us back to the queue).
+ *   - 'landing' → GET: drop to the model-picker (status 'none') so the user
+ *                 reconfirms a model before rejoining. */
+type RestartMode = 'rejoin' | 'landing'
+
 interface PollController {
-  refresh: () => Promise<void>
+  /** Cancel the in-flight tick + timer and start a fresh one in `mode`. */
+  restart: (mode: RestartMode) => Promise<void>
   apply: (next: FreebuffSessionResponse) => void
   abort: () => void
-  setHasPosted: (value: boolean) => void
 }
 
 let controller: PollController | null = null
@@ -131,18 +162,116 @@ export function getFreebuffInstanceId(): string | undefined {
   }
 }
 
+/** True when the session row represents a server-side slot the caller is
+ *  holding (queued, active, or in the post-expiry grace window with a live
+ *  instance id). DELETE only matters in those states; otherwise we'd fire a
+ *  spurious request the server has nothing to act on. */
+function shouldReleaseSlot(
+  current: FreebuffSessionResponse | null,
+): boolean {
+  if (!current) return false
+  return (
+    current.status === 'queued' ||
+    current.status === 'active' ||
+    (current.status === 'ended' && Boolean(current.instanceId))
+  )
+}
+
+/** Best-effort DELETE of the caller's session row, gated on actually holding
+ *  one. Used both by exit paths and any flow that wants the next POST to
+ *  start clean (rejoin, return-to-landing). Always swallows errors — the
+ *  server-side sweep is the backstop. */
+async function releaseFreebuffSlot(): Promise<void> {
+  const current = useFreebuffSessionStore.getState().session
+  if (!shouldReleaseSlot(current)) return
+  const { token } = getAuthTokenDetails()
+  if (!token) return
+  try {
+    await callSession('DELETE', token)
+  } catch {
+    // swallow
+  }
+}
+
+async function resetChatStore(): Promise<void> {
+  const { useChatStore } = await import('../state/chat-store')
+  useChatStore.getState().reset()
+}
+
+interface RestartOpts {
+  resetChat?: boolean
+  /** DELETE the held slot before restarting so the next POST starts clean. */
+  releaseSlot?: boolean
+}
+
+async function restartFreebuffSession(
+  mode: RestartMode,
+  opts: RestartOpts = {},
+): Promise<void> {
+  if (!IS_FREEBUFF) return
+  // Halt the running poll loop before we touch local stores or DELETE the
+  // slot. Otherwise an in-flight GET could land mid-reset and overwrite
+  // state, or the next scheduled tick could fire between DELETE and
+  // restart() with stale assumptions. restart() re-aborts and re-arms
+  // below; the extra abort here is cheap.
+  controller?.abort()
+  if (opts.resetChat) await resetChatStore()
+  if (opts.releaseSlot) await releaseFreebuffSlot()
+  await controller?.restart(mode)
+}
+
 /**
  * Re-POST to the server (rejoining the queue / rotating the instance id).
  * Pass `resetChat: true` to also wipe local chat history — used when
  * rejoining after a session ended so the next admitted session starts fresh.
  */
-export async function refreshFreebuffSession(opts: { resetChat?: boolean } = {}): Promise<void> {
+export function refreshFreebuffSession(
+  opts: { resetChat?: boolean } = {},
+): Promise<void> {
+  return restartFreebuffSession('rejoin', { resetChat: opts.resetChat })
+}
+
+/**
+ * Drop back to the pre-join landing state (model picker) instead of auto
+ * re-queuing. Used after a session ends: the user lands on the picker so
+ * they consciously choose a model and hit Enter to join, rather than being
+ * silently re-queued for whatever model they last used.
+ */
+export function returnToFreebuffLanding(
+  opts: { resetChat?: boolean } = {},
+): Promise<void> {
+  return restartFreebuffSession('landing', {
+    resetChat: opts.resetChat,
+    releaseSlot: true,
+  })
+}
+
+/**
+ * Join (or re-queue for) `model`. Dual-purpose:
+ *   - First join: called from the pre-chat landing picker. The session starts
+ *     at `none` (GET-only); this is the user's explicit commitment to enter.
+ *   - Switch: called when the user picks a different model from within the
+ *     waiting room. Server moves them to the back of the new model's queue.
+ *
+ * If the server has already admitted them on a different model, it responds
+ * with `model_locked`; the tick loop silently reverts the local selection to
+ * the locked model so the active session stays intact. Users who really want
+ * to switch can /end-session deliberately.
+ */
+export function joinFreebuffQueue(model: string): Promise<void> {
+  if (!IS_FREEBUFF) return Promise.resolve()
+  useFreebuffModelStore.getState().setSelectedModel(model)
+  return restartFreebuffSession('rejoin')
+}
+
+/**
+ * Best-effort DELETE of the caller's session row. Used by exit paths that
+ * skip React unmount (process.exit on Ctrl+C) so the seat frees up quickly
+ * instead of waiting for the server-side expiry sweep.
+ */
+export async function endFreebuffSessionBestEffort(): Promise<void> {
   if (!IS_FREEBUFF) return
-  if (opts.resetChat) {
-    const { useChatStore } = await import('../state/chat-store')
-    useChatStore.getState().reset()
-  }
-  await controller?.refresh()
+  await releaseFreebuffSlot()
 }
 
 export function markFreebuffSessionSuperseded(): void {
@@ -159,30 +288,6 @@ export function markFreebuffSessionEnded(): void {
   controller?.apply({ status: 'ended' })
 }
 
-/**
- * Best-effort DELETE of the caller's session row. Used by exit paths that
- * skip React unmount (process.exit on Ctrl+C) so the seat frees up quickly
- * instead of waiting for the server-side expiry sweep.
- */
-export async function endFreebuffSessionBestEffort(): Promise<void> {
-  if (!IS_FREEBUFF) return
-  const current = useFreebuffSessionStore.getState().session
-  if (!current) return
-  // Only fire DELETE if we actually held a slot.
-  const heldSlot =
-    current.status === 'queued' ||
-    current.status === 'active' ||
-    (current.status === 'ended' && Boolean(current.instanceId))
-  if (!heldSlot) return
-  const { token } = getAuthTokenDetails()
-  if (!token) return
-  try {
-    await callSession('DELETE', token)
-  } catch {
-    // swallow — we're exiting
-  }
-}
-
 interface UseFreebuffSessionResult {
   session: FreebuffSessionResponse | null
   error: string | null
@@ -190,9 +295,13 @@ interface UseFreebuffSessionResult {
 
 /**
  * Manages the freebuff waiting-room session lifecycle:
- *   - POST on mount to join the queue / rotate instance id
+ *   - GET on mount to probe state (no auto-join; the user picks a model in
+ *     the landing screen, which calls joinFreebuffQueue)
+ *   - if the probe sees an existing seat, POSTs once to take over (rotates
+ *     the instance id so any other CLI on the same account is superseded)
  *   - polls GET while queued (fast) or active (slow) to keep state fresh
- *   - re-POSTs on explicit refresh (chat gate rejected us)
+ *   - re-POSTs on explicit refresh (chat gate rejected us, user switched
+ *     models, user rejoined after ending)
  *   - DELETE on unmount so the slot frees up for the next user
  *   - plays a bell on transition from queued → active
  */
@@ -222,7 +331,11 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
     let abortController = new AbortController()
     let timer: ReturnType<typeof setTimeout> | null = null
     let previousStatus: FreebuffSessionResponse['status'] | null = null
-    let hasPosted = false
+    // Method for the NEXT tick. GET is read-only; POST claims/rotates a seat.
+    // Startup is GET (probe before committing). After any POST completes we
+    // flip back to GET. refresh() sets it to 'POST' for explicit join/rejoin;
+    // the startup takeover branch does the same when the probe finds a seat.
+    let nextMethod: 'GET' | 'POST' = 'GET'
 
     const apply = (next: FreebuffSessionResponse) => {
       setSession(next)
@@ -245,18 +358,48 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
 
     const tick = async () => {
       if (cancelled) return
-      // POST when we don't yet hold a seat; thereafter GET. The
-      // active|ended → none edge is special-cased below so we don't silently
-      // re-POST out from under an in-flight agent.
-      const method: 'POST' | 'GET' = hasPosted ? 'GET' : 'POST'
+      const method = nextMethod
       const instanceId = getFreebuffInstanceId()
+      const model = getSelectedFreebuffModel()
       try {
         const next = await callSession(method, token, {
           signal: abortController.signal,
           instanceId,
+          model,
         })
         if (cancelled) return
-        hasPosted = true
+        // After any successful call, default back to GET polling. The
+        // takeover and model_locked branches below override this when they
+        // need another POST.
+        nextMethod = 'GET'
+
+        // Race recovery: user picked a different model in the waiting room at
+        // the exact moment the server admitted them with the original model.
+        // Silently revert the local selection and re-tick so the next call
+        // (a GET) lands the actual active session. Users who really want to
+        // switch can /end-session deliberately.
+        if (next.status === 'model_locked') {
+          useFreebuffModelStore.getState().setSelectedModel(next.currentModel)
+          schedule(0)
+          return
+        }
+
+        // Startup takeover: the initial probe GET saw we already hold a seat
+        // (from a prior CLI instance). POST now to rotate our instance id so
+        // any other CLI on this account is superseded on its next poll.
+        // `previousStatus === null` fences this to the very first tick only.
+        // Pin the selected model to whatever the server thinks we're on so
+        // the POST preserves our queue position instead of switching queues.
+        if (
+          method === 'GET' &&
+          previousStatus === null &&
+          (next.status === 'queued' || next.status === 'active')
+        ) {
+          useFreebuffModelStore.getState().setSelectedModel(next.model)
+          nextMethod = 'POST'
+          schedule(0)
+          return
+        }
 
         if (previousStatus === 'queued' && next.status === 'active') {
           playAdmissionSound()
@@ -287,24 +430,48 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
     }
 
     controller = {
-      refresh: async () => {
+      restart: async (mode) => {
         clearTimer()
         // Abort any in-flight fetch so it can't race us and overwrite state.
         abortController.abort()
         abortController = new AbortController()
         // Reset previousStatus so the queued→active bell still fires after
-        // a forced re-POST.
+        // a forced restart, and so the active|ended → none synthesis below
+        // doesn't bounce a 'landing' restart straight back to 'ended'.
         previousStatus = null
-        hasPosted = false
+        if (mode === 'landing') {
+          // Land on the picker immediately. We can't go through the normal
+          // tick/apply path because a server-side row that hasn't been
+          // swept yet would trip the startup-takeover branch into an
+          // auto-POST — the exact silent-rejoin this mode exists to
+          // prevent. But the picker still needs live queue depths for its
+          // "N ahead" hints, so kick off a fire-and-forget GET and extract
+          // just queueDepthByModel from the response, ignoring whatever
+          // status it claims. Polling resumes when the user commits to a
+          // model via joinFreebuffQueue.
+          apply({ status: 'none' })
+          const fetchController = abortController
+          callSession('GET', token, { signal: fetchController.signal })
+            .then((response) => {
+              if (cancelled || fetchController.signal.aborted) return
+              const depths =
+                response.status === 'none' || response.status === 'queued'
+                  ? response.queueDepthByModel
+                  : undefined
+              if (depths) apply({ status: 'none', queueDepthByModel: depths })
+            })
+            .catch(() => {
+              // Silent — blank hints are acceptable if the fetch fails.
+            })
+          return
+        }
+        nextMethod = 'POST'
         await tick()
       },
       apply,
       abort: () => {
         clearTimer()
         abortController.abort()
-      },
-      setHasPosted: (value) => {
-        hasPosted = value
       },
     }
 
@@ -319,12 +486,7 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
 
       // Fire-and-forget DELETE. Only release if we actually held a slot so
       // we don't generate spurious DELETEs (e.g. HMR before POST completes).
-      if (
-        current &&
-        (current.status === 'queued' ||
-          current.status === 'active' ||
-          (current.status === 'ended' && current.instanceId))
-      ) {
+      if (shouldReleaseSlot(current)) {
         callSession('DELETE', token).catch(() => {})
       }
       setSession(null)

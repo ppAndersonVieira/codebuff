@@ -3,19 +3,20 @@ import { CLAUDE_OAUTH_ENABLED } from '@codebuff/common/constants/claude-oauth'
 import { safeOpen } from '../utils/open-url'
 
 import { handleAdsEnable, handleAdsDisable } from './ads'
-import { buildInterviewPrompt, buildPlanPrompt, buildReviewPromptFromArgs } from './prompt-builders'
-import { useThemeStore } from '../hooks/use-theme'
 import { handleHelpCommand } from './help'
 import { handleImageCommand } from './image'
 import { handleInitializationFlowLocally } from './init'
+import { buildInterviewPrompt, buildPlanPrompt, buildReviewPromptFromArgs } from './prompt-builders'
 import { runBashCommand } from './router'
 import { handleUsageCommand } from './usage'
+import { returnToFreebuffLanding } from '../hooks/use-freebuff-session'
+import { useThemeStore } from '../hooks/use-theme'
 import { WEBSITE_URL } from '../login/constants'
 import { useChatStore } from '../state/chat-store'
 import { useFeedbackStore } from '../state/feedback-store'
 import { useLoginStore } from '../state/login-store'
 import { getChatGptOAuthStatus } from '../utils/chatgpt-oauth'
-import { AGENT_MODES, IS_FREEBUFF } from '../utils/constants'
+import { AGENT_MODES, END_SESSION_MESSAGE, IS_FREEBUFF } from '../utils/constants'
 import { getSystemMessage, getUserMessage } from '../utils/message-history'
 import { capturePendingAttachments } from '../utils/pending-attachments'
 import { getSkillByName } from '../utils/skill-registry'
@@ -178,6 +179,7 @@ const FREEBUFF_REMOVED_COMMANDS = new Set([
 const FREEBUFF_ONLY_COMMANDS = new Set([
   'connect',
   'plan',
+  'end-session',
 ])
 
 const ALL_COMMANDS: CommandDefinition[] = [
@@ -609,6 +611,26 @@ const ALL_COMMANDS: CommandDefinition[] = [
         getSystemMessage(`Switched to ${newTheme} theme.`),
       ])
       clearInput(params)
+    },
+  }),
+  // /end-session (freebuff-only) — end the active session early and drop back
+  // to the model picker. The hook flips status to 'none', which unmounts
+  // <Chat> and mounts <WaitingRoomScreen> on the landing view, where the
+  // user picks a model and hits Enter to rejoin the queue.
+  defineCommand({
+    name: 'end-session',
+    handler: (params) => {
+      params.setMessages((prev) => [
+        ...prev,
+        getUserMessage(params.inputValue.trim()),
+        getSystemMessage(END_SESSION_MESSAGE),
+      ])
+      params.saveToHistory(params.inputValue.trim())
+      clearInput(params)
+      returnToFreebuffLanding({ resetChat: true }).catch(() => {
+        // The hook surfaces poll errors via the session store; nothing to do
+        // here beyond letting the chat history reflect the attempt.
+      })
     },
   }),
 ]

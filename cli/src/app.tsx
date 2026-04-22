@@ -370,12 +370,12 @@ const AuthedSurface = ({
     return <FreebuffSupersededScreen />
   }
 
-  // Route every non-admitted state through the waiting room:
-  //   null     → initial POST in flight
+  // Route every non-admitted state through the pre-chat screen:
+  //   null     → initial GET in flight (brief)
+  //   'none'   → no seat yet; show model-picker landing
   //   'queued' → waiting our turn
-  //   'none'   → server lost our row; hook is about to re-POST
-  // Falling through to <Chat> on 'none' would leave the user unable to send
-  // any free-mode request until the next poll cycle.
+  //   'country_blocked' → terminal region-gate message
+  //   'banned' → terminal account-banned message
   //
   // 'ended' deliberately falls through to <Chat>: the agent may still be
   // finishing work under the server-side grace period, and the chat surface
@@ -385,7 +385,8 @@ const AuthedSurface = ({
     (session === null ||
       session.status === 'queued' ||
       session.status === 'none' ||
-      session.status === 'country_blocked')
+      session.status === 'country_blocked' ||
+      session.status === 'banned')
   ) {
     return <WaitingRoomScreen session={session} error={sessionError} />
   }

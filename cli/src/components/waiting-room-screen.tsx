@@ -2,7 +2,6 @@ import { TextAttributes } from '@opentui/core'
 import { useRenderer } from '@opentui/react'
 import React, { useMemo, useState } from 'react'
 
-import { AdBanner } from './ad-banner'
 import { Button } from './button'
 import { ChoiceAdBanner } from './choice-ad-banner'
 import { FreebuffModelSelector } from './freebuff-model-selector'
@@ -73,9 +72,11 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
   // Always enable ads in the waiting room — this is where monetization lives.
   // forceStart bypasses the "wait for first user message" gate inside the hook,
   // which would otherwise block ads here since no conversation exists yet.
-  const { ad, adData, recordImpression } = useGravityAd({
+  // Uses Carbon (BuySellAds); in-chat ads still use the Gravity default.
+  const { adData, recordImpression } = useGravityAd({
     enabled: true,
     forceStart: true,
+    provider: 'carbon',
   })
 
   useFreebuffCtrlCExit()
@@ -261,21 +262,17 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
       </box>
 
       {/* Ad banner pinned to the bottom, same look-and-feel as in chat. */}
-      {ad && (
+      {adData && (
         <box style={{ flexShrink: 0 }}>
-          {adData?.variant === 'choice' ? (
-            <ChoiceAdBanner
-              ads={adData.ads}
-              onImpression={recordImpression}
-            />
-          ) : (
-            <AdBanner ad={ad} onDisableAds={() => {}} isFreeMode />
-          )}
+          <ChoiceAdBanner
+            ads={adData.variant === 'choice' ? adData.ads : [adData.ad]}
+            onImpression={recordImpression}
+          />
         </box>
       )}
 
       {/* Horizontal separator (mirrors chat input divider style) */}
-      {!ad && (
+      {!adData && (
         <text style={{ fg: theme.muted, flexShrink: 0 }}>
           {'─'.repeat(terminalWidth)}
         </text>

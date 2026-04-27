@@ -1,14 +1,12 @@
 import { NextResponse } from 'next/server'
+import { env } from '@codebuff/internal/env'
 
 import {
   endUserSession,
   getSessionState,
   requestSession,
 } from '@/server/free-session/public-api'
-import {
-  FREE_MODE_ALLOWED_COUNTRIES,
-  getCountryCode,
-} from '@/server/free-mode-country'
+import { getFreeModeCountryAccess } from '@/server/free-mode-country'
 import { extractApiKeyFromHeader } from '@/util/auth'
 
 import type { SessionDeps } from '@/server/free-session/public-api'
@@ -16,22 +14,29 @@ import type { GetUserInfoFromApiKeyFn } from '@codebuff/common/types/contracts/d
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { NextRequest } from 'next/server'
 
-/** Early country gate. Mirrors the chat/completions check: if we can resolve
- *  the caller's country and it's not on the allowlist, short-circuit with a
- *  terminal `country_blocked` response so the CLI can show the warning
- *  screen without ever joining the queue. Null country (VPN / localhost)
- *  fails open — chat/completions will catch it later if it matters.
+/** Early country gate. Mirrors the chat/completions check: require a resolved
+ *  allowlisted country before joining the queue. Unknown/anonymized locations
+ *  are treated as blocked because they commonly indicate VPN, Tor, localhost,
+ *  or proxy traffic.
  *
  *  Returns HTTP 403 (not 200) so older CLIs — which don't know the
  *  `country_blocked` status and would tight-poll on an unrecognized 200
  *  body — fall into their existing `!resp.ok` error path and back off on
  *  the 10s error retry cadence. The new CLI parses the 403 body directly. */
-function countryBlockedResponse(req: NextRequest): NextResponse | null {
-  const countryCode = getCountryCode(req)
-  if (!countryCode) return null
-  if (FREE_MODE_ALLOWED_COUNTRIES.has(countryCode)) return null
+async function countryBlockedResponse(
+  req: NextRequest,
+): Promise<NextResponse | null> {
+  const countryAccess = await getFreeModeCountryAccess(req, {
+    ipinfoToken: env.IPINFO_TOKEN,
+  })
+  if (countryAccess.allowed) return null
   return NextResponse.json(
-    { status: 'country_blocked', countryCode },
+    {
+      status: 'country_blocked',
+      countryCode: countryAccess.countryCode ?? 'UNKNOWN',
+      countryBlockReason: countryAccess.blockReason,
+      ipPrivacySignals: countryAccess.ipPrivacy?.signals,
+    },
     { status: 403 },
   )
 }
@@ -52,7 +57,10 @@ type AuthResult =
   | { error: NextResponse }
   | { userId: string; userEmail: string | null; userBanned: boolean }
 
-async function resolveUser(req: NextRequest, deps: FreebuffSessionDeps): Promise<AuthResult> {
+async function resolveUser(
+  req: NextRequest,
+  deps: FreebuffSessionDeps,
+): Promise<AuthResult> {
   const apiKey = extractApiKeyFromHeader(req)
   if (!apiKey) {
     return {
@@ -125,7 +133,7 @@ export async function postFreebuffSession(
   const auth = await resolveUser(req, deps)
   if ('error' in auth) return auth.error
 
-  const blocked = countryBlockedResponse(req)
+  const blocked = await countryBlockedResponse(req)
   if (blocked) return blocked
 
   const requestedModel = req.headers.get(FREEBUFF_MODEL_HEADER) ?? ''
@@ -138,12 +146,21 @@ export async function postFreebuffSession(
       model: requestedModel,
       deps: deps.sessionDeps,
     })
-    // model_locked is a 409 so it's distinguishable from a normal queued/active
-    // response on the client. banned is a 403 (terminal, mirrors country_blocked)
-    // so older CLIs that don't know the status fall into their `!resp.ok` error
-    // path and back off instead of tight-polling on the unrecognized 200 body.
+    // model_locked / model_unavailable are 409 so they're distinguishable
+    // from normal queued/active responses on the client. banned is a 403
+    // (terminal, mirrors country_blocked) so older CLIs that don't know the
+    // status fall into their `!resp.ok` error path and back off instead of
+    // tight-polling on the unrecognized 200 body. rate_limited uses 429 for
+    // the same reason as banned — older CLIs back off, newer CLIs parse the
+    // structured body.
     const status =
-      state.status === 'model_locked' ? 409 : state.status === 'banned' ? 403 : 200
+      state.status === 'model_locked' || state.status === 'model_unavailable'
+        ? 409
+        : state.status === 'banned'
+          ? 403
+          : state.status === 'rate_limited'
+            ? 429
+            : 200
     return NextResponse.json(state, { status })
   } catch (error) {
     return serverError(deps, 'POST', auth.userId, error)
@@ -160,11 +177,12 @@ export async function getFreebuffSession(
   const auth = await resolveUser(req, deps)
   if ('error' in auth) return auth.error
 
-  const blocked = countryBlockedResponse(req)
+  const blocked = await countryBlockedResponse(req)
   if (blocked) return blocked
 
   try {
-    const claimedInstanceId = req.headers.get(FREEBUFF_INSTANCE_HEADER) ?? undefined
+    const claimedInstanceId =
+      req.headers.get(FREEBUFF_INSTANCE_HEADER) ?? undefined
     const state = await getSessionState({
       userId: auth.userId,
       userEmail: auth.userEmail,

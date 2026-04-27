@@ -1,4 +1,8 @@
 import { env } from '@codebuff/common/env'
+import {
+  FALLBACK_FREEBUFF_MODEL_ID,
+  resolveFreebuffModel,
+} from '@codebuff/common/constants/freebuff-models'
 import { useEffect } from 'react'
 
 import {
@@ -9,8 +13,13 @@ import { useFreebuffSessionStore } from '../state/freebuff-session-store'
 import { getAuthTokenDetails } from '../utils/auth'
 import { IS_FREEBUFF } from '../utils/constants'
 import { logger } from '../utils/logger'
+import { saveFreebuffModelPreference } from '../utils/settings'
 
 import type { FreebuffSessionResponse } from '../types/freebuff-session'
+import type {
+  FreebuffCountryBlockReason,
+  FreebuffIpPrivacySignal,
+} from '@codebuff/common/types/freebuff-session'
 
 const POLL_INTERVAL_QUEUED_MS = 5_000
 const POLL_INTERVAL_ACTIVE_MS = 30_000
@@ -33,7 +42,9 @@ const playAdmissionSound = () => {
 }
 
 const sessionEndpoint = (): string => {
-  const base = (env.NEXT_PUBLIC_CODEBUFF_APP_URL || 'https://codebuff.com').replace(/\/$/, '')
+  const base = (
+    env.NEXT_PUBLIC_CODEBUFF_APP_URL || 'https://codebuff.com'
+  ).replace(/\/$/, '')
   return `${base}/api/v1/freebuff/session`
 }
 
@@ -68,21 +79,41 @@ async function callSession(
   // generic error and back off on the 10s error-retry cadence instead of
   // tight-polling an unrecognized 200 body.
   if (resp.status === 403) {
-    const body = (await resp.json().catch(() => null)) as
-      | FreebuffSessionResponse
-      | null
-    if (body && (body.status === 'country_blocked' || body.status === 'banned')) {
+    const body = (await resp
+      .json()
+      .catch(() => null)) as FreebuffSessionResponse | null
+    if (
+      body &&
+      (body.status === 'country_blocked' || body.status === 'banned')
+    ) {
       return body
     }
   }
-  // 409 from POST means the user picked a different model than their active
-  // session is bound to. Surface as a non-throw `model_locked` so the UI can
-  // show a confirmation prompt (DELETE then re-POST to switch).
+  // 409 from POST means the selected model cannot be joined right now, either
+  // because an active session is locked to another model or because a
+  // Surface model-switch conflicts and temporary model availability closures
+  // as non-throw states.
   if (resp.status === 409 && method === 'POST') {
-    const body = (await resp.json().catch(() => null)) as
-      | FreebuffSessionResponse
-      | null
-    if (body && body.status === 'model_locked') {
+    const body = (await resp
+      .json()
+      .catch(() => null)) as FreebuffSessionResponse | null
+    if (
+      body &&
+      (body.status === 'model_locked' || body.status === 'model_unavailable')
+    ) {
+      return body
+    }
+  }
+  // 429 from POST is the per-model session-quota reject (e.g. too many GLM
+  // sessions in the last 12h). Terminal for the current poll — the CLI shows
+  // a screen explaining the limit and when the user can try again. The 429
+  // status (rather than 200) keeps older CLIs in their error path so they
+  // back off instead of tight-polling an unrecognized 200 body.
+  if (resp.status === 429 && method === 'POST') {
+    const body = (await resp
+      .json()
+      .catch(() => null)) as FreebuffSessionResponse | null
+    if (body && body.status === 'rate_limited') {
       return body
     }
   }
@@ -119,6 +150,8 @@ function nextDelayMs(next: FreebuffSessionResponse): number | null {
     case 'country_blocked':
     case 'banned':
     case 'model_locked':
+    case 'rate_limited':
+    case 'model_unavailable':
       return null
   }
 }
@@ -166,9 +199,7 @@ export function getFreebuffInstanceId(): string | undefined {
  *  holding (queued, active, or in the post-expiry grace window with a live
  *  instance id). DELETE only matters in those states; otherwise we'd fire a
  *  spurious request the server has nothing to act on. */
-function shouldReleaseSlot(
-  current: FreebuffSessionResponse | null,
-): boolean {
+function shouldReleaseSlot(current: FreebuffSessionResponse | null): boolean {
   if (!current) return false
   return (
     current.status === 'queued' ||
@@ -260,7 +291,13 @@ export function returnToFreebuffLanding(
  */
 export function joinFreebuffQueue(model: string): Promise<void> {
   if (!IS_FREEBUFF) return Promise.resolve()
-  useFreebuffModelStore.getState().setSelectedModel(model)
+  // This is the only explicit user-pick path (called from the picker on
+  // click / Enter), so persistence belongs here — and ONLY here. Server-
+  // driven flips (`model_locked`, `model_unavailable`, takeover) go
+  // through `setSelectedModel` directly, which never writes to disk.
+  const resolved = resolveFreebuffModel(model)
+  useFreebuffModelStore.getState().setSelectedModel(resolved)
+  saveFreebuffModelPreference(resolved)
   return restartFreebuffSession('rejoin')
 }
 
@@ -282,14 +319,18 @@ export function markFreebuffSessionSuperseded(): void {
 
 /** Flip into the terminal `country_blocked` state from outside the poll loop.
  *  Used when the chat-completions gate rejects on country even though the
- *  session-level country check had failed open (null detection → admitted).
+ *  session-level country check did not catch the request first.
  *  Transitioning the session state here unmounts the Chat surface in favor of
  *  the waiting-room's country_blocked message, so the user can't keep typing
  *  and sending doomed requests. */
-export function markFreebuffSessionCountryBlocked(countryCode: string): void {
+export function markFreebuffSessionCountryBlocked(params: {
+  countryCode: string
+  countryBlockReason?: FreebuffCountryBlockReason
+  ipPrivacySignals?: FreebuffIpPrivacySignal[]
+}): void {
   if (!IS_FREEBUFF) return
   controller?.abort()
-  controller?.apply({ status: 'country_blocked', countryCode })
+  controller?.apply({ status: 'country_blocked', ...params })
   // Best-effort DELETE so we don't hold a waiting-room seat on a session the
   // server is already refusing to serve at chat time.
   releaseFreebuffSlot().catch(() => {})
@@ -346,6 +387,7 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
     let abortController = new AbortController()
     let timer: ReturnType<typeof setTimeout> | null = null
     let previousStatus: FreebuffSessionResponse['status'] | null = null
+    let restartGeneration = 0
     // Method for the NEXT tick. GET is read-only; POST claims/rotates a seat.
     // Startup is GET (probe before committing). After any POST completes we
     // flip back to GET. refresh() sets it to 'POST' for explicit join/rejoin;
@@ -398,6 +440,19 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
           schedule(0)
           return
         }
+        if (next.status === 'model_unavailable') {
+          // Server says the requested model isn't available right now (e.g.
+          // GLM outside deployment hours). Flip to the always-available
+          // fallback for this run. In-memory only — `setSelectedModel`
+          // doesn't persist, so the user's saved preference (e.g. GLM)
+          // is preserved for their next launch during deployment hours.
+          useFreebuffModelStore
+            .getState()
+            .setSelectedModel(FALLBACK_FREEBUFF_MODEL_ID)
+          nextMethod = 'GET'
+          schedule(0)
+          return
+        }
 
         // Startup takeover: the initial probe GET saw we already hold a seat
         // (from a prior CLI instance). POST now to rotate our instance id so
@@ -446,6 +501,7 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
 
     controller = {
       restart: async (mode) => {
+        const generation = ++restartGeneration
         clearTimer()
         // Abort any in-flight fetch so it can't race us and overwrite state.
         abortController.abort()
@@ -455,6 +511,7 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
         // doesn't bounce a 'landing' restart straight back to 'ended'.
         previousStatus = null
         if (mode === 'landing') {
+          nextMethod = 'GET'
           // Land on the picker immediately. We can't go through the normal
           // tick/apply path because a server-side row that hasn't been
           // swept yet would trip the startup-takeover branch into an
@@ -468,7 +525,13 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
           const fetchController = abortController
           callSession('GET', token, { signal: fetchController.signal })
             .then((response) => {
-              if (cancelled || fetchController.signal.aborted) return
+              if (
+                cancelled ||
+                fetchController.signal.aborted ||
+                generation !== restartGeneration
+              ) {
+                return
+              }
               const depths =
                 response.status === 'none' || response.status === 'queued'
                   ? response.queueDepthByModel

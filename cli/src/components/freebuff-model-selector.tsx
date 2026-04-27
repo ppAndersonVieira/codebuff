@@ -3,15 +3,31 @@ import { useKeyboard } from '@opentui/react'
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { Button } from './button'
-import { FREEBUFF_MODELS } from '@codebuff/common/constants/freebuff-models'
+import {
+  FALLBACK_FREEBUFF_MODEL_ID,
+  FREEBUFF_GLM_MODEL_ID,
+  FREEBUFF_MODELS,
+  getFreebuffDeploymentAvailabilityLabel,
+  isFreebuffModelAvailable,
+} from '@codebuff/common/constants/freebuff-models'
 
 import { joinFreebuffQueue } from '../hooks/use-freebuff-session'
+import { useNow } from '../hooks/use-now'
 import { useFreebuffModelStore } from '../state/freebuff-model-store'
 import { useFreebuffSessionStore } from '../state/freebuff-session-store'
 import { useTerminalDimensions } from '../hooks/use-terminal-dimensions'
 import { useTheme } from '../hooks/use-theme'
+import {
+  nextSelectableFreebuffModelId,
+  resolveFreebuffModelCommitTarget,
+} from '../utils/freebuff-model-navigation'
 
 import type { KeyEvent } from '@opentui/core'
+
+const FREEBUFF_MODEL_SELECTOR_MODELS = [
+  ...FREEBUFF_MODELS.filter((model) => model.id === FREEBUFF_GLM_MODEL_ID),
+  ...FREEBUFF_MODELS.filter((model) => model.id !== FREEBUFF_GLM_MODEL_ID),
+]
 
 /**
  * Dual-purpose model picker:
@@ -33,7 +49,13 @@ export const FreebuffModelSelector: React.FC = () => {
   const theme = useTheme()
   const { terminalWidth } = useTerminalDimensions()
   const selectedModel = useFreebuffModelStore((s) => s.selectedModel)
+  const setSelectedModel = useFreebuffModelStore((s) => s.setSelectedModel)
   const session = useFreebuffSessionStore((s) => s.session)
+  const now = useNow(60_000)
+  const deploymentAvailabilityLabel = useMemo(
+    () => getFreebuffDeploymentAvailabilityLabel(new Date(now)),
+    [now],
+  )
   const [pending, setPending] = useState<string | null>(null)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   // Keyboard cursor — separate from the actually-selected model so that
@@ -44,6 +66,20 @@ export const FreebuffModelSelector: React.FC = () => {
   useEffect(() => {
     setFocusedId(selectedModel)
   }, [selectedModel])
+
+  useEffect(() => {
+    // Landing-screen safety net: if the in-memory selection becomes
+    // unavailable (e.g. deployment hours close while the picker is open),
+    // swap to the always-available fallback so Enter doesn't POST a model
+    // the server will immediately reject. In-memory only — the user's saved
+    // preference (e.g. GLM) is preserved for the next launch.
+    if (
+      (session?.status === 'none' || !session) &&
+      !isFreebuffModelAvailable(selectedModel, new Date(now))
+    ) {
+      setSelectedModel(FALLBACK_FREEBUFF_MODEL_ID)
+    }
+  }, [now, selectedModel, session, setSelectedModel])
 
   // Landing ('none'): depths come from the server snapshot, no "self" to
   // subtract. In-queue ('queued'): for the user's queue, "ahead" is
@@ -68,7 +104,7 @@ export const FreebuffModelSelector: React.FC = () => {
         out[id] =
           id === session.model
             ? Math.max(0, session.position - 1)
-            : depths[id] ?? 0
+            : (depths[id] ?? 0)
       }
       return out
     }
@@ -85,40 +121,44 @@ export const FreebuffModelSelector: React.FC = () => {
   )
 
   // Decide row vs column layout based on whether both buttons actually fit
-  // side-by-side. Each button's inner text is "● {displayName} · {tagline}  {hint}",
+  // side-by-side. Each button's inner text is
+  // "● {displayName} · {tagline} · {hours}  {hint}",
   // plus 2 cols of border and 2 cols of padding. Buttons are separated by a
   // gap of 2. If the total exceeds the terminal width, stack vertically.
   const stackVertically = useMemo(() => {
     const BUTTON_CHROME = 4 // 2 border + 2 padding
     const GAP = 2
-    const total = FREEBUFF_MODELS.reduce((sum, model, idx) => {
+    const total = FREEBUFF_MODEL_SELECTOR_MODELS.reduce((sum, model, idx) => {
       const inner =
         2 /* indicator + space */ +
         model.displayName.length +
         3 /* " · " */ +
         model.tagline.length +
+        (model.availability === 'deployment_hours'
+          ? 3 + deploymentAvailabilityLabel.length
+          : 0) +
         2 /* "  " */ +
         hintWidth
       return sum + inner + BUTTON_CHROME + (idx > 0 ? GAP : 0)
     }, 0)
     // Leave a small margin for the surrounding padding on the waiting-room screen.
     return total > terminalWidth - 4
-  }, [hintWidth, terminalWidth])
+  }, [deploymentAvailabilityLabel, hintWidth, terminalWidth])
 
   // "Already committed to this model" — only when the server has us queued
   // on it. On the landing screen (status 'none'), nothing is committed yet,
   // so picking the focused model is always a real action (first join).
-  const committedModelId =
-    session?.status === 'queued' ? session.model : null
+  const committedModelId = session?.status === 'queued' ? session.model : null
 
   const pick = useCallback(
     (modelId: string) => {
       if (pending) return
       if (modelId === committedModelId) return
+      if (!isFreebuffModelAvailable(modelId, new Date(now))) return
       setPending(modelId)
       joinFreebuffQueue(modelId).finally(() => setPending(null))
     },
-    [pending, committedModelId],
+    [pending, committedModelId, now],
   )
 
   // Tab / Shift+Tab and arrow keys move the focus highlight only; Enter or
@@ -133,28 +173,36 @@ export const FreebuffModelSelector: React.FC = () => {
           name === 'right' || name === 'down' || (name === 'tab' && !key.shift)
         const isBackward =
           name === 'left' || name === 'up' || (name === 'tab' && key.shift)
-        const isCommit = name === 'return' || name === 'enter' || name === 'space'
+        const isCommit =
+          name === 'return' || name === 'enter' || name === 'space'
         if (!isForward && !isBackward && !isCommit) return
         if (isCommit) {
-          if (focusedId !== committedModelId) {
+          const targetId = resolveFreebuffModelCommitTarget({
+            focusedId,
+            selectedId: selectedModel,
+            committedId: committedModelId,
+            isSelectable: (modelId) =>
+              isFreebuffModelAvailable(modelId, new Date(now)),
+          })
+          if (targetId) {
             key.preventDefault?.()
-            pick(focusedId)
+            pick(targetId)
           }
           return
         }
-        const currentIdx = FREEBUFF_MODELS.findIndex((m) => m.id === focusedId)
-        if (currentIdx === -1) return
-        const len = FREEBUFF_MODELS.length
-        const nextIdx = isForward
-          ? (currentIdx + 1) % len
-          : (currentIdx - 1 + len) % len
-        const target = FREEBUFF_MODELS[nextIdx]
-        if (target) {
+        const targetId = nextSelectableFreebuffModelId({
+          modelIds: FREEBUFF_MODEL_SELECTOR_MODELS.map((model) => model.id),
+          focusedId,
+          direction: isForward ? 'forward' : 'backward',
+          isSelectable: (modelId) =>
+            isFreebuffModelAvailable(modelId, new Date(now)),
+        })
+        if (targetId) {
           key.preventDefault?.()
-          setFocusedId(target.id)
+          setFocusedId(targetId)
         }
       },
-      [pending, pick, focusedId, committedModelId],
+      [pending, pick, focusedId, selectedModel, committedModelId, now],
     ),
   )
 
@@ -173,23 +221,32 @@ export const FreebuffModelSelector: React.FC = () => {
           alignItems: 'flex-start',
         }}
       >
-        {FREEBUFF_MODELS.map((model) => {
+        {FREEBUFF_MODEL_SELECTOR_MODELS.map((model) => {
           // 'Selected' means the dot is filled and the label is bold. On the
           // landing screen ('none') this tracks the pre-focused pick; on the
           // queued screen it tracks the model the server has us on. Either
-          // way, selectedModel reflects the intent of "what Enter commits to."
+          // way, selectedModel is the safe fallback if focus ever lands on a
+          // closed row (for example when deployment hours change).
           const isSelected = model.id === selectedModel
           const isHovered = hoveredId === model.id
           const isFocused = focusedId === model.id && !isSelected
+          const isAvailable = isFreebuffModelAvailable(model.id, new Date(now))
           const indicator = isSelected ? '●' : '○'
           const indicatorColor = isSelected ? theme.primary : theme.muted
-          const labelColor = isSelected ? theme.foreground : theme.muted
+          const labelColor =
+            isSelected && isAvailable ? theme.foreground : theme.muted
           // Clickable whenever picking would actually do something — i.e.
           // anything except re-picking the queue we're already in.
-          const interactable = !pending && model.id !== committedModelId
+          const interactable =
+            !pending && isAvailable && model.id !== committedModelId
           const ahead = aheadByModel?.[model.id]
-          const hint =
-            ahead === undefined ? '' : ahead === 0 ? 'No wait' : `${ahead} ahead`
+          const hint = !isAvailable
+            ? 'Closed'
+            : ahead === undefined
+              ? ''
+              : ahead === 0
+                ? 'No wait'
+                : `${ahead} ahead`
 
           const borderColor = isSelected
             ? theme.primary
@@ -202,10 +259,12 @@ export const FreebuffModelSelector: React.FC = () => {
               key={model.id}
               onClick={() => {
                 setFocusedId(model.id)
-                pick(model.id)
+                if (isAvailable) pick(model.id)
               }}
               onMouseOver={() => interactable && setHoveredId(model.id)}
-              onMouseOut={() => setHoveredId((curr) => (curr === model.id ? null : curr))}
+              onMouseOut={() =>
+                setHoveredId((curr) => (curr === model.id ? null : curr))
+              }
               style={{
                 borderStyle: 'single',
                 borderColor,
@@ -218,12 +277,17 @@ export const FreebuffModelSelector: React.FC = () => {
                 <span fg={indicatorColor}>{indicator} </span>
                 <span
                   fg={labelColor}
-                  attributes={isSelected ? TextAttributes.BOLD : TextAttributes.NONE}
+                  attributes={
+                    isSelected ? TextAttributes.BOLD : TextAttributes.NONE
+                  }
                 >
                   {model.displayName}
                 </span>
                 <span fg={theme.muted}> · {model.tagline}</span>
-                <span fg={theme.muted}>  {hint.padEnd(hintWidth)}</span>
+                {model.availability === 'deployment_hours' && (
+                  <span fg={theme.muted}> · {deploymentAvailabilityLabel}</span>
+                )}
+                <span fg={theme.muted}> {hint.padEnd(hintWidth)}</span>
               </text>
             </Button>
           )

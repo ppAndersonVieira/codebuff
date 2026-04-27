@@ -17,6 +17,7 @@ import { exitFreebuffCleanly } from '../utils/freebuff-exit'
 import { getLogoAccentColor, getLogoBlockColor } from '../utils/theme-system'
 
 import type { FreebuffSessionResponse } from '../types/freebuff-session'
+import type { FreebuffIpPrivacySignal } from '@codebuff/common/types/freebuff-session'
 
 interface WaitingRoomScreenProps {
   session: FreebuffSessionResponse | null
@@ -41,6 +42,47 @@ const formatElapsed = (ms: number): string => {
   const seconds = totalSeconds % 60
   if (minutes === 0) return `${seconds}s`
   return `${minutes}m ${seconds.toString().padStart(2, '0')}s`
+}
+
+/** "in ~3h 20m" / "in ~45 min" / "in under a minute". Used on the
+ *  rate-limited screen so users know when they can try again. */
+const formatRetryAfter = (ms: number): string => {
+  if (!Number.isFinite(ms) || ms <= 0) return 'any moment now'
+  const minutes = Math.round(ms / 60_000)
+  if (minutes < 1) return 'under a minute'
+  if (minutes < 60) return `${minutes} min`
+  const hours = Math.floor(minutes / 60)
+  const rem = minutes % 60
+  return rem === 0 ? `${hours}h` : `${hours}h ${rem}m`
+}
+
+const PRIVACY_SIGNAL_LABELS: Partial<Record<FreebuffIpPrivacySignal, string>> =
+  {
+    anonymous: 'anonymized network',
+    proxy: 'proxy',
+    relay: 'relay',
+    res_proxy: 'residential proxy',
+    tor: 'Tor',
+    vpn: 'VPN',
+  }
+
+const formatPrivacySignalList = (
+  signals: FreebuffIpPrivacySignal[] | undefined,
+): string => {
+  const labels = Array.from(
+    new Set(
+      signals
+        ?.map((signal) => PRIVACY_SIGNAL_LABELS[signal])
+        .filter((label): label is string => Boolean(label)) ?? [],
+    ),
+  )
+
+  if (labels.length === 0) {
+    return 'VPN, Tor, proxy, relay, or anonymized network'
+  }
+  if (labels.length === 1) return labels[0]
+  if (labels.length === 2) return `${labels[0]} or ${labels[1]}`
+  return `${labels.slice(0, -1).join(', ')}, or ${labels[labels.length - 1]}`
 }
 
 export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
@@ -72,11 +114,13 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
   // Always enable ads in the waiting room — this is where monetization lives.
   // forceStart bypasses the "wait for first user message" gate inside the hook,
   // which would otherwise block ads here since no conversation exists yet.
-  // Uses Carbon (BuySellAds); in-chat ads still use the Gravity default.
+  // Try Gravity first, then fall back to Carbon when Gravity doesn't fill.
   const { adData, recordImpression } = useGravityAd({
     enabled: true,
     forceStart: true,
-    provider: 'carbon',
+    provider: 'gravity',
+    fallbackProvider: 'carbon',
+    surface: 'waiting_room',
   })
 
   useFreebuffCtrlCExit()
@@ -160,7 +204,7 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
             maxWidth: contentMaxWidth,
           }}
         >
-          {error && !session && (
+          {error && (!session || session.status === 'none') && (
             <text style={{ fg: theme.secondary, wrapMode: 'word' }}>
               ⚠ {error}
             </text>
@@ -207,15 +251,28 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                   <span fg={theme.muted}> / {session.queueDepth}</span>
                 </text>
                 <text style={{ fg: theme.muted, alignSelf: 'flex-start' }}>
-                  <span>Wait     </span>
+                  <span>Wait </span>
                   {session.position === 1
                     ? 'any moment now'
                     : formatWait(session.estimatedWaitMs)}
                 </text>
                 <text style={{ fg: theme.muted, alignSelf: 'flex-start' }}>
-                  <span>Elapsed  </span>
+                  <span>Elapsed </span>
                   {formatElapsed(elapsedMs)}
                 </text>
+                {/* Per-model session quota (e.g. GLM 5.1 caps at 5/12h). Only
+                    rendered for rate-limited models so the Minimax queue stays
+                    clutter-free. */}
+                {session.rateLimit && (
+                  <text style={{ fg: theme.muted, alignSelf: 'flex-start' }}>
+                    <span>Sessions </span>
+                    <span fg={theme.foreground}>
+                      {session.rateLimit.recentCount} /{' '}
+                      {session.rateLimit.limit}
+                    </span>
+                    <span> used in last {session.rateLimit.windowHours}h</span>
+                  </text>
+                )}
               </box>
             </>
           )}
@@ -236,10 +293,36 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                 ⚠ Free mode isn't available in your region
               </text>
               <text style={{ fg: theme.muted, wrapMode: 'word' }}>
-                We detected your location as{' '}
-                <span fg={theme.foreground}>{session.countryCode}</span>,
-                which is outside the countries where freebuff is currently
-                offered. Press Ctrl+C to exit.
+                {session.countryBlockReason === 'anonymous_network' ? (
+                  <>
+                    We detected{' '}
+                    {formatPrivacySignalList(session.ipPrivacySignals)} traffic
+                    {session.countryCode === 'UNKNOWN' ? (
+                      ''
+                    ) : (
+                      <>
+                        {' '}
+                        from{' '}
+                        <span fg={theme.foreground}>{session.countryCode}</span>
+                      </>
+                    )}
+                    . Freebuff can't be used from anonymized networks. Press
+                    Ctrl+C to exit.
+                  </>
+                ) : session.countryCode === 'UNKNOWN' ? (
+                  <>
+                    We couldn't verify an eligible location for this request.
+                    VPN, Tor, proxy, or unknown-location traffic can't use
+                    freebuff. Press Ctrl+C to exit.
+                  </>
+                ) : (
+                  <>
+                    We detected your location as{' '}
+                    <span fg={theme.foreground}>{session.countryCode}</span>,
+                    which is outside the countries where freebuff is currently
+                    offered. Press Ctrl+C to exit.
+                  </>
+                )}
               </text>
             </>
           )}
@@ -253,8 +336,32 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                 ⚠ Account unavailable
               </text>
               <text style={{ fg: theme.muted, wrapMode: 'word' }}>
-                This account can't use freebuff. If you think this is a
-                mistake, contact support@codebuff.com. Press Ctrl+C to exit.
+                This account has been suspended and can't use freebuff. If you
+                think this is a mistake, contact support@codebuff.com. Press
+                Ctrl+C to exit.
+              </text>
+            </>
+          )}
+
+          {/* Per-model session quota exhausted (e.g. 5+ GLM sessions in the
+              last 12h). Terminal for this run — the user can exit and come
+              back once the oldest session in the window rolls off. */}
+          {session?.status === 'rate_limited' && (
+            <>
+              <text style={{ fg: theme.secondary, marginBottom: 1 }}>
+                ⚠ Session limit reached
+              </text>
+              <text style={{ fg: theme.muted, wrapMode: 'word' }}>
+                You've used{' '}
+                <span fg={theme.foreground}>
+                  {session.recentCount} of {session.limit}
+                </span>{' '}
+                hour-long sessions on {session.model} in the last{' '}
+                {session.windowHours}h. Try again in{' '}
+                <span fg={theme.foreground}>
+                  {formatRetryAfter(session.retryAfterMs)}
+                </span>
+                . Press Ctrl+C to exit.
               </text>
             </>
           )}

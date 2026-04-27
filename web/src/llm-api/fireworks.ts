@@ -1,5 +1,10 @@
 import { Agent } from 'undici'
 
+import {
+  FREEBUFF_DEPLOYMENT_HOURS_LABEL,
+  FREEBUFF_GLM_MODEL_ID,
+  isFreebuffDeploymentHours,
+} from '@codebuff/common/constants/freebuff-models'
 import { PROFIT_MARGIN } from '@codebuff/common/constants/limits'
 import { getErrorObject } from '@codebuff/common/util/error'
 import { env } from '@codebuff/internal/env'
@@ -32,15 +37,19 @@ const FIREWORKS_MODEL_MAP: Record<string, string> = {
   'minimax/minimax-m2.5': 'accounts/fireworks/models/minimax-m2p5',
   'minimax/minimax-m2.7': 'accounts/fireworks/models/minimax-m2p7',
   'z-ai/glm-5.1': 'accounts/fireworks/models/glm-5p1',
-  'moonshotai/kimi-k2.5': 'accounts/fireworks/models/kimi-k2p5',
 }
+
+/** Models that stay limited to freebuff deployment hours even on serverless. */
+const FIREWORKS_HOURS_GATED_MODELS = new Set<string>([
+  FREEBUFF_GLM_MODEL_ID,
+])
 
 /** Flag to enable custom Fireworks deployments (set to false to use global API only) */
 const FIREWORKS_USE_CUSTOM_DEPLOYMENT = true
 
-/** Check if current time is within deployment hours (always enabled) */
-export function isDeploymentHours(_now: Date = new Date()): boolean {
-  return true
+/** Check if current time is within deployment hours: daily, 9am ET to 5pm PT. */
+export function isDeploymentHours(now: Date = new Date()): boolean {
+  return isFreebuffDeploymentHours(now)
 }
 
 /**
@@ -93,7 +102,7 @@ function createFireworksRequest(params: {
 
   // Transform OpenRouter-style `reasoning` object into Fireworks' `reasoning_effort`.
   // Unlike OpenAI, Fireworks supports reasoning_effort together with function tools
-  // (e.g. GLM-4.5/5.1 and Kimi K2 are designed for interleaved reasoning + tool use).
+  // (e.g. GLM-4.5/5.1 are designed for interleaved reasoning + tool use).
   if (fireworksBody.reasoning && typeof fireworksBody.reasoning === 'object') {
     const reasoning = fireworksBody.reasoning as {
       enabled?: boolean
@@ -165,15 +174,10 @@ const FIREWORKS_PRICING_MAP: Record<string, FireworksPricing> = {
     cachedInputCostPerToken: 0.26 / 1_000_000,
     outputCostPerToken: 4.40 / 1_000_000,
   },
-  'moonshotai/kimi-k2.5': {
-    inputCostPerToken: 0.60 / 1_000_000,
-    cachedInputCostPerToken: 0.10 / 1_000_000,
-    outputCostPerToken: 3.00 / 1_000_000,
-  },
 }
 
 function getFireworksPricing(model: string): FireworksPricing {
-  return FIREWORKS_PRICING_MAP[model] ?? FIREWORKS_MODEL_MAP['z-ai/glm-5.1']
+  return FIREWORKS_PRICING_MAP[model] ?? FIREWORKS_PRICING_MAP['z-ai/glm-5.1']
 }
 
 function extractUsageAndCost(usage: Record<string, unknown> | undefined | null, model: string): UsageData {
@@ -708,9 +712,11 @@ async function parseFireworksError(response: Response): Promise<FireworksError> 
 }
 
 /**
- * Tries the custom Fireworks deployment during business hours (10am–8pm ET),
- * falling back to the standard API if the deployment returns 503 DEPLOYMENT_SCALING_UP.
- * Outside deployment hours or during cooldown, goes straight to the standard API.
+ * Uses custom Fireworks deployments only during deployment hours. Some models
+ * are still availability-gated even when served by the Fireworks serverless
+ * API. Deployment-mapped models never fall back to the serverless API during
+ * cooldown or after deployment 5xxs; those states surface as provider errors
+ * so freebuff can offer MiniMax as the always-on option.
  */
 export async function createFireworksRequestWithFallback(params: {
   body: ChatCompletionRequestBody
@@ -718,46 +724,113 @@ export async function createFireworksRequestWithFallback(params: {
   fetch: typeof globalThis.fetch
   logger: Logger
   useCustomDeployment?: boolean
+  deploymentMap?: Record<string, string>
   sessionId: string
+  now?: Date
 }): Promise<Response> {
   const { body, originalModel, fetch, logger, sessionId } = params
+  const now = params.now ?? new Date()
   const useCustomDeployment = params.useCustomDeployment ?? FIREWORKS_USE_CUSTOM_DEPLOYMENT
-  const deploymentModelId = FIREWORKS_DEPLOYMENT_MAP[originalModel]
-  const shouldTryDeployment =
-    useCustomDeployment &&
-    deploymentModelId &&
-    isDeploymentHours() &&
-    !isDeploymentCoolingDown()
+  const deploymentMap = params.deploymentMap ?? FIREWORKS_DEPLOYMENT_MAP
+  const deploymentModelId = deploymentMap[originalModel]
+  const hasDeployment = useCustomDeployment && Boolean(deploymentModelId)
+  const isHoursGatedModel = FIREWORKS_HOURS_GATED_MODELS.has(originalModel)
+  const shouldFallbackToStandardApi = body.codebuff_metadata?.cost_mode === 'lite'
 
-  if (shouldTryDeployment) {
+  const createStandardApiRequest = () =>
+    createFireworksRequest({ body, originalModel, fetch, sessionId })
+
+  if (isHoursGatedModel && !isDeploymentHours(now)) {
+    if (shouldFallbackToStandardApi) {
+      logger.info(
+        { model: originalModel },
+        'Falling back to Fireworks standard API outside deployment hours',
+      )
+      return createStandardApiRequest()
+    }
+    return new Response(
+      JSON.stringify({
+        error: {
+          message: `${originalModel} is only available during ${FREEBUFF_DEPLOYMENT_HOURS_LABEL}. Use minimax/minimax-m2.7 outside those hours.`,
+          code: 'DEPLOYMENT_OUTSIDE_HOURS',
+          type: 'availability_error',
+        },
+      }),
+      { status: 503, statusText: 'Service Unavailable' },
+    )
+  }
+
+  if (hasDeployment && isDeploymentCoolingDown()) {
+    if (shouldFallbackToStandardApi) {
+      logger.info(
+        { model: originalModel },
+        'Falling back to Fireworks standard API during deployment cooldown',
+      )
+      return createStandardApiRequest()
+    }
+    return new Response(
+      JSON.stringify({
+        error: {
+          message: `${originalModel} deployment is temporarily unavailable. Use minimax/minimax-m2.7 while it recovers.`,
+          code: 'DEPLOYMENT_COOLDOWN',
+          type: 'availability_error',
+        },
+      }),
+      { status: 503, statusText: 'Service Unavailable' },
+    )
+  }
+
+  if (hasDeployment && deploymentModelId) {
     logger.info(
       { model: originalModel, deploymentModel: deploymentModelId },
       'Trying Fireworks custom deployment',
     )
-    const response = await createFireworksRequest({
-      body,
-      originalModel,
-      fetch,
-      modelIdOverride: deploymentModelId,
-      sessionId,
-    })
+    let response: Response
+    try {
+      response = await createFireworksRequest({
+        body,
+        originalModel,
+        fetch,
+        modelIdOverride: deploymentModelId,
+        sessionId,
+      })
+    } catch (error) {
+      if (shouldFallbackToStandardApi) {
+        logger.warn(
+          { model: originalModel, error: getErrorObject(error) },
+          'Fireworks custom deployment request failed, falling back to standard API',
+        )
+        return createStandardApiRequest()
+      }
+      throw error
+    }
 
     if (response.status >= 500) {
       const errorText = await response.text()
       logger.info(
         { model: originalModel, status: response.status, errorText: errorText.slice(0, 200) },
-        'Fireworks custom deployment returned 5xx, falling back to standard API',
+        'Fireworks custom deployment returned 5xx',
       )
       if (errorText.includes('DEPLOYMENT_SCALING_UP')) {
         markDeploymentScalingUp()
       }
-      // Fall through to standard API request below
-    } else {
-      return response
+      if (shouldFallbackToStandardApi) {
+        logger.info(
+          { model: originalModel, status: response.status },
+          'Falling back to Fireworks standard API after deployment 5xx',
+        )
+        return createStandardApiRequest()
+      }
+      return new Response(errorText, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      })
     }
+    return response
   }
 
-  return createFireworksRequest({ body, originalModel, fetch, sessionId })
+  return createStandardApiRequest()
 }
 
 function creditsToFakeCost(credits: number): number {

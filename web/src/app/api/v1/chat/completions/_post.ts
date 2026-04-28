@@ -263,6 +263,7 @@ export async function postChatCompletions(params: {
       const countryAccess = await getFreeModeCountryAccess(req, {
         fetch,
         ipinfoToken: env.IPINFO_TOKEN,
+        ipHashSecret: env.NEXTAUTH_SECRET,
       })
 
       logger.info(

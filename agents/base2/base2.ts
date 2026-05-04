@@ -1,4 +1,10 @@
 import { buildArray } from '@codebuff/common/util/array'
+import {
+  FREEBUFF_GEMINI_THINKER_AGENT_ID,
+  FREEBUFF_GEMINI_THINKER_INSTRUCTIONS_PROMPT,
+  FREEBUFF_GEMINI_THINKER_STEP_PROMPT,
+  FREEBUFF_GEMINI_THINKER_SYSTEM_INSTRUCTION,
+} from '@codebuff/common/constants/freebuff-gemini-thinker'
 
 import { publisher } from '../constants'
 import {
@@ -29,15 +35,30 @@ export function createBase2(
   const isFree = mode === 'free' || mode === 'lite'
 
   const isSonnet = false
+  // Lite (paid Codebuff) defaults to Kimi: no data-retention surface in the
+  // CLI today, so we don't want to silently route Codebuff prompts through a
+  // model whose provider trains on user data. Free (freebuff) defaults to
+  // DeepSeek and surfaces the data-collection caveat in the picker; the CLI
+  // overrides the model anyway based on the user's freebuff selection.
   const model =
-    modelOverride ?? (isFree ? 'z-ai/glm-5.1' : 'anthropic/claude-opus-4.7')
+    modelOverride ??
+    (mode === 'lite'
+      ? 'moonshotai/kimi-k2.6'
+      : mode === 'free'
+        ? 'deepseek/deepseek-v4-pro'
+        : 'anthropic/claude-opus-4.7')
+  // Bundled free-mode definitions ship with the gemini-thinker spawnable +
+  // prompts; the CLI strips them at runtime if the user picks a fast model
+  // that doesn't benefit (e.g. MiniMax). Smart freebuff models (Kimi,
+  // DeepSeek) keep it so they can offload deeper reasoning.
+  const hasFreeGeminiThinker = isFree
   const defaultProviderOptions = isFree
     ? {
-        data_collection: 'deny' as const,
-      }
+      data_collection: 'deny' as const,
+    }
     : {
-        only: ['amazon-bedrock'],
-      }
+      only: ['amazon-bedrock'],
+    }
 
   return {
     publisher,
@@ -97,7 +118,7 @@ export function createBase2(
       isDefault && 'code-reviewer',
       isMax && 'code-reviewer-multi-prompt',
       'agent-monitor',
-      isFree && 'thinker-with-files-gemini',
+      hasFreeGeminiThinker && FREEBUFF_GEMINI_THINKER_AGENT_ID,
       'thinker-gpt',
       'context-pruner',
     ),
@@ -152,7 +173,9 @@ Use the spawn_agents tool to spawn specialized agents to help you complete the u
 - **Sequence agents properly:** Keep in mind dependencies when spawning different agents. Don't spawn agents in parallel that depend on each other.
   ${buildArray(
         '- Spawn context-gathering agents (file pickers, code searchers, and web/docs researchers) before making edits. Use the list_directory and glob tools directly for searching and exploring the codebase.',
-        isFree && 'Do not spawn the thinker-gpt agent, unless the user asks. Not everyone has connected their ChatGPT subscription to Codebuff to allow for it.',
+        isFree &&
+        'Do not spawn the thinker-gpt agent, unless the user asks. Not everyone has connected their ChatGPT subscription to Codebuff to allow for it.',
+        hasFreeGeminiThinker && FREEBUFF_GEMINI_THINKER_SYSTEM_INSTRUCTION,
         isDefault &&
         '- Spawn the editor agent to implement the changes after you have gathered all the context you need.',
         (isDefault || isMax) &&
@@ -276,6 +299,7 @@ ${PLACEHOLDER.GIT_CHANGES_PROMPT}
         isDefault,
         isMax,
         isFree,
+        hasFreeGeminiThinker,
         hasNoValidation,
         noAskUser,
       }),
@@ -288,6 +312,7 @@ ${PLACEHOLDER.GIT_CHANGES_PROMPT}
         hasNoValidation,
         isSonnet,
         isFree,
+        hasFreeGeminiThinker,
         noAskUser,
       }),
 
@@ -296,35 +321,35 @@ ${PLACEHOLDER.GIT_CHANGES_PROMPT}
     // literal-baked function here instead.
     handleSteps: isFree
       ? function* ({ params }) {
-          while (true) {
-            yield {
-              toolName: 'spawn_agent_inline',
-              input: {
-                agent_type: 'context-pruner',
-                params: { ...(params ?? {}), cacheExpiryMs: 10 * 60 * 1000 },
-              },
-              includeToolCall: false,
-            } as any
+        while (true) {
+          yield {
+            toolName: 'spawn_agent_inline',
+            input: {
+              agent_type: 'context-pruner',
+              params: { ...(params ?? {}), cacheExpiryMs: 10 * 60 * 1000 },
+            },
+            includeToolCall: false,
+          } as any
 
-            const { stepsComplete } = yield 'STEP'
-            if (stepsComplete) break
-          }
+          const { stepsComplete } = yield 'STEP'
+          if (stepsComplete) break
         }
+      }
       : function* ({ params }) {
-          while (true) {
-            yield {
-              toolName: 'spawn_agent_inline',
-              input: {
-                agent_type: 'context-pruner',
-                params: params ?? {},
-              },
-              includeToolCall: false,
-            } as any
+        while (true) {
+          yield {
+            toolName: 'spawn_agent_inline',
+            input: {
+              agent_type: 'context-pruner',
+              params: params ?? {},
+            },
+            includeToolCall: false,
+          } as any
 
-            const { stepsComplete } = yield 'STEP'
-            if (stepsComplete) break
-          }
-        },
+          const { stepsComplete } = yield 'STEP'
+          if (stepsComplete) break
+        }
+      },
   }
 }
 
@@ -336,6 +361,7 @@ function buildImplementationInstructionsPrompt({
   isDefault,
   isMax,
   isFree,
+  hasFreeGeminiThinker,
   hasNoValidation,
   noAskUser,
 }: {
@@ -344,6 +370,7 @@ function buildImplementationInstructionsPrompt({
   isDefault: boolean
   isMax: boolean
   isFree: boolean
+  hasFreeGeminiThinker: boolean
   hasNoValidation: boolean
   noAskUser: boolean
 }) {
@@ -361,6 +388,7 @@ ${buildArray(
     'After getting context on the user request from the codebase or from research, use the ask_user tool to ask the user for important clarifications on their request or alternate implementation strategies. You should skip this step if the choice is obvious -- only ask the user if you need their help making the best choice.',
     (isDefault || isMax || isFree) &&
     `- For any task requiring 3+ steps, use the write_todos tool to write out your step-by-step implementation plan. Include ALL of the applicable tasks in the list.${isFast ? '' : ' You should include a step to review the changes after you have implemented the changes.'}:${hasNoValidation ? '' : ' You should include at least one step to validate/test your changes: be specific about whether to typecheck, run tests, run lints, etc.'} You may be able to do reviewing and validation in parallel in the same step. Skip write_todos for simple tasks like quick edits or answering questions.`,
+    hasFreeGeminiThinker && FREEBUFF_GEMINI_THINKER_INSTRUCTIONS_PROMPT,
     (isDefault || isMax) &&
     `- For quick problems, briefly explain your reasoning to the user. If you need to think longer, write your thoughts within the <think> tags. Finally, for complex problems, spawn the thinker agent to help find the best solution. (gpt-5-agent is a last resort for complex problems)`,
     isDefault &&
@@ -391,6 +419,7 @@ function buildImplementationStepPrompt({
   hasNoValidation,
   isSonnet,
   isFree,
+  hasFreeGeminiThinker,
   noAskUser,
 }: {
   isDefault: boolean
@@ -399,12 +428,14 @@ function buildImplementationStepPrompt({
   hasNoValidation: boolean
   isSonnet: boolean
   isFree: boolean
+  hasFreeGeminiThinker: boolean
   noAskUser: boolean
 }) {
   return buildArray(
     isMax &&
     `Keep working until the user's request is completely satisfied${!hasNoValidation ? ' and validated' : ''}, or until you require more information from the user.`,
     'Consider loading relevant skills with the skill tool if they might help with the current task. Do not reload skills that were already loaded earlier in this conversation.',
+    hasFreeGeminiThinker && FREEBUFF_GEMINI_THINKER_STEP_PROMPT,
     isMax &&
     `You must spawn the 'editor-multi-prompt' agent to implement code changes rather than using the str_replace or write_file tools, since it will generate the best code changes.`,
     (isDefault || isMax) &&

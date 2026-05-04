@@ -1,10 +1,13 @@
 import {
+  canFreebuffModelSpawnGeminiThinker,
+  FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
   FREEBUFF_DEPLOYMENT_HOURS_LABEL,
   FREEBUFF_GEMINI_PRO_MODEL_ID,
   FREEBUFF_GLM_MODEL_ID,
+  FREEBUFF_KIMI_MODEL_ID,
   isFreebuffModelAvailable,
-  isFreebuffModelId as isSelectableFreebuffModel,
-  resolveFreebuffModel,
+  isSupportedFreebuffModelId,
+  resolveSupportedFreebuffModel,
 } from '@codebuff/common/constants/freebuff-models'
 
 import {
@@ -47,8 +50,9 @@ import type {
  * queued/active responses — changing them is a deliberate, typed edit.
  */
 const RATE_LIMITS: Record<string, { limit: number; windowHours: number }> = {
-  [FREEBUFF_GEMINI_PRO_MODEL_ID]: { limit: 1, windowHours: 24 },
   [FREEBUFF_GLM_MODEL_ID]: { limit: 5, windowHours: 12 },
+  [FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID]: { limit: 5, windowHours: 18 },
+  [FREEBUFF_KIMI_MODEL_ID]: { limit: 5, windowHours: 18 },
 }
 
 /** Fetch the caller's current quota snapshot for `model`, or undefined if the
@@ -86,6 +90,40 @@ async function fetchRateLimitSnapshot(
     oldest: admits[0] ?? null,
     windowMs,
   }
+}
+
+async function fetchRateLimitsByModel(
+  userId: string,
+  deps: SessionDeps,
+): Promise<Record<string, FreebuffSessionRateLimit>> {
+  const entries = await Promise.all(
+    Object.keys(RATE_LIMITS).map(async (model) => {
+      const snapshot = await fetchRateLimitSnapshot(userId, model, deps)
+      return snapshot ? ([model, snapshot.info] as const) : null
+    }),
+  )
+  return Object.fromEntries(
+    entries.filter(
+      (entry): entry is readonly [string, FreebuffSessionRateLimit] =>
+        entry !== null,
+    ),
+  )
+}
+
+function onlyUsedRateLimitsByModel(
+  rateLimitsByModel: Record<string, FreebuffSessionRateLimit>,
+): Record<string, FreebuffSessionRateLimit> {
+  return Object.fromEntries(
+    Object.entries(rateLimitsByModel).filter(
+      ([, snapshot]) => snapshot.recentCount > 0,
+    ),
+  )
+}
+
+function nonEmptyRateLimitsByModel(
+  rateLimitsByModel: Record<string, FreebuffSessionRateLimit>,
+): { rateLimitsByModel: Record<string, FreebuffSessionRateLimit> } | {} {
+  return Object.keys(rateLimitsByModel).length > 0 ? { rateLimitsByModel } : {}
 }
 
 export interface SessionDeps {
@@ -149,9 +187,8 @@ const defaultDeps: SessionDeps = {
   getInstantAdmitCapacity,
   isWaitingRoomEnabled,
   get graceMs() {
-    // Read-through getter so test overrides via env still work; the value
-    // itself is materialized once per call. Cheaper than a thunk because
-    // callers don't have to invoke a function.
+    // Read-through getter keeps the default deps aligned with config while
+    // tests can still inject a plain graceMs value through SessionDeps.
     return getSessionGraceMs()
   },
   get sessionLengthMs() {
@@ -241,7 +278,7 @@ export async function requestSession(params: {
   deps?: SessionDeps
 }): Promise<RequestSessionResult> {
   const deps = params.deps ?? defaultDeps
-  const model = resolveFreebuffModel(params.model)
+  const model = resolveSupportedFreebuffModel(params.model)
   const now = nowOf(deps)
   if (params.userBanned) {
     return { status: 'banned' }
@@ -251,13 +288,6 @@ export async function requestSession(params: {
     isWaitingRoomBypassedForEmail(params.userEmail)
   ) {
     return { status: 'disabled' }
-  }
-  if (!isFreebuffModelAvailable(model, now)) {
-    return {
-      status: 'model_unavailable',
-      requestedModel: model,
-      availableHours: FREEBUFF_DEPLOYMENT_HOURS_LABEL,
-    }
   }
 
   // Rate-limit check runs before joinOrTakeOver so heavy users never even
@@ -278,6 +308,14 @@ export async function requestSession(params: {
       (existing.status === 'active' &&
         !!existing.expires_at &&
         existing.expires_at.getTime() > now.getTime()))
+
+  if (!isReclaim && !isFreebuffModelAvailable(model, now)) {
+    return {
+      status: 'model_unavailable',
+      requestedModel: model,
+      availableHours: FREEBUFF_DEPLOYMENT_HOURS_LABEL,
+    }
+  }
 
   if (!isReclaim) {
     const snapshot = await fetchRateLimitSnapshot(params.userId, model, deps)
@@ -362,9 +400,20 @@ async function attachRateLimit(
   deps: SessionDeps,
 ): Promise<SessionStateResponse> {
   if (view.status !== 'queued' && view.status !== 'active') return view
-  const snapshot = await fetchRateLimitSnapshot(userId, view.model, deps)
-  if (!snapshot) return view
-  return { ...view, rateLimit: snapshot.info }
+  if (view.status === 'active') {
+    const snapshot = await fetchRateLimitSnapshot(userId, view.model, deps)
+    return snapshot ? { ...view, rateLimit: snapshot.info } : view
+  }
+
+  const allRateLimitsByModel = await fetchRateLimitsByModel(userId, deps)
+  const rateLimit = allRateLimitsByModel[view.model]
+  return {
+    ...view,
+    ...(rateLimit ? { rateLimit } : {}),
+    ...nonEmptyRateLimitsByModel(
+      onlyUsedRateLimitsByModel(allRateLimitsByModel),
+    ),
+  }
 }
 
 /**
@@ -401,11 +450,21 @@ export async function getSessionState(params: {
 
   // Build a `none` response with live queue depths so the CLI's pre-join
   // picker can show "N ahead" hints without first committing the user to a
-  // queue. Cheap snapshot — no user-scoped state.
-  const noneResponse = async (): Promise<FreebuffSessionServerResponse> => ({
-    status: 'none',
-    queueDepthByModel: await deps.queueDepthsByModel(),
-  })
+  // queue, plus per-user quota snapshots so exhausted models are visible
+  // before POST.
+  const noneResponse = async (): Promise<FreebuffSessionServerResponse> => {
+    const [queueDepthByModel, rateLimitsByModel] = await Promise.all([
+      deps.queueDepthsByModel(),
+      fetchRateLimitsByModel(params.userId, deps),
+    ])
+    return {
+      status: 'none',
+      queueDepthByModel,
+      ...nonEmptyRateLimitsByModel(
+        onlyUsedRateLimitsByModel(rateLimitsByModel),
+      ),
+    }
+  }
 
   if (!row) return noneResponse()
 
@@ -472,6 +531,10 @@ export async function checkSessionAdmissible(params: {
   userId: string
   userEmail?: string | null | undefined
   claimedInstanceId: string | null | undefined
+  /** Forces a real active session row check even when the waiting room is
+   *  globally disabled or the user email normally bypasses it. Use for
+   *  subagent/model combinations that must be bound to trusted session state. */
+  requireActiveSession?: boolean
   /** Model the chat-completions request is for. When provided, the gate
    *  rejects requests whose model doesn't match the active session's model
    *  so a stale CLI tab can't slip a request through under the wrong model. */
@@ -480,8 +543,9 @@ export async function checkSessionAdmissible(params: {
 }): Promise<SessionGateResult> {
   const deps = params.deps ?? defaultDeps
   if (
-    !deps.isWaitingRoomEnabled() ||
-    isWaitingRoomBypassedForEmail(params.userEmail)
+    !params.requireActiveSession &&
+    (!deps.isWaitingRoomEnabled() ||
+      isWaitingRoomBypassedForEmail(params.userEmail))
   ) {
     return { ok: true, reason: 'disabled' }
   }
@@ -544,15 +608,25 @@ export async function checkSessionAdmissible(params: {
     }
   }
 
+  // Smart freebuff models (Kimi, DeepSeek) can spawn the gemini-thinker
+  // child agent which calls Gemini Pro under the hood. The cost-mode gate
+  // already allowlists that combo; here we allow the request through against
+  // the parent's session row instead of rejecting on model mismatch.
+  const isSmartSessionGeminiThinker =
+    params.requireActiveSession === true &&
+    params.requestedModel === FREEBUFF_GEMINI_PRO_MODEL_ID &&
+    canFreebuffModelSpawnGeminiThinker(row.model)
+
   // Reject requests for a model the session isn't bound to. Sub-agents may
   // legitimately use other models (Gemini Flash etc.) so we only enforce this
-  // when the caller provides a requestedModel — and only against the set of
-  // selectable freebuff models (resolveFreebuffModel returns the canonical id
-  // or the default for anything outside the registry).
+  // when the caller provides a requestedModel and it is either a supported
+  // freebuff root model or the gemini-thinker model.
   if (
     params.requestedModel &&
-    isSelectableFreebuffModel(params.requestedModel) &&
-    params.requestedModel !== row.model
+    (isSupportedFreebuffModelId(params.requestedModel) ||
+      params.requestedModel === FREEBUFF_GEMINI_PRO_MODEL_ID) &&
+    params.requestedModel !== row.model &&
+    !isSmartSessionGeminiThinker
   ) {
     return {
       ok: false,

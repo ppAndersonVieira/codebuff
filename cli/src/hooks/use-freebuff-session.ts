@@ -104,7 +104,7 @@ async function callSession(
       return body
     }
   }
-  // 429 from POST is the per-model session-quota reject (e.g. too many GLM
+  // 429 from POST is the per-model session-quota reject (e.g. too many DeepSeek
   // sessions in the last 12h). Terminal for the current poll — the CLI shows
   // a screen explaining the limit and when the user can try again. The 429
   // status (rather than 200) keeps older CLIs in their error path so they
@@ -442,10 +442,10 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
         }
         if (next.status === 'model_unavailable') {
           // Server says the requested model isn't available right now (e.g.
-          // GLM outside deployment hours). Flip to the always-available
-          // fallback for this run. In-memory only — `setSelectedModel`
-          // doesn't persist, so the user's saved preference (e.g. GLM)
-          // is preserved for their next launch during deployment hours.
+          // legacy GLM 5.1 outside deployment hours). Flip to the
+          // always-available fallback for this run. In-memory only —
+          // `setSelectedModel` doesn't persist, so the user's saved preference
+          // is preserved for their next launch.
           useFreebuffModelStore
             .getState()
             .setSelectedModel(FALLBACK_FREEBUFF_MODEL_ID)
@@ -516,11 +516,11 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
           // tick/apply path because a server-side row that hasn't been
           // swept yet would trip the startup-takeover branch into an
           // auto-POST — the exact silent-rejoin this mode exists to
-          // prevent. But the picker still needs live queue depths for its
-          // "N ahead" hints, so kick off a fire-and-forget GET and extract
-          // just queueDepthByModel from the response, ignoring whatever
-          // status it claims. Polling resumes when the user commits to a
-          // model via joinFreebuffQueue.
+          // prevent. But the picker still needs live queue depths and quota
+          // snapshots, so kick off a fire-and-forget GET and extract only
+          // picker metadata from the response, ignoring whatever status it
+          // claims. Polling resumes when the user commits to a model via
+          // joinFreebuffQueue.
           apply({ status: 'none' })
           const fetchController = abortController
           callSession('GET', token, { signal: fetchController.signal })
@@ -532,11 +532,13 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
               ) {
                 return
               }
-              const depths =
-                response.status === 'none' || response.status === 'queued'
-                  ? response.queueDepthByModel
-                  : undefined
-              if (depths) apply({ status: 'none', queueDepthByModel: depths })
+              if (response.status === 'none' || response.status === 'queued') {
+                apply({
+                  status: 'none',
+                  queueDepthByModel: response.queueDepthByModel,
+                  rateLimitsByModel: response.rateLimitsByModel,
+                })
+              }
             })
             .catch(() => {
               // Silent — blank hints are acceptable if the fetch fails.

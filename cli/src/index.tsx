@@ -1,5 +1,12 @@
 #!/usr/bin/env bun
 
+// Embed tree-sitter.wasm into the bun-compile binary at a bunfs path the runtime
+// can find. Without this, web-tree-sitter resolves the wasm via require.resolve,
+// which (since 0.25.10's split exports map) returns the build-time absolute path
+// of tree-sitter.cjs and fails on user machines. Must run before the SDK / code-map
+// import chain triggers Parser.init.
+import './pre-init/tree-sitter-wasm'
+
 import fs from 'fs'
 import { createRequire } from 'module'
 import os from 'os'
@@ -179,6 +186,80 @@ function parseArgs(): ParsedArgs {
 }
 
 async function main(): Promise<void> {
+  // CI gate: `<binary> --smoke-tree-sitter` proves the embedded wasm boots
+  // through Parser.init end-to-end. Has to live BEFORE commander.parse() —
+  // an earlier attempt put this in a pre-init module with top-level await,
+  // and on Windows that didn't actually pause module evaluation (commander
+  // still ran first and rejected the unknown flag).
+  if (process.argv.includes('--smoke-tree-sitter')) {
+    const wasmBinary = (
+      globalThis as { __CODEBUFF_TREE_SITTER_WASM_BINARY__?: Uint8Array }
+    ).__CODEBUFF_TREE_SITTER_WASM_BINARY__
+    const wasmPath = process.env.CODEBUFF_TREE_SITTER_WASM_PATH
+
+    // Diagnostic dump so CI logs (and bug reports) show exactly what
+    // the runtime saw when smoke fails. process.execPath, the
+    // siblingPath we expect, and what's actually in that directory.
+    const fs = await import('fs')
+    const path = await import('path')
+    const execDir = path.dirname(process.execPath)
+    const siblingPath = path.join(execDir, 'tree-sitter.wasm')
+    let dirListing: string[] = []
+    try {
+      dirListing = fs.readdirSync(execDir)
+    } catch (err) {
+      dirListing = [`<readdir failed: ${err instanceof Error ? err.message : err}>`]
+    }
+    console.error(
+      `[smoke diag] execPath=${process.execPath}\n` +
+        `[smoke diag] execDir=${execDir}\n` +
+        `[smoke diag] siblingPath=${siblingPath}\n` +
+        `[smoke diag] siblingExists=${fs.existsSync(siblingPath)}\n` +
+        `[smoke diag] dir contents (${dirListing.length}): ${dirListing.slice(0, 30).join(', ')}\n` +
+        `[smoke diag] env.CODEBUFF_TREE_SITTER_WASM_PATH=${wasmPath ?? '<unset>'}\n` +
+        `[smoke diag] globalThis wasmBinary bytes=${wasmBinary?.byteLength ?? 0}\n`,
+    )
+
+    try {
+      const { Parser } = await import('web-tree-sitter')
+      // Pick the best wasm source available, falling back to the
+      // sibling-of-execPath lookup if pre-init couldn't reach it. By
+      // main() time process.execPath has stabilized to the disk path
+      // even on Windows, where it was the bunfs path during pre-init.
+      let effectiveBinary = wasmBinary
+      let effectivePath = wasmPath
+      if (!effectiveBinary && !effectivePath && fs.existsSync(siblingPath)) {
+        effectivePath = siblingPath
+        effectiveBinary = new Uint8Array(fs.readFileSync(siblingPath))
+      }
+
+      if (effectiveBinary) {
+        await Parser.init({ wasmBinary: effectiveBinary })
+        // Marker grepped by cli/scripts/smoke-binary.ts — keep this exact text.
+        console.log(
+          `tree-sitter smoke ok (wasmBinary, ${effectiveBinary.byteLength} bytes)`,
+        )
+      } else if (effectivePath) {
+        await Parser.init({
+          locateFile: (name: string) =>
+            name === 'tree-sitter.wasm' ? effectivePath! : name,
+        })
+        console.log(`tree-sitter smoke ok (locateFile, path=${effectivePath})`)
+      } else {
+        console.error(
+          'tree-sitter smoke FAIL: no wasm available — pre-init published ' +
+            'nothing and the sibling-of-execPath fallback also missed. See ' +
+            'the diag above for paths.',
+        )
+        process.exit(1)
+      }
+      process.exit(0)
+    } catch (err) {
+      console.error('tree-sitter smoke FAIL:', err)
+      process.exit(1)
+    }
+  }
+
   // Run OSC theme detection BEFORE anything else.
   // This MUST happen before OpenTUI starts because OSC responses come through stdin,
   // and OpenTUI also listens to stdin. Running detection here ensures stdin is clean.
@@ -417,7 +498,7 @@ async function main(): Promise<void> {
   const renderer = await createCliRenderer({
     backgroundColor: 'transparent',
     exitOnCtrlC: false,
-    useAlternateScreen: true,
+    screenMode: 'alternate-screen',
   })
 
   // Remove early handlers — proper cleanup handlers (with renderer access) take over

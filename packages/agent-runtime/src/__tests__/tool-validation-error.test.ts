@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from 'bun:test'
 
 import { mockFileContext } from './test-utils'
 import { processStream } from '../tools/stream-parser'
+import { parseRawToolCall } from '../tools/tool-executor'
 
 import type { AgentTemplate } from '../templates/types'
 import type {
@@ -42,6 +43,181 @@ describe('tool validation error handling', () => {
     instructionsPrompt: 'Test instructions',
     stepPrompt: 'Test step prompt',
   }
+
+  it('should parse repeatedly stringified native tool input before validation', () => {
+    const input = {
+      path: 'test.ts',
+      instructions: 'Writes a test file',
+      content: 'console.log("test")\n',
+    }
+
+    const result = parseRawToolCall({
+      rawToolCall: {
+        toolName: 'write_file',
+        toolCallId: 'double-stringified-tool-call-id',
+        input: JSON.stringify(JSON.stringify(input)),
+      },
+    })
+
+    expect('error' in result).toBe(false)
+    if (!('error' in result)) {
+      expect(result.input).toEqual(input)
+    }
+  })
+
+  it('should repair bare path values for list_directory string input', () => {
+    const result = parseRawToolCall({
+      rawToolCall: {
+        toolName: 'list_directory',
+        toolCallId: 'bare-path-tool-call-id',
+        input: '{"path": web/src/app/api/agents}',
+      },
+    })
+
+    expect('error' in result).toBe(false)
+    if (!('error' in result)) {
+      expect(result.input).toEqual({ path: 'web/src/app/api/agents' })
+    }
+  })
+
+  it('should repair bare pattern values for glob string input', () => {
+    const result = parseRawToolCall({
+      rawToolCall: {
+        toolName: 'glob',
+        toolCallId: 'bare-pattern-tool-call-id',
+        input: '{"pattern": backend/src/templates/agents/git-committer.ts}',
+      },
+    })
+
+    expect('error' in result).toBe(false)
+    if (!('error' in result)) {
+      expect(result.input).toEqual({
+        pattern: 'backend/src/templates/agents/git-committer.ts',
+      })
+    }
+  })
+
+  it('should repair bare paths values for read_files string input', () => {
+    const result = parseRawToolCall({
+      rawToolCall: {
+        toolName: 'read_files',
+        toolCallId: 'bare-paths-tool-call-id',
+        input: '{"paths": sdk/src/client.ts}',
+      },
+    })
+
+    expect('error' in result).toBe(false)
+    if (!('error' in result)) {
+      expect(result.input).toEqual({ paths: ['sdk/src/client.ts'] })
+    }
+  })
+
+  it('should not repair bare path values for unrelated tools', () => {
+    const result = parseRawToolCall({
+      rawToolCall: {
+        toolName: 'write_file',
+        toolCallId: 'unrelated-bare-path-tool-call-id',
+        input: '{"path": web/src/app/api/agents}',
+      },
+    })
+
+    expect('error' in result).toBe(true)
+  })
+
+  it('should accept old_str/new_str aliases for str_replace replacements', () => {
+    const result = parseRawToolCall({
+      rawToolCall: {
+        toolName: 'str_replace',
+        toolCallId: 'alias-tool-call-id',
+        input: {
+          path: 'test.ts',
+          replacements: [
+            {
+              old_str: 'before',
+              new_str: 'after',
+            },
+          ],
+        },
+      },
+    })
+
+    expect('error' in result).toBe(false)
+    if (!('error' in result)) {
+      expect(result.input.replacements).toEqual([
+        { old: 'before', new: 'after', allowMultiple: false },
+      ])
+    }
+  })
+
+  it('should accept old_string/new_string aliases for str_replace replacements', () => {
+    const result = parseRawToolCall({
+      rawToolCall: {
+        toolName: 'str_replace',
+        toolCallId: 'long-alias-tool-call-id',
+        input: {
+          path: 'test.ts',
+          replacements: [
+            {
+              old_string: 'before',
+              new_string: 'after',
+            },
+          ],
+        },
+      },
+    })
+
+    expect('error' in result).toBe(false)
+    if (!('error' in result)) {
+      expect(result.input.replacements).toEqual([
+        { old: 'before', new: 'after', allowMultiple: false },
+      ])
+    }
+  })
+
+  it('should summarize missing replacement fields without implying deletion', () => {
+    const result = parseRawToolCall({
+      rawToolCall: {
+        toolName: 'str_replace',
+        toolCallId: 'missing-new-tool-call-id',
+        input: {
+          path: 'test.ts',
+          replacements: [
+            { old: 'before', new: 'after' },
+            { old: 'delete me' },
+            { old: 'delete me too' },
+          ],
+        },
+      },
+    })
+
+    expect('error' in result).toBe(true)
+    if ('error' in result) {
+      expect(result.error).toContain('Missing required replacement fields:')
+      expect(result.error).toContain('- replacements[1].new')
+      expect(result.error).toContain('- replacements[2].new')
+      expect(result.error).toContain(
+        'If the intent is deletion, set "new": "" explicitly.',
+      )
+      expect(result.error).toContain('Raw validation issues:')
+    }
+  })
+
+  it('should include JSON parse details for incomplete stringified input', () => {
+    const result = parseRawToolCall({
+      rawToolCall: {
+        toolName: 'write_file',
+        toolCallId: 'incomplete-stringified-tool-call-id',
+        input:
+          '{"path": ".agents/deep-thinkers/meta-coordinator.ts", "instructions": "Creates a meta-coordinator"',
+      },
+    })
+
+    expect('error' in result).toBe(true)
+    if ('error' in result) {
+      expect(result.error).toContain('The JSON parser reported:')
+      expect(result.error).toContain('If the arguments are incomplete')
+    }
+  })
 
   it('should emit error event instead of tool result when spawn_agents receives invalid parameters', async () => {
     // This simulates what happens when the LLM passes a string instead of an array to spawn_agents
@@ -100,9 +276,13 @@ describe('tool validation error handling', () => {
         typeof chunk !== 'string' && chunk.type === 'error',
     )
     expect(errorEvents.length).toBe(1)
-    expect(errorEvents[0].message).toContain('Invalid parameters for spawn_agents')
+    expect(errorEvents[0].message).toContain(
+      'Invalid parameters for spawn_agents',
+    )
     expect(errorEvents[0].message).toContain('Original tool call input:')
-    expect(errorEvents[0].message).toContain('this should be an array not a string')
+    expect(errorEvents[0].message).toContain(
+      'this should be an array not a string',
+    )
 
     // Verify hadToolCallError is true so the agent loop continues
     expect(result.hadToolCallError).toBe(true)
@@ -128,8 +308,7 @@ describe('tool validation error handling', () => {
     )
     const assistantToolCalls = agentState.messageHistory.filter(
       (m) =>
-        m.role === 'assistant' &&
-        m.content.some((c) => c.type === 'tool-call'),
+        m.role === 'assistant' && m.content.some((c) => c.type === 'tool-call'),
     )
 
     // There should be no tool messages at all (the key fix!)
@@ -144,8 +323,13 @@ describe('tool validation error handling', () => {
     const errorUserMessage = userMessages.find((m) => {
       const contentStr = Array.isArray(m.content)
         ? m.content.map((p) => ('text' in p ? p.text : '')).join('')
-        : typeof m.content === 'string' ? m.content : ''
-      return contentStr.includes('Error during tool call') && contentStr.includes('Invalid parameters for spawn_agents')
+        : typeof m.content === 'string'
+          ? m.content
+          : ''
+      return (
+        contentStr.includes('Error during tool call') &&
+        contentStr.includes('Invalid parameters for spawn_agents')
+      )
     })
     expect(errorUserMessage).toBeDefined()
   })
@@ -460,7 +644,9 @@ describe('tool validation error handling', () => {
     const assistantToolCallMessages = agentState.messageHistory.filter(
       (m): m is AssistantMessage =>
         m.role === 'assistant' &&
-        m.content.some((c) => c.type === 'tool-call' && c.toolName === toolName),
+        m.content.some(
+          (c) => c.type === 'tool-call' && c.toolName === toolName,
+        ),
     )
     const toolMessages = agentState.messageHistory.filter(
       (m): m is ToolMessage => m.role === 'tool' && m.toolName === toolName,
@@ -472,8 +658,10 @@ describe('tool validation error handling', () => {
     const assistantToolCallPart = assistantToolCallMessages[0].content.find(
       (
         c,
-      ): c is Extract<AssistantMessage['content'][number], { type: 'tool-call' }> =>
-        c.type === 'tool-call' && c.toolName === toolName,
+      ): c is Extract<
+        AssistantMessage['content'][number],
+        { type: 'tool-call' }
+      > => c.type === 'tool-call' && c.toolName === toolName,
     )
     expect(assistantToolCallPart).toBeDefined()
     expect(toolMessages[0].toolCallId).toBe(assistantToolCallPart!.toolCallId)
@@ -497,7 +685,8 @@ describe('tool validation error handling', () => {
     )
     const orphanToolResults = agentState.messageHistory.filter(
       (message): message is ToolMessage =>
-        message.role === 'tool' && !assistantToolCallIds.has(message.toolCallId),
+        message.role === 'tool' &&
+        !assistantToolCallIds.has(message.toolCallId),
     )
     expect(orphanToolResults.length).toBe(0)
   })

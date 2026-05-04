@@ -1,6 +1,7 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import { BYOK_OPENROUTER_HEADER } from '@codebuff/common/constants/byok'
 import {
+  isFreebuffGeminiThinkerAgent,
   isFreebuffRootAgent,
   isFreeMode,
   isFreeModeAllowedAgentModel,
@@ -54,6 +55,12 @@ import {
   isFireworksModel,
 } from '@/llm-api/fireworks'
 import {
+  DeepSeekError,
+  handleDeepSeekNonStream,
+  handleDeepSeekStream,
+  isDeepSeekModel,
+} from '@/llm-api/deepseek'
+import {
   SiliconFlowError,
   handleSiliconFlowNonStream,
   handleSiliconFlowStream,
@@ -76,7 +83,7 @@ import { getFreeModeCountryAccess } from '@/server/free-mode-country'
 import type { SessionGateResult } from '@/server/free-session/public-api'
 import { extractApiKeyFromHeader } from '@/util/auth'
 import { withDefaultProperties } from '@codebuff/common/analytics'
-import { checkFreeModeRateLimit } from './free-mode-rate-limiter'
+import { checkFreeModeRateLimit as defaultCheckFreeModeRateLimit } from './free-mode-rate-limiter'
 
 export const formatQuotaResetCountdown = (
   nextQuotaReset: string | null | undefined,
@@ -115,6 +122,7 @@ export const formatQuotaResetCountdown = (
 }
 
 export type CheckSessionAdmissibleFn = typeof checkSessionAdmissible
+export type CheckFreeModeRateLimitFn = typeof defaultCheckFreeModeRateLimit
 
 type GateRejectCode = Extract<SessionGateResult, { ok: false }>['code']
 
@@ -145,6 +153,9 @@ export async function postChatCompletions(params: {
   /** Optional override for the freebuff waiting-room gate. Defaults to the
    *  real check backed by Postgres; tests inject a no-op. */
   checkSessionAdmissible?: CheckSessionAdmissibleFn
+  /** Optional override for the free-mode rate limiter. Tests inject this to
+   *  avoid coupling to process-global limiter state. */
+  checkFreeModeRateLimit?: CheckFreeModeRateLimitFn
 }) {
   const {
     req,
@@ -157,6 +168,7 @@ export async function postChatCompletions(params: {
     ensureSubscriberBlockGrant,
     getUserPreferences,
     checkSessionAdmissible: checkSession = checkSessionAdmissible,
+    checkFreeModeRateLimit = defaultCheckFreeModeRateLimit,
   } = params
   let { logger } = params
   let { trackEvent } = params
@@ -437,11 +449,9 @@ export async function postChatCompletions(params: {
       }
     }
 
-    // Freebuff waiting-room gate. Only enforced for free-mode requests, and
-    // only when FREEBUFF_WAITING_ROOM_ENABLED=true — otherwise this is a
-    // no-op that returns { ok: true, reason: 'disabled' } without a DB hit.
-    // Runs before the rate limiter so rejected requests don't burn a queued
-    // user's free-mode counters.
+    // Freebuff waiting-room gate. Usually enforced only when
+    // FREEBUFF_WAITING_ROOM_ENABLED=true. Runs before the rate limiter so
+    // rejected requests don't burn a queued user's free-mode counters.
     if (isFreeModeRequest) {
       const claimedInstanceId =
         typedBody.codebuff_metadata?.freebuff_instance_id
@@ -450,6 +460,7 @@ export async function postChatCompletions(params: {
         userEmail: userInfo.email,
         claimedInstanceId,
         requestedModel: typedBody.model,
+        requireActiveSession: isFreebuffGeminiThinkerAgent(agentId),
       })
       if (!gate.ok) {
         trackEvent({
@@ -603,13 +614,15 @@ export async function postChatCompletions(params: {
     const useLocalhost = true
     try {
       if (bodyStream) {
-        // Streaming request — route to SiliconFlow/CanopyWave/Fireworks for supported models
+        // Streaming request — route supported models to direct providers.
         const useSiliconFlow = false // isSiliconFlowModel(typedBody.model)
         const useCanopyWave = !useLocalhost && isCanopyWaveModel(typedBody.model)
-        const useFireworks = !useLocalhost && !useCanopyWave && isFireworksModel(typedBody.model)
+        const useDeepSeek = !useLocalhost && !useCanopyWave && isDeepSeekModel(typedBody.model)
+        const useFireworks = !useLocalhost && !useCanopyWave && !useDeepSeek && isFireworksModel(typedBody.model)
         const useOpenAIDirect =
           !useLocalhost &&
           !useCanopyWave &&
+          !useDeepSeek &&
           !useFireworks &&
           isOpenAIDirectModel(typedBody.model)
         const stream = useLocalhost
@@ -631,8 +644,8 @@ export async function postChatCompletions(params: {
                 logger,
                 insertMessageBigquery,
               })
-            : useCanopyWave
-              ? await handleCanopyWaveStream({
+            : useDeepSeek
+              ? await handleDeepSeekStream({
                   body: typedBody,
                   userId,
                   stripeCustomerId,
@@ -695,9 +708,10 @@ export async function postChatCompletions(params: {
         const model = typedBody.model
         const useSiliconFlow = false // isSiliconFlowModel(model)
         const useCanopyWave = !useLocalhost && isCanopyWaveModel(model)
-        const useFireworks = !useLocalhost && !useCanopyWave && isFireworksModel(model)
+        const useDeepSeek = !useLocalhost && !useCanopyWave && isDeepSeekModel(model)
+        const useFireworks = !useLocalhost && !useCanopyWave && !useDeepSeek && isFireworksModel(model)
         const shouldUseOpenAIEndpoint =
-          !useLocalhost && !useCanopyWave && !useFireworks && isOpenAIDirectModel(model)
+          !useLocalhost && !useCanopyWave && !useDeepSeek && !useFireworks && isOpenAIDirectModel(model)
 
         const nonStreamRequest = useLocalhost
           ? handleLocalhostNonStream({
@@ -718,8 +732,8 @@ export async function postChatCompletions(params: {
                 logger,
                 insertMessageBigquery,
               })
-            : useCanopyWave
-              ? handleCanopyWaveNonStream({
+            : useDeepSeek
+              ? handleDeepSeekNonStream({
                   body: typedBody,
                   userId,
                   stripeCustomerId,
@@ -786,6 +800,10 @@ export async function postChatCompletions(params: {
       if (error instanceof CanopyWaveError) {
         canopywaveError = error
       }
+      let deepseekError: DeepSeekError | undefined
+      if (error instanceof DeepSeekError) {
+        deepseekError = error
+      }
       let siliconflowError: SiliconFlowError | undefined
       if (error instanceof SiliconFlowError) {
         siliconflowError = error
@@ -801,11 +819,13 @@ export async function postChatCompletions(params: {
         ? 'SiliconFlow'
         : canopywaveError
           ? 'CanopyWave'
-          : fireworksError
-            ? 'Fireworks'
-            : openaiError
-              ? 'OpenAI'
-              : 'OpenRouter'
+          : deepseekError
+            ? 'DeepSeek'
+            : fireworksError
+              ? 'Fireworks'
+              : openaiError
+                ? 'OpenAI'
+                : 'OpenRouter'
       logger.error(
         {
           error: getErrorObject(error),
@@ -823,6 +843,7 @@ export async function postChatCompletions(params: {
             openrouterError ??
             fireworksError ??
             canopywaveError ??
+            deepseekError ??
             siliconflowError ??
             openaiError
           )?.statusCode,
@@ -830,6 +851,7 @@ export async function postChatCompletions(params: {
             openrouterError ??
             fireworksError ??
             canopywaveError ??
+            deepseekError ??
             siliconflowError ??
             openaiError
           )?.statusText,
@@ -861,6 +883,9 @@ export async function postChatCompletions(params: {
         return NextResponse.json(error.toJSON(), { status: error.statusCode })
       }
       if (error instanceof CanopyWaveError) {
+        return NextResponse.json(error.toJSON(), { status: error.statusCode })
+      }
+      if (error instanceof DeepSeekError) {
         return NextResponse.json(error.toJSON(), { status: error.statusCode })
       }
       if (error instanceof SiliconFlowError) {

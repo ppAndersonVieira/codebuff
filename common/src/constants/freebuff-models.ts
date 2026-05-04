@@ -15,6 +15,10 @@ export interface FreebuffModelOption {
   tagline: string
   /** Availability policy for the selector and server-side admission. */
   availability: 'always' | 'deployment_hours'
+  /** Optional caveat shown in the picker (e.g. data-collection warning).
+   *  Rendered in the warning/secondary color so users spot it before
+   *  picking the model. */
+  warning?: string
 }
 
 /** Server-facing fallback copy for APIs and provider errors that can't know
@@ -22,7 +26,9 @@ export interface FreebuffModelOption {
  *  `getFreebuffDeploymentAvailabilityLabel()` instead. */
 export const FREEBUFF_DEPLOYMENT_HOURS_LABEL = '9am ET-5pm PT every day'
 export const FREEBUFF_GEMINI_PRO_MODEL_ID = 'google/gemini-3.1-pro-preview'
+export const FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID = 'deepseek/deepseek-v4-pro'
 export const FREEBUFF_GLM_MODEL_ID = 'z-ai/glm-5.1'
+export const FREEBUFF_KIMI_MODEL_ID = 'moonshotai/kimi-k2.6'
 export const FREEBUFF_MINIMAX_MODEL_ID = 'minimax/minimax-m2.7'
 const FREEBUFF_EASTERN_TIMEZONE = 'America/New_York'
 const FREEBUFF_PACIFIC_TIMEZONE = 'America/Los_Angeles'
@@ -40,11 +46,33 @@ interface LocalTimeFormatOptions {
   timeZone?: string
 }
 
+/** Smart freebuff models that benefit from spawning the gemini-thinker
+ *  subagent for deeper reasoning. Fast models (e.g. MiniMax) skip it because
+ *  the extra round-trip would defeat the "fastest" tier. Used by the CLI to
+ *  toggle the gemini-thinker spawnable + prompts based on the user's pick,
+ *  and by the server to admit gemini-thinker child requests against a parent
+ *  session bound to one of these models. */
+export const FREEBUFF_GEMINI_THINKER_PARENT_MODELS = new Set<string>([
+  FREEBUFF_KIMI_MODEL_ID,
+  FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
+])
+
+export function canFreebuffModelSpawnGeminiThinker(modelId: string): boolean {
+  return FREEBUFF_GEMINI_THINKER_PARENT_MODELS.has(modelId)
+}
+
 export const FREEBUFF_MODELS = [
   {
-    id: FREEBUFF_GEMINI_PRO_MODEL_ID,
-    displayName: 'Gemini 3.1 Pro',
-    tagline: 'Deepest, 1/day',
+    id: FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
+    displayName: 'DeepSeek V4 Pro',
+    tagline: 'Smartest',
+    availability: 'always',
+    warning: 'Collects data for training',
+  },
+  {
+    id: FREEBUFF_KIMI_MODEL_ID,
+    displayName: 'Kimi K2.6',
+    tagline: 'Balanced',
     availability: 'always',
   },
   {
@@ -53,26 +81,38 @@ export const FREEBUFF_MODELS = [
     tagline: 'Fastest',
     availability: 'always',
   },
+] as const satisfies readonly FreebuffModelOption[]
+
+export const LEGACY_FREEBUFF_MODELS = [
   {
     id: FREEBUFF_GLM_MODEL_ID,
     displayName: 'GLM 5.1',
-    tagline: 'Smartest',
+    tagline: 'Legacy',
     availability: 'deployment_hours',
   },
 ] as const satisfies readonly FreebuffModelOption[]
 
-export type FreebuffModelId = (typeof FREEBUFF_MODELS)[number]['id']
+export const SUPPORTED_FREEBUFF_MODELS = [
+  ...FREEBUFF_MODELS,
+  ...LEGACY_FREEBUFF_MODELS,
+] as const satisfies readonly FreebuffModelOption[]
 
-/** What new freebuff users see selected in the picker. May not be currently
- *  available (GLM is closed outside deployment hours); callers that need an
- *  always-available id for resolution / auto-fallbacks should use
- *  FALLBACK_FREEBUFF_MODEL_ID instead. */
-export const DEFAULT_FREEBUFF_MODEL_ID: FreebuffModelId = FREEBUFF_GLM_MODEL_ID
+export type FreebuffModelId = (typeof FREEBUFF_MODELS)[number]['id']
+export type SupportedFreebuffModelId =
+  (typeof SUPPORTED_FREEBUFF_MODELS)[number]['id']
+
+/** What new freebuff users see selected in the picker. DeepSeek is the
+ *  smartest of the free options; the picker surfaces its data-collection
+ *  caveat (`warning`) so users can opt out to Kimi if that's a concern.
+ *  Callers that need a guaranteed-available id for resolution / auto-fallbacks
+ *  should use FALLBACK_FREEBUFF_MODEL_ID instead. */
+export const DEFAULT_FREEBUFF_MODEL_ID: FreebuffModelId =
+  FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID
 
 /** Always-available fallback used when the requested model can't be served
  *  right now (unknown id, deployment hours closed, etc.). Kept distinct from
  *  DEFAULT_FREEBUFF_MODEL_ID so a new user's "preferred default" can be the
- *  smartest model without auto-flipping anyone to a closed deployment. */
+ *  smartest model without auto-flipping anyone to a closed serverless model. */
 export const FALLBACK_FREEBUFF_MODEL_ID: FreebuffModelId =
   FREEBUFF_MINIMAX_MODEL_ID
 
@@ -89,9 +129,22 @@ export function resolveFreebuffModel(
   return isFreebuffModelId(id) ? id : FALLBACK_FREEBUFF_MODEL_ID
 }
 
+export function isSupportedFreebuffModelId(
+  id: string | null | undefined,
+): id is SupportedFreebuffModelId {
+  if (!id) return false
+  return SUPPORTED_FREEBUFF_MODELS.some((m) => m.id === id)
+}
+
+export function resolveSupportedFreebuffModel(
+  id: string | null | undefined,
+): SupportedFreebuffModelId {
+  return isSupportedFreebuffModelId(id) ? id : FALLBACK_FREEBUFF_MODEL_ID
+}
+
 export function getFreebuffModel(id: string): FreebuffModelOption {
   return (
-    FREEBUFF_MODELS.find((m) => m.id === id) ??
+    SUPPORTED_FREEBUFF_MODELS.find((m) => m.id === id) ??
     FREEBUFF_MODELS.find((m) => m.id === FALLBACK_FREEBUFF_MODEL_ID)!
   )
 }
@@ -242,7 +295,7 @@ export function isFreebuffModelAvailable(
   id: string,
   now: Date = new Date(),
 ): boolean {
-  const model = FREEBUFF_MODELS.find((m) => m.id === id)
+  const model = SUPPORTED_FREEBUFF_MODELS.find((m) => m.id === id)
   if (!model) return false
   return model.availability === 'always' || isFreebuffDeploymentHours(now)
 }

@@ -20,6 +20,11 @@ export interface FreebuffSessionRateLimit {
   recentCount: number
 }
 
+export type FreebuffSessionRateLimitByModel = Record<
+  string,
+  FreebuffSessionRateLimit
+>
+
 export type FreebuffCountryBlockReason =
   | 'country_not_allowed'
   | 'anonymized_or_unknown_country'
@@ -50,11 +55,16 @@ export type FreebuffSessionServerResponse =
        *  grace window. */
       status: 'none'
       message?: string
-      /** Snapshot of every model's queue depth so the CLI can render live
-       *  "N ahead" hints on the pre-join model picker without first
-       *  committing the user to a queue. Present on GET responses; not
-       *  returned from POST (POST never produces `none`). */
+      /** Snapshot of every model's queue depth at GET time. The picker no
+       *  longer renders this (queues effectively never form at current
+       *  traffic), but it's still surfaced for diagnostics and future use.
+       *  Present on GET responses; not returned from POST (POST never
+       *  produces `none`). */
       queueDepthByModel?: Record<string, number>
+      /** Current quota snapshots for rate-limited models, keyed by model id.
+       *  Lets the picker show exhausted daily/session caps before the user
+       *  commits to a queue. */
+      rateLimitsByModel?: FreebuffSessionRateLimitByModel
     }
   | {
       status: 'queued'
@@ -64,10 +74,10 @@ export type FreebuffSessionServerResponse =
       /** 1-indexed position in the queue for `model`. */
       position: number
       queueDepth: number
-      /** Current depth of every model's queue, so the CLI can show a live
-       *  "N ahead" hint on each row of the model selector. Models with no
-       *  queued rows at snapshot time may be absent; the CLI should treat a
-       *  missing entry as 0. */
+      /** Current depth of every model's queue. Retained for diagnostics —
+       *  the CLI no longer renders per-row queue hints. Models with no
+       *  queued rows at snapshot time may be absent; treat a missing entry
+       *  as 0. */
       queueDepthByModel: Record<string, number>
       estimatedWaitMs: number
       queuedAt: string
@@ -75,6 +85,7 @@ export type FreebuffSessionServerResponse =
        *  for unlimited models or when the status was produced outside the
        *  rate-limit check path (e.g. pure read via GET). */
       rateLimit?: FreebuffSessionRateLimit
+      rateLimitsByModel?: FreebuffSessionRateLimitByModel
     }
   | {
       status: 'active'
@@ -88,6 +99,7 @@ export type FreebuffSessionServerResponse =
        *  for unlimited models or when the status was produced outside the
        *  rate-limit check path (e.g. pure read via GET). */
       rateLimit?: FreebuffSessionRateLimit
+      rateLimitsByModel?: FreebuffSessionRateLimitByModel
     }
   | {
       /** Session is over. While `instanceId` is present we're inside the
@@ -130,7 +142,7 @@ export type FreebuffSessionServerResponse =
       /** User has an active session bound to a different model. Returned
        *  from POST /session when they pick a new model without ending their
        *  current session first. The CLI shows a confirmation prompt: "End
-       *  your active GLM session to switch?" → on confirm, DELETE then
+       *  your active DeepSeek session to switch?" → on confirm, DELETE then
        *  re-POST with the new model. */
       status: 'model_locked'
       currentModel: string

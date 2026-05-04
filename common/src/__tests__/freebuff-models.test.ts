@@ -1,30 +1,51 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
-  FREEBUFF_GEMINI_PRO_MODEL_ID,
+  canFreebuffModelSpawnGeminiThinker,
+  DEFAULT_FREEBUFF_MODEL_ID,
+  FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
+  FREEBUFF_GLM_MODEL_ID,
+  FREEBUFF_KIMI_MODEL_ID,
+  FREEBUFF_MINIMAX_MODEL_ID,
   FREEBUFF_MODELS,
+  SUPPORTED_FREEBUFF_MODELS,
   getFreebuffDeploymentAvailabilityLabel,
   isFreebuffDeploymentHours,
-  isFreebuffModelAvailable,
+  isFreebuffModelId,
+  isSupportedFreebuffModelId,
 } from '../constants/freebuff-models'
 
 describe('freebuff model availability', () => {
-  test('includes Gemini 3.1 Pro as an always-available option', () => {
-    expect(FREEBUFF_MODELS.map((model) => model.id)).toContain(
-      FREEBUFF_GEMINI_PRO_MODEL_ID,
+  test('defaults to DeepSeek V4 Pro (the smartest free model)', () => {
+    expect(DEFAULT_FREEBUFF_MODEL_ID).toBe(FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID)
+  })
+
+  test('DeepSeek carries the data-collection warning so users see it before picking', () => {
+    const deepseek = FREEBUFF_MODELS.find(
+      (m) => m.id === FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
     )
+    expect(deepseek?.warning).toBe('Collects data for training')
+  })
+
+  test('only smart freebuff models can spawn the gemini-thinker subagent', () => {
+    expect(canFreebuffModelSpawnGeminiThinker(FREEBUFF_KIMI_MODEL_ID)).toBe(true)
     expect(
-      isFreebuffModelAvailable(
-        FREEBUFF_GEMINI_PRO_MODEL_ID,
-        new Date('2026-01-05T18:00:00Z'),
-      ),
+      canFreebuffModelSpawnGeminiThinker(FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID),
     ).toBe(true)
-    expect(
-      isFreebuffModelAvailable(
-        FREEBUFF_GEMINI_PRO_MODEL_ID,
-        new Date('2026-01-05T12:00:00Z'),
-      ),
-    ).toBe(true)
+    expect(canFreebuffModelSpawnGeminiThinker(FREEBUFF_MINIMAX_MODEL_ID)).toBe(
+      false,
+    )
+  })
+
+  test('supports GLM 5.1 as a legacy server-side model without selecting it for new clients', () => {
+    expect(FREEBUFF_MODELS.map((model) => model.id)).not.toContain(
+      FREEBUFF_GLM_MODEL_ID,
+    )
+    expect(SUPPORTED_FREEBUFF_MODELS.map((model) => model.id)).toContain(
+      FREEBUFF_GLM_MODEL_ID,
+    )
+    expect(isFreebuffModelId(FREEBUFF_GLM_MODEL_ID)).toBe(false)
+    expect(isSupportedFreebuffModelId(FREEBUFF_GLM_MODEL_ID)).toBe(true)
   })
 
   test('formats the close time in the user local timezone while deployment is open', () => {

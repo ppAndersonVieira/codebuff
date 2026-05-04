@@ -1,6 +1,11 @@
 import { parseAgentId } from '../util/agent-id-parsing'
 
-import { FREEBUFF_MODELS } from './freebuff-models'
+import { FREEBUFF_GEMINI_THINKER_AGENT_ID } from './freebuff-gemini-thinker'
+import {
+  FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
+  FREEBUFF_GEMINI_PRO_MODEL_ID,
+  SUPPORTED_FREEBUFF_MODELS,
+} from './freebuff-models'
 
 import type { CostMode } from './model-config'
 
@@ -16,11 +21,16 @@ export const FREE_COST_MODE = 'free' as const
  * excluded — they're spawned by the root, so counting them would inflate
  * every user's apparent activity.
  */
-export const FREEBUFF_ROOT_AGENT_IDS = ['base2-free'] as const
+export const FREEBUFF_ROOT_AGENT_IDS = [
+  'base2-free',
+  'base2-free-deepseek-v4',
+] as const
 const FREEBUFF_ROOT_AGENT_ID_SET: ReadonlySet<string> = new Set(
   FREEBUFF_ROOT_AGENT_IDS,
 )
-const FREEBUFF_SELECTABLE_MODEL_IDS = FREEBUFF_MODELS.map((model) => model.id)
+const FREEBUFF_ALLOWED_MODEL_IDS = SUPPORTED_FREEBUFF_MODELS.map(
+  (model) => model.id,
+)
 
 /**
  * Agents that are allowed to run in FREE mode.
@@ -32,7 +42,8 @@ const FREEBUFF_SELECTABLE_MODEL_IDS = FREEBUFF_MODELS.map((model) => model.id)
  */
 export const FREE_MODE_AGENT_MODELS: Record<string, Set<string>> = {
   // Root orchestrator
-  'base2-free': new Set(FREEBUFF_SELECTABLE_MODEL_IDS),
+  'base2-free': new Set(FREEBUFF_ALLOWED_MODEL_IDS),
+  'base2-free-deepseek-v4': new Set([FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID]),
 
   // File exploration agents
   'file-picker': new Set(['google/gemini-2.5-flash-lite']),
@@ -44,13 +55,16 @@ export const FREE_MODE_AGENT_MODELS: Record<string, Set<string>> = {
   'researcher-docs': new Set(['google/gemini-3.1-flash-lite-preview']),
 
   // Command execution
-  'basher': new Set(['google/gemini-3.1-flash-lite-preview']),
+  basher: new Set(['google/gemini-3.1-flash-lite-preview']),
 
   // Editor for free mode
-  'editor-lite': new Set(FREEBUFF_SELECTABLE_MODEL_IDS),
+  'editor-lite': new Set(FREEBUFF_ALLOWED_MODEL_IDS),
 
   // Code reviewer for free mode
-  'code-reviewer-lite': new Set(FREEBUFF_SELECTABLE_MODEL_IDS),
+  'code-reviewer-lite': new Set(FREEBUFF_ALLOWED_MODEL_IDS),
+
+  // Legacy: kept for the standalone gemini thinker agent if invoked directly.
+  [FREEBUFF_GEMINI_THINKER_AGENT_ID]: new Set([FREEBUFF_GEMINI_PRO_MODEL_ID]),
 }
 
 /**
@@ -89,6 +103,13 @@ export function isFreebuffRootAgent(fullAgentId: string): boolean {
   if (!agentId) return false
   if (publisherId && publisherId !== 'codebuff') return false
   return FREEBUFF_ROOT_AGENT_ID_SET.has(agentId)
+}
+
+export function isFreebuffGeminiThinkerAgent(fullAgentId: string): boolean {
+  const { publisherId, agentId } = parseAgentId(fullAgentId)
+  if (!agentId) return false
+  if (publisherId && publisherId !== 'codebuff') return false
+  return agentId === FREEBUFF_GEMINI_THINKER_AGENT_ID
 }
 
 /**

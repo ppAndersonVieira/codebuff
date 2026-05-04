@@ -3,7 +3,10 @@ import { useRenderer } from '@opentui/react'
 import React, { useMemo, useState } from 'react'
 
 import { Button } from './button'
-import { ChoiceAdBanner } from './choice-ad-banner'
+import {
+  ChoiceAdBanner,
+  CHOICE_AD_BANNER_HEIGHT,
+} from './choice-ad-banner'
 import { FreebuffModelSelector } from './freebuff-model-selector'
 import { ShimmerText } from './shimmer-text'
 import { useFreebuffCtrlCExit } from '../hooks/use-freebuff-ctrl-c-exit'
@@ -138,7 +141,7 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
 
   const isQueued = session?.status === 'queued'
   // 'none' = user hasn't joined any queue yet. We're in the pre-chat landing
-  // state: show the picker with live N-ahead hints and a prompt. Picking a
+  // state: show the picker with live N-in-line hints and a prompt. Picking a
   // model triggers joinFreebuffQueue, which POSTs and transitions us to
   // 'queued' (waiting room) or straight to 'active' (chat) if no wait.
   const isLanding = session?.status === 'none'
@@ -260,9 +263,9 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                   <span>Elapsed </span>
                   {formatElapsed(elapsedMs)}
                 </text>
-                {/* Per-model session quota (e.g. GLM 5.1 caps at 5/12h). Only
-                    rendered for rate-limited models so the Minimax queue stays
-                    clutter-free. */}
+                {/* Per-model session quota (e.g. DeepSeek V4 Pro caps at 5/12h).
+                    Only rendered for rate-limited models so the Minimax queue
+                    stays clutter-free. */}
                 {session.rateLimit && (
                   <text style={{ fg: theme.muted, alignSelf: 'flex-start' }}>
                     <span>Sessions </span>
@@ -343,8 +346,8 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
             </>
           )}
 
-          {/* Per-model session quota exhausted (e.g. 5+ GLM sessions in the
-              last 12h). Terminal for this run — the user can exit and come
+          {/* Per-model session quota exhausted (e.g. 5+ DeepSeek sessions in
+              the last 12h). Terminal for this run — the user can exit and come
               back once the oldest session in the window rolls off. */}
           {session?.status === 'rate_limited' && (
             <>
@@ -368,19 +371,21 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
         </box>
       </box>
 
-      {/* Ad banner pinned to the bottom, same look-and-feel as in chat. */}
-      {ads && (
-        <box style={{ flexShrink: 0 }}>
+      {/* Reserve the ad banner slot before the async ad fetch resolves so the
+          waiting-room content does not jump when the banner fills. */}
+      <box
+        style={{
+          width: '100%',
+          flexShrink: 0,
+          height: CHOICE_AD_BANNER_HEIGHT,
+        }}
+      >
+        {ads ? (
           <ChoiceAdBanner ads={ads} onImpression={recordImpression} />
-        </box>
-      )}
-
-      {/* Horizontal separator (mirrors chat input divider style) */}
-      {!ads && (
-        <text style={{ fg: theme.muted, flexShrink: 0 }}>
-          {'─'.repeat(terminalWidth)}
-        </text>
-      )}
+        ) : (
+          <text style={{ fg: theme.muted }}>{'─'.repeat(terminalWidth)}</text>
+        )}
+      </box>
     </box>
   )
 }

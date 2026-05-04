@@ -124,6 +124,11 @@ export enum AnalyticsEvent {
   DOCS_SEARCH_INSUFFICIENT_CREDITS = 'api.docs_search_insufficient_credits',
   DOCS_SEARCH_ERROR = 'api.docs_search_error',
 
+  GRAVITY_INDEX_REQUEST = 'api.gravity_index_request',
+  GRAVITY_INDEX_AUTH_ERROR = 'api.gravity_index_auth_error',
+  GRAVITY_INDEX_VALIDATION_ERROR = 'api.gravity_index_validation_error',
+  GRAVITY_INDEX_ERROR = 'api.gravity_index_error',
+
   // Web - Feedback API
   FEEDBACK_SUBMITTED = 'api.feedback_submitted',
   FEEDBACK_AUTH_ERROR = 'api.feedback_auth_error',
@@ -137,11 +142,6 @@ export enum AnalyticsEvent {
   TOKEN_COUNT_AUTH_ERROR = 'api.token_count_auth_error',
   TOKEN_COUNT_VALIDATION_ERROR = 'api.token_count_validation_error',
   TOKEN_COUNT_ERROR = 'api.token_count_error',
-
-  // Claude OAuth
-  CLAUDE_OAUTH_REQUEST = 'sdk.claude_oauth_request',
-  CLAUDE_OAUTH_RATE_LIMITED = 'sdk.claude_oauth_rate_limited',
-  CLAUDE_OAUTH_AUTH_ERROR = 'sdk.claude_oauth_auth_error',
 
   // ChatGPT OAuth
   CHATGPT_OAUTH_REQUEST = 'sdk.chatgpt_oauth_request',

@@ -1,22 +1,38 @@
-
 import { publisher } from '../constants'
 
 import type { AgentDefinition } from '../types/agent-definition'
 
+type CodeEditorVariant =
+  | 'gpt-5'
+  | 'opus'
+  | 'glm'
+  | 'kimi'
+  | 'deepseek'
+  | 'minimax'
+
+const EDITOR_MODEL_BY_VARIANT: Record<CodeEditorVariant, string> = {
+  'gpt-5': 'openai/gpt-5.1',
+  opus: 'anthropic/claude-opus-4.7',
+  glm: 'z-ai/glm-5.1',
+  kimi: 'moonshotai/kimi-k2.6',
+  deepseek: 'deepseek/deepseek-v4-pro',
+  minimax: 'minimax/minimax-m2.7',
+}
+
+// Only Opus gets <think>-tag scaffolding in its instructions; the other
+// variants either have native reasoning (deepseek) or are non-reasoning
+// models where the extra prose just bloats the prompt without helping.
+const EDITOR_VARIANTS_WITH_THINK_TAGS: ReadonlySet<CodeEditorVariant> = new Set(
+  ['opus'],
+)
+
 export const createCodeEditor = (options: {
-  model: 'gpt-5' | 'opus' | 'glm' | 'minimax'
+  model: CodeEditorVariant
 }): Omit<AgentDefinition, 'id'> => {
   const { model } = options
   return {
     publisher,
-    model:
-      options.model === 'gpt-5'
-        ? 'openai/gpt-5.1'
-        : options.model === 'minimax'
-          ? 'minimax/minimax-m2.7'
-        : options.model === 'glm'
-          ? 'z-ai/glm-5.1'
-          : 'anthropic/claude-opus-4.7',
+    model: EDITOR_MODEL_BY_VARIANT[options.model],
     ...(options.model === 'opus' && {
       providerOptions: {
         only: ['amazon-bedrock'],
@@ -67,9 +83,9 @@ OR for new files or major rewrites:
 }
 </codebuff_tool_call>
 
-${model === 'gpt-5' || model === 'glm' || model === 'minimax'
-        ? ''
-        : `Before you start writing your implementation, you should use <think> tags to think about the best way to implement the changes.
+${
+  EDITOR_VARIANTS_WITH_THINK_TAGS.has(model)
+    ? `Before you start writing your implementation, you should use <think> tags to think about the best way to implement the changes.
 
 You can also use <think> tags interspersed between tool calls to think about the best way to implement the changes.
 
@@ -96,7 +112,8 @@ You can also use <think> tags interspersed between tool calls to think about the
 </codebuff_tool_call>
 
 </example>`
-      }
+    : ''
+}
 
 Your implementation should:
 - Be complete and comprehensive

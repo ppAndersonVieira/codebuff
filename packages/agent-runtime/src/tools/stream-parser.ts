@@ -8,6 +8,7 @@ import {
 import { generateCompactId } from '@codebuff/common/util/string'
 
 import { processStreamWithTools } from '../tool-stream-parser'
+import { INCLUDE_REASONING_IN_MESSAGE_HISTORY } from '../constants'
 import {
   executeCustomToolCall,
   executeToolCall,
@@ -276,6 +277,20 @@ export async function processStream(
       }
 
       if (chunk.type === 'reasoning') {
+        if (INCLUDE_REASONING_IN_MESSAGE_HISTORY && chunk.text) {
+          const last = assistantMessages[assistantMessages.length - 1]
+          const lastPart =
+            last?.role === 'assistant' && Array.isArray(last.content)
+              ? last.content[last.content.length - 1]
+              : undefined
+          if (lastPart && lastPart.type === 'reasoning') {
+            lastPart.text += chunk.text
+          } else {
+            assistantMessages.push(
+              assistantMessage({ type: 'reasoning', text: chunk.text }),
+            )
+          }
+        }
         onResponseChunk({
           type: 'reasoning_delta',
           text: chunk.text,

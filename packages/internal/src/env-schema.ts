@@ -8,6 +8,7 @@ export const serverEnvSchema = clientEnvSchema.extend({
   ANTHROPIC_API_KEY: z.string().min(1),
   FIREWORKS_API_KEY: z.string().min(1),
   CANOPYWAVE_API_KEY: z.string().min(1).optional(),
+  DEEPSEEK_API_KEY: z.string().min(1).optional(),
   SILICONFLOW_API_KEY: z.string().min(1).optional(),
   LINKUP_API_KEY: z.string().min(1),
   CONTEXT7_API_KEY: z.string().optional(),
@@ -64,11 +65,6 @@ export const serverEnvSchema = clientEnvSchema.extend({
     .int()
     .positive()
     .default(60 * 60 * 1000),
-  FREEBUFF_SESSION_GRACE_MS: z.coerce
-    .number()
-    .int()
-    .nonnegative()
-    .default(30 * 60 * 1000),
 })
 export const serverEnvVars = serverEnvSchema.keyof().options
 export type ServerEnvVar = (typeof serverEnvVars)[number]
@@ -92,6 +88,7 @@ export const serverProcessEnv: ServerInput = {
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
   FIREWORKS_API_KEY: process.env.FIREWORKS_API_KEY,
   CANOPYWAVE_API_KEY: process.env.CANOPYWAVE_API_KEY,
+  DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
   SILICONFLOW_API_KEY: process.env.SILICONFLOW_API_KEY,
   LINKUP_API_KEY: process.env.LINKUP_API_KEY,
   CONTEXT7_API_KEY: process.env.CONTEXT7_API_KEY,
@@ -127,5 +124,4 @@ export const serverProcessEnv: ServerInput = {
   // Freebuff waiting room
   FREEBUFF_WAITING_ROOM_ENABLED: process.env.FREEBUFF_WAITING_ROOM_ENABLED,
   FREEBUFF_SESSION_LENGTH_MS: process.env.FREEBUFF_SESSION_LENGTH_MS,
-  FREEBUFF_SESSION_GRACE_MS: process.env.FREEBUFF_SESSION_GRACE_MS,
 }

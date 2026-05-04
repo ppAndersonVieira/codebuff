@@ -5,9 +5,7 @@ import editor, { createCodeEditor } from '../editor/editor'
 import type { AgentState, ToolCall } from '../types/agent-definition'
 
 describe('editor agent', () => {
-  const createMockAgentState = (
-    messageHistory: any[] = [],
-  ): AgentState => ({
+  const createMockAgentState = (messageHistory: any[] = []): AgentState => ({
     agentId: 'editor-test',
     runId: 'test-run',
     parentId: undefined,
@@ -67,6 +65,16 @@ describe('editor agent', () => {
       expect(glmEditor.model).toBe('z-ai/glm-5.1')
     })
 
+    test('creates kimi editor', () => {
+      const kimiEditor = createCodeEditor({ model: 'kimi' })
+      expect(kimiEditor.model).toBe('moonshotai/kimi-k2.6')
+    })
+
+    test('creates deepseek editor', () => {
+      const deepseekEditor = createCodeEditor({ model: 'deepseek' })
+      expect(deepseekEditor.model).toBe('deepseek/deepseek-v4-pro')
+    })
+
     test('creates minimax editor', () => {
       const minimaxEditor = createCodeEditor({ model: 'minimax' })
       expect(minimaxEditor.model).toBe('minimax/minimax-m2.7')
@@ -82,6 +90,18 @@ describe('editor agent', () => {
       const glmEditor = createCodeEditor({ model: 'glm' })
       expect(glmEditor.instructionsPrompt).not.toContain('<think>')
       expect(glmEditor.instructionsPrompt).not.toContain('</think>')
+    })
+
+    test('kimi editor does not include think tags in instructions', () => {
+      const kimiEditor = createCodeEditor({ model: 'kimi' })
+      expect(kimiEditor.instructionsPrompt).not.toContain('<think>')
+      expect(kimiEditor.instructionsPrompt).not.toContain('</think>')
+    })
+
+    test('deepseek editor does not include think tags in instructions', () => {
+      const deepseekEditor = createCodeEditor({ model: 'deepseek' })
+      expect(deepseekEditor.instructionsPrompt).not.toContain('<think>')
+      expect(deepseekEditor.instructionsPrompt).not.toContain('</think>')
     })
 
     test('minimax editor does not include think tags in instructions', () => {
@@ -171,10 +191,10 @@ describe('editor agent', () => {
       ]
       const mockAgentState = createMockAgentState(initialMessages)
       const mockLogger = {
-        debug: () => { },
-        info: () => { },
-        warn: () => { },
-        error: () => { },
+        debug: () => {},
+        info: () => {},
+        warn: () => {},
+        error: () => {},
       }
 
       const generator = editor.handleSteps!({
@@ -194,10 +214,10 @@ describe('editor agent', () => {
       ]
       const mockAgentState = createMockAgentState(initialMessages)
       const mockLogger = {
-        debug: () => { },
-        info: () => { },
-        warn: () => { },
-        error: () => { },
+        debug: () => {},
+        info: () => {},
+        warn: () => {},
+        error: () => {},
       }
 
       const generator = editor.handleSteps!({
@@ -238,10 +258,10 @@ describe('editor agent', () => {
       ]
       const mockAgentState = createMockAgentState(initialMessages)
       const mockLogger = {
-        debug: () => { },
-        info: () => { },
-        warn: () => { },
-        error: () => { },
+        debug: () => {},
+        info: () => {},
+        warn: () => {},
+        error: () => {},
       }
 
       const generator = editor.handleSteps!({
@@ -271,7 +291,9 @@ describe('editor agent', () => {
         input: { output: { messages: any[] } }
       }
       expect(toolCall.input.output.messages).toHaveLength(3)
-      expect(toolCall.input.output.messages[0].content[0].text).toBe('Message 2')
+      expect(toolCall.input.output.messages[0].content[0].text).toBe(
+        'Message 2',
+      )
     })
 
     test('handleSteps can be serialized for sandbox execution', () => {
@@ -289,10 +311,10 @@ describe('editor agent', () => {
       const initialMessages: any[] = []
       const mockAgentState = createMockAgentState(initialMessages)
       const mockLogger = {
-        debug: () => { },
-        info: () => { },
-        warn: () => { },
-        error: () => { },
+        debug: () => {},
+        info: () => {},
+        warn: () => {},
+        error: () => {},
       }
 
       const generator = editor.handleSteps!({
@@ -303,7 +325,9 @@ describe('editor agent', () => {
 
       generator.next()
 
-      const newMessages = [{ role: 'assistant', content: [{ type: 'text', text: 'Done' }] }]
+      const newMessages = [
+        { role: 'assistant', content: [{ type: 'text', text: 'Done' }] },
+      ]
       const updatedState = createMockAgentState(newMessages)
 
       const result = generator.next({
@@ -316,7 +340,9 @@ describe('editor agent', () => {
         toolName: 'set_output',
         input: {
           output: {
-            messages: [{ role: 'assistant', content: [{ type: 'text', text: 'Done' }] }],
+            messages: [
+              { role: 'assistant', content: [{ type: 'text', text: 'Done' }] },
+            ],
           },
         },
         includeToolCall: false,
@@ -326,10 +352,10 @@ describe('editor agent', () => {
     test('works with empty initial message history', () => {
       const mockAgentState = createMockAgentState([])
       const mockLogger = {
-        debug: () => { },
-        info: () => { },
-        warn: () => { },
-        error: () => { },
+        debug: () => {},
+        info: () => {},
+        warn: () => {},
+        error: () => {},
       }
 
       const generator = editor.handleSteps!({
@@ -341,7 +367,10 @@ describe('editor agent', () => {
       generator.next()
 
       const newMessages = [
-        { role: 'assistant', content: [{ type: 'text', text: 'First response' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'First response' }],
+        },
       ]
       const updatedState = createMockAgentState(newMessages)
 

@@ -1,14 +1,12 @@
 import { TextAttributes } from '@opentui/core'
-import { useRenderer } from '@opentui/react'
-import React, { useMemo, useState } from 'react'
+import { useKeyboard, useRenderer } from '@opentui/react'
+import React, { useCallback, useMemo, useState } from 'react'
 
 import { Button } from './button'
-import {
-  ChoiceAdBanner,
-  CHOICE_AD_BANNER_HEIGHT,
-} from './choice-ad-banner'
+import { ChoiceAdBanner, CHOICE_AD_BANNER_HEIGHT } from './choice-ad-banner'
 import { FreebuffModelSelector } from './freebuff-model-selector'
 import { ShimmerText } from './shimmer-text'
+import { takeOverFreebuffSession } from '../hooks/use-freebuff-session'
 import { useFreebuffCtrlCExit } from '../hooks/use-freebuff-ctrl-c-exit'
 import { useGravityAd } from '../hooks/use-gravity-ad'
 import { useLogo } from '../hooks/use-logo'
@@ -18,9 +16,11 @@ import { useTerminalDimensions } from '../hooks/use-terminal-dimensions'
 import { useTheme } from '../hooks/use-theme'
 import { exitFreebuffCleanly } from '../utils/freebuff-exit'
 import { getLogoAccentColor, getLogoBlockColor } from '../utils/theme-system'
+import { FREEBUFF_PREMIUM_SESSION_LIMIT } from '@codebuff/common/constants/freebuff-models'
 
 import type { FreebuffSessionResponse } from '../types/freebuff-session'
 import type { FreebuffIpPrivacySignal } from '@codebuff/common/types/freebuff-session'
+import type { KeyEvent } from '@opentui/core'
 
 interface WaitingRoomScreenProps {
   session: FreebuffSessionResponse | null
@@ -59,6 +59,9 @@ const formatRetryAfter = (ms: number): string => {
   return rem === 0 ? `${hours}h` : `${hours}h ${rem}m`
 }
 
+const formatSessionUnits = (units: number): string =>
+  Number.isInteger(units) ? String(units) : units.toFixed(1)
+
 const PRIVACY_SIGNAL_LABELS: Partial<Record<FreebuffIpPrivacySignal, string>> =
   {
     anonymous: 'anonymized network',
@@ -86,6 +89,121 @@ const formatPrivacySignalList = (
   if (labels.length === 1) return labels[0]
   if (labels.length === 2) return `${labels[0]} or ${labels[1]}`
   return `${labels.slice(0, -1).join(', ')}, or ${labels[labels.length - 1]}`
+}
+
+const TakeoverPrompt: React.FC = () => {
+  const theme = useTheme()
+  const [pending, setPending] = useState(false)
+  const [focusedIndex, setFocusedIndex] = useState(0) // 0 = Take over, 1 = Exit
+
+  const handleTakeover = useCallback(() => {
+    if (pending) return
+    setPending(true)
+    takeOverFreebuffSession().finally(() => setPending(false))
+  }, [pending])
+
+  useKeyboard(
+    useCallback(
+      (key: KeyEvent) => {
+        const name = key.name ?? ''
+        const isConfirm = name === 'return' || name === 'enter'
+        const isExit = name === 'escape' || name === 'esc'
+        const isTab = name === 'tab'
+        const isShiftTab = key.shift === true && isTab
+        const isRight = name === 'right'
+        const isLeft = name === 'left'
+
+        if (isExit) {
+          key.preventDefault?.()
+          exitFreebuffCleanly()
+          return
+        }
+
+        if (isConfirm) {
+          key.preventDefault?.()
+          if (focusedIndex === 0) {
+            handleTakeover()
+          } else {
+            exitFreebuffCleanly()
+          }
+          return
+        }
+
+        if (isRight || isTab) {
+          key.preventDefault?.()
+          setFocusedIndex((prev) => (prev + 1) % 2)
+          return
+        }
+
+        if (isLeft || isShiftTab) {
+          key.preventDefault?.()
+          setFocusedIndex((prev) => (prev - 1 + 2) % 2)
+          return
+        }
+      },
+      [focusedIndex, handleTakeover],
+    ),
+  )
+
+  const isTakeoverFocused = focusedIndex === 0
+  const isExitFocused = focusedIndex === 1
+
+  return (
+    <box
+      style={{
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 1,
+        width: '100%',
+      }}
+    >
+      <text style={{ fg: theme.foreground }} attributes={TextAttributes.BOLD}>
+        Freebuff is already running
+      </text>
+
+      <text style={{ fg: theme.muted }}>
+        Only one freebuff instance is allowed at a time.
+      </text>
+
+      <box style={{ flexDirection: 'row', gap: 2, marginTop: 1 }}>
+        <Button
+          onClick={handleTakeover}
+          onMouseOver={() => setFocusedIndex(0)}
+          style={{ paddingLeft: 1, paddingRight: 1 }}
+          border={['top', 'bottom', 'left', 'right']}
+          borderStyle="single"
+          borderColor={theme.primary}
+        >
+          <text
+            style={{
+              fg: isTakeoverFocused ? theme.background : theme.foreground,
+              bg: isTakeoverFocused ? theme.primary : undefined,
+            }}
+            attributes={TextAttributes.BOLD}
+          >
+            {pending ? 'Taking over...' : 'Take over'}
+          </text>
+        </Button>
+        <Button
+          onClick={exitFreebuffCleanly}
+          onMouseOver={() => setFocusedIndex(1)}
+          style={{ paddingLeft: 1, paddingRight: 1 }}
+          border={['top', 'bottom', 'left', 'right']}
+          borderStyle="single"
+          borderColor={isExitFocused ? theme.foreground : theme.muted}
+        >
+          <text
+            style={{ fg: isExitFocused ? theme.foreground : theme.muted }}
+            attributes={
+              isExitFocused ? TextAttributes.BOLD : TextAttributes.NONE
+            }
+          >
+            Exit
+          </text>
+        </Button>
+      </box>
+    </box>
+  )
 }
 
 export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
@@ -146,6 +264,23 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
   // 'queued' (waiting room) or straight to 'active' (chat) if no wait.
   const isLanding = session?.status === 'none'
 
+  // Premium quota counter for the title line. All premium models share one
+  // pool; the server replicates the same snapshot under each premium model
+  // id, so any entry has the right count. Renders amber when exhausted so
+  // the limit reads as "you've hit it" rather than just another count.
+  const rateLimitsByModel =
+    session && 'rateLimitsByModel' in session
+      ? session.rateLimitsByModel
+      : undefined
+  const sharedPremiumUsed = rateLimitsByModel
+    ? (Object.values(rateLimitsByModel)[0]?.recentCount ?? 0)
+    : 0
+  const premiumLeft = Math.max(
+    0,
+    FREEBUFF_PREMIUM_SESSION_LIMIT - sharedPremiumUsed,
+  )
+  const premiumLeftColor = premiumLeft === 0 ? theme.secondary : theme.muted
+
   return (
     <box
       style={{
@@ -176,7 +311,7 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
         >
           <text
             style={{ fg: exitHover ? theme.foreground : theme.muted }}
-            attributes={exitHover ? TextAttributes.BOLD : TextAttributes.NONE}
+            attributes={TextAttributes.BOLD}
           >
             ✕
           </text>
@@ -220,17 +355,40 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
           )}
 
           {isLanding && (
-            <>
-              <text style={{ fg: theme.foreground, marginBottom: 1 }}>
-                Pick a model to start
+            <box
+              style={{
+                flexDirection: 'column',
+                alignItems: 'flex-start',
+                gap: 0,
+              }}
+            >
+              <text style={{ marginBottom: 1, wrapMode: 'word' }}>
+                <span fg={theme.foreground} attributes={TextAttributes.BOLD}>
+                  Pick a model to start
+                </span>
+                <span fg={premiumLeftColor}>
+                  {'  ·  '}
+                  {premiumLeft} premium left today
+                </span>
               </text>
               <FreebuffModelSelector />
-            </>
+            </box>
           )}
 
+          {session?.status === 'takeover_prompt' && <TakeoverPrompt />}
+
           {isQueued && session && (
-            <>
-              <text style={{ fg: theme.foreground, marginBottom: 1 }}>
+            <box
+              style={{
+                flexDirection: 'column',
+                alignItems: 'flex-start',
+                gap: 0,
+              }}
+            >
+              <text
+                style={{ fg: theme.foreground, marginBottom: 1 }}
+                attributes={TextAttributes.BOLD}
+              >
                 {session.position === 1
                   ? "You're next in line"
                   : "You're in the waiting room"}
@@ -263,21 +421,8 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                   <span>Elapsed </span>
                   {formatElapsed(elapsedMs)}
                 </text>
-                {/* Per-model session quota (e.g. DeepSeek V4 Pro caps at 5/12h).
-                    Only rendered for rate-limited models so the Minimax queue
-                    stays clutter-free. */}
-                {session.rateLimit && (
-                  <text style={{ fg: theme.muted, alignSelf: 'flex-start' }}>
-                    <span>Sessions </span>
-                    <span fg={theme.foreground}>
-                      {session.rateLimit.recentCount} /{' '}
-                      {session.rateLimit.limit}
-                    </span>
-                    <span> used in last {session.rateLimit.windowHours}h</span>
-                  </text>
-                )}
               </box>
-            </>
+            </box>
           )}
 
           {/* Server says the waiting room is disabled — this screen should not
@@ -346,9 +491,9 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
             </>
           )}
 
-          {/* Per-model session quota exhausted (e.g. 5+ DeepSeek sessions in
-              the last 12h). Terminal for this run — the user can exit and come
-              back once the oldest session in the window rolls off. */}
+          {/* Shared premium-session quota exhausted. Terminal for this run —
+              the user can exit and come
+              back once the daily Pacific reset passes. */}
           {session?.status === 'rate_limited' && (
             <>
               <text style={{ fg: theme.secondary, marginBottom: 1 }}>
@@ -357,10 +502,9 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
               <text style={{ fg: theme.muted, wrapMode: 'word' }}>
                 You've used{' '}
                 <span fg={theme.foreground}>
-                  {session.recentCount} of {session.limit}
+                  {formatSessionUnits(session.recentCount)} of {session.limit}
                 </span>{' '}
-                hour-long sessions on {session.model} in the last{' '}
-                {session.windowHours}h. Try again in{' '}
+                premium sessions today. Try again in{' '}
                 <span fg={theme.foreground}>
                   {formatRetryAfter(session.retryAfterMs)}
                 </span>

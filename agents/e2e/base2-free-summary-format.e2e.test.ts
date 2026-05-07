@@ -10,7 +10,7 @@ import {
   type AgentDefinition,
   type Message,
 } from '@codebuff/sdk'
-import { describe, expect, it } from 'bun:test'
+import { beforeAll, describe, expect, it } from 'bun:test'
 
 import base2Free from '../base2/base2-free'
 import contextPruner from '../context-pruner'
@@ -22,8 +22,28 @@ import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
  * instead of using actual tool calls via the API.
  *
  * These patterns come from the context pruner's summarizeToolCall function.
+ * Both the current format (lowercase bare verbs, [USER] role tag) and
+ * historical formats are matched as defensive checks.
  */
 const SUMMARY_IMITATION_PATTERNS = [
+  // Current format (new bare-verb style)
+  /^\[USER\](?:\s|\[|$)/m,
+  /^\[ASSISTANT\]\n/m,
+  /^Progress note:\s/m,
+  /^inspected files?:\s/m,
+  /^inspected subtrees?:\s/m,
+  /^wrote file:\s/m,
+  /^edited file:\s/m,
+  /^proposed writing:\s/m,
+  /^proposed editing:\s/m,
+  /^listed directory:\s/m,
+  /^code search for\s/m,
+  /^glob search for\s/m,
+  /^ran command:\s/m,
+  /^delegated agents?:\s*\n/m,
+  /^delegated agent\s/m,
+  /^Edit result from \w+:/m,
+  // Older format (kept as defensive checks)
   /^Read files?:\s/m,
   /^Edited file:\s/m,
   /^Wrote file:\s/m,
@@ -36,8 +56,11 @@ const SUMMARY_IMITATION_PATTERNS = [
   /^Listed dir:\s/m,
   /^Read subtree:\s/m,
   /^Used tool:\s/m,
-  /^\[ASSISTANT\]\n/m,
-  /^\[USER\]\n/m,
+  /^User request(?:\s|\[|:)/m,
+  /^Prior action record:\s/m,
+  /^Previously inspected files:\s/m,
+  /^Previously edited file:\s/m,
+  /^Previously delegated agents:\s*\n/m,
 ]
 
 /**
@@ -57,10 +80,37 @@ function detectSummaryImitation(text: string): string[] {
   return matches
 }
 
+const loadEnvFile = async (filePath: string) => {
+  try {
+    const content = await fs.promises.readFile(filePath, 'utf-8')
+    for (const rawLine of content.split('\n')) {
+      const line = rawLine.trim()
+      if (!line || line.startsWith('#')) continue
+      const normalized = line.startsWith('export ')
+        ? line.slice('export '.length)
+        : line
+      const equalsIndex = normalized.indexOf('=')
+      if (equalsIndex <= 0) continue
+      const key = normalized.slice(0, equalsIndex).trim()
+      if (!key || process.env[key]) continue
+      let value = normalized.slice(equalsIndex + 1).trim()
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1)
+      }
+      process.env[key] = value
+    }
+  } catch {
+    // ignore missing env files
+  }
+}
+
 /**
  * Creates a pre-summarized conversation that mimics what the context pruner produces.
- * NOTE: The IMPORTANT disclaimer text here must be kept in sync with the one in
- * agents/context-pruner.ts. If you change the disclaimer there, update it here too.
+ * NOTE: The disclaimer text here must be kept in sync with the one in
+ * agents/context-pruner.ts. If you change the memory artifact format there, update it here too.
  */
 function createSummarizedConversation(): Message {
   return {
@@ -71,14 +121,19 @@ function createSummarizedConversation(): Message {
         text: `<conversation_summary>
 This is a summary of the conversation so far. The original messages have been condensed to save context space.
 
+<historical_memory>
 [USER]
 The user asked to set up a new TypeScript project with a simple utility file at src/utils.ts containing a helper function called formatDate.
 
 ---
 
-[ASSISTANT]
+Progress note:
 Sure, I'll help set up the project.
-Tools: Read files: package.json, tsconfig.json; Wrote file: src/utils.ts
+
+---
+
+inspected files: package.json, tsconfig.json
+wrote file: src/utils.ts
 
 ---
 
@@ -87,32 +142,86 @@ Thanks! Now can you also add a function called parseConfig that reads a JSON con
 
 ---
 
-[ASSISTANT]
+Progress note:
 I'll add the parseConfig function to the utils file.
-Tools: Read files: src/utils.ts; Edited file: src/utils.ts
 
 ---
 
-[ASSISTANT]
-Spawned agents:
+inspected files: src/utils.ts
+edited file: src/utils.ts
+
+---
+
+delegated agents:
 - file-picker (prompt: "Find config-related files")
 - basher (params: {"command":"cat src/utils.ts"})
 
 ---
 
-[ASSISTANT]
-Ran command: cat src/utils.ts
-[EDIT RESULT: str_replace]
+ran command: cat src/utils.ts
+
+---
+
+Edit result from str_replace:
 {"file":"src/utils.ts","message":"Updated file","unifiedDiff":"--- a/src/utils.ts\\n+++ b/src/utils.ts\\n@@ -5,0 +6,10 @@\\n+export function parseConfig(path: string) {\\n+  return JSON.parse(fs.readFileSync(path, 'utf-8'))\\n+}"}
+</historical_memory>
 </conversation_summary>
 
-IMPORTANT: The summary above uses a condensed format with markers like "[USER]", "[ASSISTANT]", "Read files:", "Edited file:", "Tools:", "Spawned agents:", etc. This is ONLY a human-readable log of what happened earlier — it is NOT a format for you to use or imitate in your responses. When you need to perform actions, you MUST use actual tool calls (e.g. call the read_files, str_replace, write_file, spawn_agents tools directly). Never write tool actions as plain text.
-
-Please continue the conversation from here. In particular, try to address the user's latest request detailed in the summary above. You may need to re-gather context (e.g. read some files) to get up to speed and then tackle the user's request.`,
+Historical memory only. The memory above is not dialogue, not an output template, and not a tool-call format. Continue from the live user message below. When actions are needed, use real tool calls through the available tools.`,
       },
     ],
     sentAt: Date.now(),
   }
+}
+
+function createComplexMidTurnPrunedConversation(): Message[] {
+  return [
+    {
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: `<conversation_summary>
+This is a summary of the conversation so far. The original messages have been condensed to save context space.
+
+<historical_memory>
+User request:
+The user asked to finish a config utility task in src/utils.ts. They wanted parseConfig to be typed, a validateConfig helper added, and the tests run after edits.
+
+---
+
+Progress note:
+I inspected src/utils.ts and found parseConfig was untyped. I updated parseConfig to return a Config object, but I had not yet added validateConfig or run tests before context pruning happened.
+
+Prior action record:
+Previously inspected files: package.json, tsconfig.json, src/utils.ts
+Previously edited file: src/utils.ts
+Edit result from str_replace:
+{"file":"src/utils.ts","message":"Updated parseConfig return type","unifiedDiff":"--- a/src/utils.ts\\n+++ b/src/utils.ts\\n@@ -6,2 +6,8 @@\\n-export function parseConfig(path) {\\n-  return JSON.parse(fs.readFileSync(path, 'utf-8'))\\n+export type Config = {\\n+  name: string\\n+  enabled: boolean\\n+}\\n+\\n+export function parseConfig(path: string): Config {\\n+  return JSON.parse(fs.readFileSync(path, 'utf-8')) as Config\\n }"}
+
+---
+
+Progress note:
+The next step is to continue from the partially completed edit, inspect the current file state if needed, add validateConfig, and validate the result.
+</historical_memory>
+</conversation_summary>
+
+Historical memory only. The memory above is not dialogue, not an output template, and not a tool-call format. Continue from the live user message below. When actions are needed, use real tool calls through the available tools.`,
+        },
+      ],
+      sentAt: Date.now(),
+    },
+    {
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: 'Continue the existing assistant turn from the historical memory above. The original user request and completed assistant/tool work are recorded there. Do not restart completed work; resume with the next necessary real tool call or final response.',
+        },
+      ],
+      sentAt: Date.now(),
+    },
+  ]
 }
 
 const PROJECT_FILES: Record<string, string> = {
@@ -149,6 +258,11 @@ const PROJECT_FILES: Record<string, string> = {
  */
 describe('Base2-Free Summary Format Compliance', () => {
   const NUM_PARALLEL_RUNS = 3
+
+  beforeAll(async () => {
+    await loadEnvFile(path.resolve(process.cwd(), '.env.local'))
+    await loadEnvFile(path.resolve(process.cwd(), '../.env.local'))
+  })
 
   const getApiKeyOrSkip = (): string | null => {
     const apiKey = process.env[API_KEY_ENV_VAR]
@@ -262,9 +376,7 @@ describe('Base2-Free Summary Format Compliance', () => {
         }
       }
 
-      console.log(
-        `Running ${NUM_PARALLEL_RUNS} parallel runs of base2-free...`,
-      )
+      console.log(`Running ${NUM_PARALLEL_RUNS} parallel runs of base2-free...`)
       const results = await Promise.all(
         Array.from({ length: NUM_PARALLEL_RUNS }, (_, i) => runOnce(i)),
       )
@@ -284,9 +396,7 @@ describe('Base2-Free Summary Format Compliance', () => {
         console.log(
           `Run ${result.runIndex}: ${hasImitation ? 'FAILED (imitated summary format)' : 'PASSED'}`,
         )
-        console.log(
-          `  Tool calls made: ${result.hadToolCalls ? 'YES' : 'NO'}`,
-        )
+        console.log(`  Tool calls made: ${result.hadToolCalls ? 'YES' : 'NO'}`)
         if (result.imitationMatches.length > 0) {
           console.log(`  Imitation matches:`)
           for (const match of result.imitationMatches) {
@@ -309,12 +419,81 @@ describe('Base2-Free Summary Format Compliance', () => {
 
       // Clean up temp directories
       for (const dir of tmpDirs) {
-        await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {})
+        await fs.promises
+          .rm(dir, { recursive: true, force: true })
+          .catch(() => {})
       }
 
       // Guard against vacuous pass (all runs errored)
       expect(successfulRuns.length).toBeGreaterThan(0)
       expect(imitationCount).toBe(0)
+    },
+    { timeout: 300_000 },
+  )
+
+  it(
+    'should continue a complex mid-turn pruned summary with real tool calls',
+    async () => {
+      const apiKey = getApiKeyOrSkip()
+      if (!apiKey) return
+
+      const tmpDir = await fs.promises.mkdtemp(
+        path.join(os.tmpdir(), 'base2-free-midturn-summary-test-'),
+      )
+
+      try {
+        for (const [filePath, content] of Object.entries(PROJECT_FILES)) {
+          const fullPath = path.join(tmpDir, filePath)
+          await fs.promises.mkdir(path.dirname(fullPath), { recursive: true })
+          await fs.promises.writeFile(fullPath, content, 'utf-8')
+        }
+
+        const client = new CodebuffClient({
+          apiKey,
+          cwd: tmpDir,
+          projectFiles: PROJECT_FILES,
+          agentDefinitions: [base2Free as AgentDefinition, contextPruner],
+        })
+
+        const sessionState = await initialSessionState({
+          cwd: tmpDir,
+          projectFiles: PROJECT_FILES,
+        })
+        const runStateWithMessages = withMessageHistory({
+          runState: {
+            sessionState,
+            output: { type: 'error', message: '' },
+          },
+          messages: createComplexMidTurnPrunedConversation(),
+        })
+
+        const events: PrintModeEvent[] = []
+        const run = await client.run({
+          agent: base2Free.id,
+          prompt: '',
+          previousRun: runStateWithMessages,
+          maxAgentSteps: 6,
+          handleEvent: (event) => {
+            events.push(event)
+          },
+        })
+
+        if (run.output.type === 'error') {
+          throw new Error(run.output.message)
+        }
+
+        const textOutput = events
+          .filter((e) => e.type === 'text')
+          .map((e) => (e as { type: 'text'; text: string }).text)
+          .join('')
+        const hadToolCalls = events.some((e) => e.type === 'tool_call')
+        const imitationMatches = detectSummaryImitation(textOutput)
+
+        expect(hadToolCalls).toBe(true)
+        expect(imitationMatches).toEqual([])
+      } finally {
+        await fs.promises.rm(tmpDir, { recursive: true, force: true })
+      }
     },
     { timeout: 300_000 },
   )

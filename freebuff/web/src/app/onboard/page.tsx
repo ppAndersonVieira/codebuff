@@ -6,9 +6,9 @@ import { getServerSession } from 'next-auth'
 
 import {
   checkFingerprintConflict,
-  checkReplayAttack,
   createCliSession,
   getSessionTokenFromCookies,
+  hasCliSessionForAuthHash,
 } from './_db'
 import { isAuthCodeExpired, parseAuthCode, validateAuthCode } from './_helpers'
 import { authOptions } from '../api/auth/[...nextauth]/auth-options'
@@ -100,6 +100,20 @@ const Onboard = async ({ searchParams }: PageProps) => {
   )
 
   if (!valid) {
+    logger.warn(
+      {
+        authCodeLength: authCode.length,
+        fingerprintIdPrefix: fingerprintId.slice(0, 24),
+        fingerprintIdLength: fingerprintId.length,
+        expiresAt,
+        receivedHashPrefix: receivedHash.slice(0, 12),
+        receivedHashLength: receivedHash.length,
+        expectedHashPrefix: fingerprintHash.slice(0, 12),
+        expectedHashLength: fingerprintHash.length,
+      },
+      'Invalid Freebuff CLI auth code',
+    )
+
     return (
       <StatusCard
         title="Invalid auth code"
@@ -119,7 +133,7 @@ const Onboard = async ({ searchParams }: PageProps) => {
     )
   }
 
-  const isReplay = await checkReplayAttack(fingerprintHash, user.id)
+  const isReplay = await hasCliSessionForAuthHash(fingerprintHash, user.id)
   if (isReplay) {
     return (
       <StatusCard

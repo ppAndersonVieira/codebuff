@@ -144,7 +144,32 @@ describe('tool validation error handling', () => {
     expect('error' in result).toBe(false)
     if (!('error' in result)) {
       expect(result.input.replacements).toEqual([
-        { old: 'before', new: 'after', allowMultiple: false },
+        { oldString: 'before', newString: 'after', allowMultiple: false },
+      ])
+    }
+  })
+
+  it('should accept old/new aliases for str_replace replacements', () => {
+    const result = parseRawToolCall({
+      rawToolCall: {
+        toolName: 'str_replace',
+        toolCallId: 'short-alias-tool-call-id',
+        input: {
+          path: 'test.ts',
+          replacements: [
+            {
+              old: 'before',
+              new: 'after',
+            },
+          ],
+        },
+      },
+    })
+
+    expect('error' in result).toBe(false)
+    if (!('error' in result)) {
+      expect(result.input.replacements).toEqual([
+        { oldString: 'before', newString: 'after', allowMultiple: false },
       ])
     }
   })
@@ -169,7 +194,7 @@ describe('tool validation error handling', () => {
     expect('error' in result).toBe(false)
     if (!('error' in result)) {
       expect(result.input.replacements).toEqual([
-        { old: 'before', new: 'after', allowMultiple: false },
+        { oldString: 'before', newString: 'after', allowMultiple: false },
       ])
     }
   })
@@ -182,9 +207,9 @@ describe('tool validation error handling', () => {
         input: {
           path: 'test.ts',
           replacements: [
-            { old: 'before', new: 'after' },
-            { old: 'delete me' },
-            { old: 'delete me too' },
+            { oldString: 'before', newString: 'after' },
+            { oldString: 'delete me' },
+            { oldString: 'delete me too' },
           ],
         },
       },
@@ -193,10 +218,10 @@ describe('tool validation error handling', () => {
     expect('error' in result).toBe(true)
     if ('error' in result) {
       expect(result.error).toContain('Missing required replacement fields:')
-      expect(result.error).toContain('- replacements[1].new')
-      expect(result.error).toContain('- replacements[2].new')
+      expect(result.error).toContain('- replacements[1].newString')
+      expect(result.error).toContain('- replacements[2].newString')
       expect(result.error).toContain(
-        'If the intent is deletion, set "new": "" explicitly.',
+        'If the intent is deletion, set "newString": "" explicitly.',
       )
       expect(result.error).toContain('Raw validation issues:')
     }
@@ -214,8 +239,46 @@ describe('tool validation error handling', () => {
 
     expect('error' in result).toBe(true)
     if ('error' in result) {
-      expect(result.error).toContain('The JSON parser reported:')
-      expect(result.error).toContain('If the arguments are incomplete')
+      expect(result.error).toContain(
+        'expected the tool arguments to be an object, but received a string',
+      )
+      expect(result.error).toContain('Parsing as JSON failed:')
+      expect(result.error).toContain(
+        'The arguments may be malformed or incomplete',
+      )
+    }
+  })
+
+  it('should explain when parsed tool input remains a string', () => {
+    const input = JSON.stringify(
+      JSON.stringify(
+        JSON.stringify(
+          JSON.stringify({
+            path: 'test.ts',
+            instructions: 'Writes a test file',
+            content: 'console.log("test")\n',
+          }),
+        ),
+      ),
+    )
+
+    const result = parseRawToolCall({
+      rawToolCall: {
+        toolName: 'write_file',
+        toolCallId: 'over-encoded-tool-call-id',
+        input,
+      },
+    })
+
+    expect('error' in result).toBe(true)
+    if ('error' in result) {
+      expect(result.error).toContain(
+        'expected the tool arguments to be an object, but received a string',
+      )
+      expect(result.error).toContain(
+        'Parsing succeeded, but the parsed value was still a string',
+      )
+      expect(result.error).not.toContain('malformed or incomplete')
     }
   })
 
@@ -550,8 +613,9 @@ describe('tool validation error handling', () => {
     )
     expect(errorEvents.length).toBe(1)
     expect(errorEvents[0].message).toContain(
-      'tool arguments were a string, not a JSON object',
+      'expected the tool arguments to be an object, but received a string',
     )
+    expect(errorEvents[0].message).toContain('Parsing as JSON failed:')
     expect(errorEvents[0].message).toContain('Original tool call input:')
 
     expect(result.hadToolCallError).toBe(true)

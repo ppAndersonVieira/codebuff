@@ -9,6 +9,7 @@ import {
   FREEBUFF_MODELS,
   getFreebuffDeploymentAvailabilityLabel,
   isFreebuffModelAvailable,
+  isFreebuffPremiumModelId,
 } from '@codebuff/common/constants/freebuff-models'
 
 import { joinFreebuffQueue } from '../hooks/use-freebuff-session'
@@ -17,7 +18,10 @@ import { useFreebuffModelStore } from '../state/freebuff-model-store'
 import { useFreebuffSessionStore } from '../state/freebuff-session-store'
 import { useTerminalDimensions } from '../hooks/use-terminal-dimensions'
 import { useTheme } from '../hooks/use-theme'
-import { nextFreebuffModelId } from '../utils/freebuff-model-navigation'
+import {
+  freebuffModelNavigationDirectionForKey,
+  nextFreebuffModelId,
+} from '../utils/freebuff-model-navigation'
 
 import type { FreebuffModelOption } from '@codebuff/common/constants/freebuff-models'
 import type { KeyEvent } from '@opentui/core'
@@ -30,6 +34,40 @@ const FREEBUFF_MODEL_SELECTOR_MODELS: readonly FreebuffModelOption[] = [
   ...FREEBUFF_MODELS.filter((model) => model.id === DEFAULT_FREEBUFF_MODEL_ID),
   ...FREEBUFF_MODELS.filter((model) => model.id !== DEFAULT_FREEBUFF_MODEL_ID),
 ]
+const FREEBUFF_MODEL_SELECTOR_MODEL_IDS = FREEBUFF_MODEL_SELECTOR_MODELS.map(
+  (model) => model.id,
+)
+
+// Section grouping: premium models share one quota pool, unlimited has none.
+// Putting the tier on a section header lets each row drop its redundant
+// "Premium"/"Unlimited" chip. The shared 0/5 counter lives in the page title
+// (rendered by the parent), not the section header — this picker is purely a
+// list of choices grouped by tier. Empty sections are filtered so a model set
+// with no premium (or no unlimited) entries doesn't render an orphan header.
+type Section = {
+  key: 'premium' | 'unlimited'
+  label: string
+  models: readonly FreebuffModelOption[]
+}
+
+const SECTIONS: readonly Section[] = (
+  [
+    {
+      key: 'premium',
+      label: 'PREMIUM',
+      models: FREEBUFF_MODEL_SELECTOR_MODELS.filter((m) =>
+        isFreebuffPremiumModelId(m.id),
+      ),
+    },
+    {
+      key: 'unlimited',
+      label: 'UNLIMITED',
+      models: FREEBUFF_MODEL_SELECTOR_MODELS.filter(
+        (m) => !isFreebuffPremiumModelId(m.id),
+      ),
+    },
+  ] satisfies readonly Section[]
+).filter((section) => section.models.length > 0)
 
 /**
  * Dual-purpose model picker:
@@ -42,14 +80,11 @@ const FREEBUFF_MODEL_SELECTOR_MODELS: readonly FreebuffModelOption[] = [
  * Keyboard navigation: Tab / arrow keys move the green highlight; Enter (or
  * Space) commits the focused row. Mouse click commits in one step.
  *
- * Always stacked vertically. On narrow terminals where the longest one-line
- * label wouldn't fit, the secondary details (warning / deployment hours)
- * spill onto an indented second line under the name.
- *
- * No queue-position hint: traffic doesn't reach the threshold where a wait
- * would form, so showing "N in line" everywhere just adds noise (and width).
- * The picker still surfaces "Closed" (outside deployment hours) and "Limit
- * used" (per-user quota) inline since those gate the actual click.
+ * Layout: rows are grouped into PREMIUM / UNLIMITED sections so the tier is
+ * visible without a per-row chip; the shared 0/5 counter sits inside the
+ * PREMIUM section header. Names align in a column so taglines line up across
+ * rows. On narrow terminals the secondary details (warning / deployment
+ * hours) drop onto an indented second line under the row.
  */
 export const FreebuffModelSelector: React.FC = () => {
   const theme = useTheme()
@@ -91,50 +126,64 @@ export const FreebuffModelSelector: React.FC = () => {
     }
   }, [now, selectedModel, session, setSelectedModel])
 
-  const BUTTON_CHROME = 4 // 2 border + 2 padding
+  const committedModelId = session?.status === 'queued' ? session.model : null
+  const rateLimitsByModel =
+    session && 'rateLimitsByModel' in session
+      ? session.rateLimitsByModel
+      : undefined
 
-  // Decide whether secondary details (warning / deployment hours) get their
-  // own indented line under the name. Trigger: the widest one-line button
-  // wouldn't fit in our content budget. All buttons share a uniform width so
-  // the column reads as a clean stack of equal choices. We size to the
-  // *label* — Closed / Limit used hints can transiently push the text past
-  // this width, but they're rare (deployment hours closing, daily quota hit)
-  // and a small one-time grow is fine.
-  const { wrapDetails, buttonOuterWidth } = useMemo(() => {
-    const detailsTextLen = (model: FreebuffModelOption): number => {
-      const parts: number[] = []
+  const BUTTON_CHROME = 4 // 2 border + 2 padding
+  const NAME_GAP = 2 // spaces between name column and details column
+
+  // Two-column layout: a fixed name column (padded to the longest displayName
+  // across all rows) followed by a details column (tagline · warning ·
+  // deployment-hours/closed). Falls back to single-column mode on narrow
+  // terminals where the secondary details spill to an indented second line.
+  const { wrapDetails, buttonOuterWidth, nameColumnWidth } = useMemo(() => {
+    const nameLen = (m: FreebuffModelOption) => m.displayName.length
+    const maxNameLen = Math.max(...FREEBUFF_MODEL_SELECTOR_MODELS.map(nameLen))
+
+    const detailsParts = (model: FreebuffModelOption): number[] => {
+      const parts = [model.tagline.length]
+      if (model.warning) parts.push(model.warning.length)
       if (model.availability === 'deployment_hours') {
         parts.push(deploymentAvailabilityLabel.length)
       }
-      if (model.warning) parts.push(model.warning.length)
-      if (parts.length === 0) return 0
-      return parts.reduce((a, b) => a + b, 0) + (parts.length - 1) * 3 /* " · " */
+      return parts
     }
 
-    const oneLineLen = (model: FreebuffModelOption): number => {
-      const inlineDetails = detailsTextLen(model)
-      return (
-        2 /* indicator + space */ +
-        model.displayName.length +
-        3 /* " · " */ +
-        model.tagline.length +
-        (inlineDetails > 0 ? 3 + inlineDetails : 0)
-      )
-    }
+    const joinedLen = (parts: number[]): number =>
+      parts.reduce((a, b) => a + b, 0) + Math.max(0, parts.length - 1) * 3 // " · "
 
-    const labelLineLen = (model: FreebuffModelOption): number =>
-      2 + model.displayName.length + 3 + model.tagline.length
-
-    const detailsLineLen = (model: FreebuffModelOption): number => {
-      const len = detailsTextLen(model)
-      return len === 0 ? 0 : 2 /* indent */ + len
-    }
+    const oneLineLen = (model: FreebuffModelOption): number =>
+      2 /* indicator + space */ +
+      maxNameLen +
+      NAME_GAP +
+      joinedLen(detailsParts(model))
 
     const maxOneLineOuter =
       Math.max(...FREEBUFF_MODEL_SELECTOR_MODELS.map(oneLineLen)) +
       BUTTON_CHROME
     if (maxOneLineOuter <= contentMaxWidth) {
-      return { wrapDetails: false, buttonOuterWidth: maxOneLineOuter }
+      return {
+        wrapDetails: false,
+        buttonOuterWidth: maxOneLineOuter,
+        nameColumnWidth: maxNameLen,
+      }
+    }
+
+    // Narrow: line 1 = "indicator name · tagline", line 2 (if any) =
+    // "  warning · hours". Compute the max of both so all buttons stay the
+    // same width.
+    const labelLineLen = (m: FreebuffModelOption) =>
+      2 + m.displayName.length + 3 + m.tagline.length
+    const detailsLineLen = (m: FreebuffModelOption) => {
+      const parts: number[] = []
+      if (m.warning) parts.push(m.warning.length)
+      if (m.availability === 'deployment_hours') {
+        parts.push(deploymentAvailabilityLabel.length)
+      }
+      return parts.length === 0 ? 0 : 2 /* indent */ + joinedLen(parts)
     }
     const maxTwoLineInner = Math.max(
       ...FREEBUFF_MODEL_SELECTOR_MODELS.map((m) =>
@@ -147,17 +196,10 @@ export const FreebuffModelSelector: React.FC = () => {
         maxTwoLineInner + BUTTON_CHROME,
         contentMaxWidth,
       ),
+      nameColumnWidth: maxNameLen,
     }
   }, [contentMaxWidth, deploymentAvailabilityLabel])
 
-  // "Already committed to this model" — only when the server has us queued
-  // on it. On the landing screen (status 'none'), nothing is committed yet,
-  // so picking the focused model is always a real action (first join).
-  const committedModelId = session?.status === 'queued' ? session.model : null
-  const rateLimitsByModel =
-    session && 'rateLimitsByModel' in session
-      ? session.rateLimitsByModel
-      : undefined
   const isJoinable = useCallback(
     (modelId: string) => {
       if (!isFreebuffModelAvailable(modelId, new Date(now))) return false
@@ -186,33 +228,127 @@ export const FreebuffModelSelector: React.FC = () => {
       (key: KeyEvent) => {
         if (pending) return
         const name = key.name ?? ''
-        const isForward =
-          name === 'right' || name === 'down' || (name === 'tab' && !key.shift)
-        const isBackward =
-          name === 'left' || name === 'up' || (name === 'tab' && key.shift)
+        const direction = freebuffModelNavigationDirectionForKey(key)
         const isCommit =
           name === 'return' || name === 'enter' || name === 'space'
-        if (!isForward && !isBackward && !isCommit) return
         if (isCommit) {
           if (isJoinable(focusedId) && focusedId !== committedModelId) {
             key.preventDefault?.()
+            key.stopPropagation?.()
             pick(focusedId)
           }
           return
         }
+        if (!direction) return
         const targetId = nextFreebuffModelId({
-          modelIds: FREEBUFF_MODEL_SELECTOR_MODELS.map((model) => model.id),
+          modelIds: FREEBUFF_MODEL_SELECTOR_MODEL_IDS,
           focusedId,
-          direction: isForward ? 'forward' : 'backward',
+          direction,
         })
         if (targetId) {
           key.preventDefault?.()
+          key.stopPropagation?.()
           setFocusedId(targetId)
         }
       },
       [pending, pick, focusedId, committedModelId, isJoinable],
     ),
   )
+
+  const renderModelButton = (model: FreebuffModelOption) => {
+    // Single visual state: the focused row IS the highlight. The user's
+    // saved/committed pick is not shown separately — it just sets where
+    // focus lands when the picker opens. Pressing Enter on the focused
+    // row commits it.
+    const isHovered = hoveredId === model.id
+    const isFocused = focusedId === model.id
+    const canJoin = isJoinable(model.id)
+    // Clickable whenever picking would actually do something — i.e.
+    // anything except re-picking the queue we're already in.
+    const interactable = !pending && canJoin && model.id !== committedModelId
+
+    // Focused row: green border + arrow indicator + bold name. The name
+    // itself stays the normal foreground color so it doesn't shout — the
+    // border and arrow do the highlighting. Off-focus rows are default.
+    const indicator = isFocused ? '›' : ' '
+    const fgColor = canJoin ? theme.foreground : theme.muted
+    const mutedColor = theme.muted
+    const warningColor = theme.secondary
+
+    const borderColor = isFocused
+      ? theme.primary
+      : isHovered
+        ? theme.foreground
+        : theme.border
+
+    // Deployment-hours rows show "until 5pm PT" while open and "opens 9am ET"
+    // while closed (the label flips inside getFreebuffDeploymentAvailabilityLabel),
+    // so the same string carries both the in-hours and out-of-hours signals
+    // without a separate "Closed" chip. Greyed-out fgColor handles the rest.
+    const hasHours = model.availability === 'deployment_hours'
+    const hasWarning = !!model.warning
+
+    // Spaces inside <span>s render verbatim, so we hand-pad the name to align
+    // taglines into a column. nameColumnWidth is the longest name across all
+    // rows, so the diff is >= 0; +NAME_GAP guarantees breathing room even on
+    // the widest row.
+    const namePadding = ' '.repeat(
+      nameColumnWidth - model.displayName.length + NAME_GAP,
+    )
+
+    return (
+      <Button
+        key={model.id}
+        onClick={() => {
+          setFocusedId(model.id)
+          if (canJoin) pick(model.id)
+        }}
+        onMouseOver={() => interactable && setHoveredId(model.id)}
+        onMouseOut={() =>
+          setHoveredId((curr) => (curr === model.id ? null : curr))
+        }
+        style={{
+          borderStyle: 'single',
+          borderColor,
+          paddingLeft: 1,
+          paddingRight: 1,
+          width: buttonOuterWidth,
+        }}
+        border={['top', 'bottom', 'left', 'right']}
+      >
+        <text>
+          <span fg={fgColor}>{indicator} </span>
+          <span
+            fg={fgColor}
+            attributes={isFocused ? TextAttributes.BOLD : TextAttributes.NONE}
+          >
+            {model.displayName}
+          </span>
+          {wrapDetails ? (
+            <span fg={mutedColor}> · {model.tagline}</span>
+          ) : (
+            <>
+              <span fg={mutedColor}>{namePadding + model.tagline}</span>
+              {hasWarning && <span fg={warningColor}> · {model.warning}</span>}
+              {hasHours && (
+                <span fg={mutedColor}> · {deploymentAvailabilityLabel}</span>
+              )}
+            </>
+          )}
+        </text>
+        {wrapDetails && (hasWarning || hasHours) && (
+          <text>
+            <span> </span>
+            {hasWarning && <span fg={warningColor}>{model.warning}</span>}
+            {hasWarning && hasHours && <span fg={mutedColor}> · </span>}
+            {hasHours && (
+              <span fg={mutedColor}>{deploymentAvailabilityLabel}</span>
+            )}
+          </text>
+        )}
+      </Button>
+    )
+  }
 
   return (
     <box
@@ -222,105 +358,20 @@ export const FreebuffModelSelector: React.FC = () => {
         gap: 0,
       }}
     >
-      {FREEBUFF_MODEL_SELECTOR_MODELS.map((model) => {
-        // Single visual state: the focused row IS the highlight. The user's
-        // saved/committed pick is not shown separately — it just sets where
-        // focus lands when the picker opens. Pressing Enter on the focused
-        // row commits it.
-        const isHovered = hoveredId === model.id
-        const isFocused = focusedId === model.id
-        const isAvailable = isFreebuffModelAvailable(model.id, new Date(now))
-        const rateLimit = rateLimitsByModel?.[model.id]
-        const isQuotaExhausted =
-          rateLimit !== undefined && rateLimit.recentCount >= rateLimit.limit
-        const canJoin = isAvailable && !isQuotaExhausted
-        // Clickable whenever picking would actually do something — i.e.
-        // anything except re-picking the queue we're already in.
-        const interactable =
-          !pending && canJoin && model.id !== committedModelId
-        const hint = !isAvailable
-          ? 'Closed'
-          : isQuotaExhausted
-            ? 'Limit used'
-            : ''
-
-        // Focused row: green border + arrow indicator + bold name. The name
-        // itself stays the normal foreground color so it doesn't shout — the
-        // border and arrow do the highlighting. Off-focus rows are default.
-        const indicator = isFocused ? '›' : ' '
-        const fgColor = canJoin ? theme.foreground : theme.muted
-        const mutedColor = theme.muted
-        const warningColor = theme.secondary
-        const hintColor = theme.secondary
-
-        const borderColor = isFocused
-          ? theme.primary
-          : isHovered
-            ? theme.foreground
-            : theme.border
-
-        const showInlineHours =
-          !wrapDetails && model.availability === 'deployment_hours'
-        const showInlineWarning = !wrapDetails && !!model.warning
-        const showWrappedDetails =
-          wrapDetails &&
-          (model.availability === 'deployment_hours' || !!model.warning)
-
-        return (
-          <Button
-            key={model.id}
-            onClick={() => {
-              setFocusedId(model.id)
-              if (canJoin) pick(model.id)
-            }}
-            onMouseOver={() => interactable && setHoveredId(model.id)}
-            onMouseOut={() =>
-              setHoveredId((curr) => (curr === model.id ? null : curr))
-            }
-            style={{
-              borderStyle: 'single',
-              borderColor,
-              paddingLeft: 1,
-              paddingRight: 1,
-              width: buttonOuterWidth,
-            }}
-            border={['top', 'bottom', 'left', 'right']}
-          >
-            <text>
-              <span fg={fgColor}>{indicator} </span>
-              <span
-                fg={fgColor}
-                attributes={
-                  isFocused ? TextAttributes.BOLD : TextAttributes.NONE
-                }
-              >
-                {model.displayName}
-              </span>
-              <span fg={mutedColor}> · {model.tagline}</span>
-              {showInlineHours && (
-                <span fg={mutedColor}> · {deploymentAvailabilityLabel}</span>
-              )}
-              {showInlineWarning && (
-                <span fg={warningColor}> · {model.warning}</span>
-              )}
-              {hint && <span fg={hintColor}> {hint}</span>}
-            </text>
-            {showWrappedDetails && (
-              <text>
-                <span>  </span>
-                {model.availability === 'deployment_hours' && (
-                  <span fg={mutedColor}>{deploymentAvailabilityLabel}</span>
-                )}
-                {model.availability === 'deployment_hours' &&
-                  model.warning && <span fg={mutedColor}> · </span>}
-                {model.warning && (
-                  <span fg={warningColor}>{model.warning}</span>
-                )}
-              </text>
-            )}
-          </Button>
-        )
-      })}
+      {SECTIONS.map((section, sectionIdx) => (
+        <box
+          key={section.key}
+          style={{
+            flexDirection: 'column',
+            alignItems: 'flex-start',
+            gap: 0,
+            marginTop: sectionIdx === 0 ? 0 : 1,
+          }}
+        >
+          <text style={{ fg: theme.muted }}>{section.label}</text>
+          {section.models.map(renderModelButton)}
+        </box>
+      ))}
     </box>
   )
 }

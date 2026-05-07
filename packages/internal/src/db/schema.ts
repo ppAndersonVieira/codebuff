@@ -255,16 +255,27 @@ export const message = pgTable(
   ],
 )
 
-export const session = pgTable('session', {
-  sessionToken: text('sessionToken').notNull().primaryKey(),
-  userId: text('userId')
-    .notNull()
-    .references(() => user.id, { onDelete: 'cascade' }),
-  expires: timestamp('expires', { mode: 'date' }).notNull(),
-  fingerprint_id: text('fingerprint_id').references(() => fingerprint.id),
-  type: sessionTypeEnum('type').notNull().default('web'),
-  created_at: timestamp('created_at', { mode: 'date' }).notNull().defaultNow(),
-})
+export const session = pgTable(
+  'session',
+  {
+    sessionToken: text('sessionToken').notNull().primaryKey(),
+    userId: text('userId')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    expires: timestamp('expires', { mode: 'date' }).notNull(),
+    fingerprint_id: text('fingerprint_id').references(() => fingerprint.id),
+    cli_auth_hash: text('cli_auth_hash'),
+    type: sessionTypeEnum('type').notNull().default('web'),
+    created_at: timestamp('created_at', { mode: 'date' })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('session_cli_auth_code_idx')
+      .on(table.fingerprint_id, table.cli_auth_hash)
+      .where(sql`${table.cli_auth_hash} IS NOT NULL`),
+  ],
+)
 
 export const verificationToken = pgTable(
   'verificationToken',
@@ -900,7 +911,9 @@ export const freeSession = pgTable(
 
 /**
  * Audit log of every admission — one row per queued→active transition. Used
- * to rate-limit heavy users (e.g. no more than 5 DeepSeek sessions per 12h).
+ * to track shared premium-session usage for Freebuff's 5 sessions per Pacific
+ * day allowance. `session_units` starts at 1.0 and may be reduced when users
+ * end active sessions early.
  *
  * Separate from `free_session` because that table is one-row-per-user (state,
  * not history); the UPSERT path there would otherwise destroy prior admissions.
@@ -921,6 +934,12 @@ export const freeSessionAdmit = pgTable(
     })
       .notNull()
       .defaultNow(),
+    session_units: numeric('session_units', {
+      precision: 3,
+      scale: 1,
+    })
+      .notNull()
+      .default('1.0'),
   },
   (table) => [
     // Rate-limit lookup: WHERE user_id=$1 AND model=$2 AND admitted_at > $cutoff

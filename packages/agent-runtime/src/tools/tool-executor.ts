@@ -130,13 +130,13 @@ function stringInputError(
   parseError?: string,
 ): ToolCallError {
   const parseDetails = parseError
-    ? ` The JSON parser reported: ${parseError}. If the arguments are incomplete, re-issue the full object.`
-    : ''
+    ? ` Parsing as JSON failed: ${parseError}. The arguments may be malformed or incomplete.`
+    : ' Parsing succeeded, but the parsed value was still a string.'
   return {
     toolName,
     toolCallId,
     input: {},
-    error: `Invalid parameters for ${toolName}: tool arguments were a string, not a JSON object. The runtime tried to parse stringified JSON before validation, but the value was still not a JSON object.${parseDetails} Re-issue the tool call as a JSON object with properly escaped string values.`,
+    error: `Invalid parameters for ${toolName}: expected the tool arguments to be an object, but received a string.${parseDetails} Re-issue the tool call with the full arguments object and properly escaped string values.`,
   }
 }
 
@@ -161,7 +161,7 @@ function summarizeMissingReplacementFields(
       issue.message?.includes('received undefined') &&
       root === 'replacements' &&
       typeof index === 'number' &&
-      (field === 'old' || field === 'new')
+      (field === 'oldString' || field === 'newString')
 
     return isMissingReplacementString ? [`replacements[${index}].${field}`] : []
   })
@@ -174,13 +174,13 @@ function summarizeMissingReplacementFields(
     'Missing required replacement fields:',
     ...missingFields.map((field) => `- ${field}`),
     '',
-    'If the intent is deletion, set "new": "" explicitly.',
+    'If the intent is deletion, set "newString": "" explicitly.',
   ].join('\n')
 }
 
 function getToolValidationHint(toolName: string): string | undefined {
   if (toolName === 'str_replace' || toolName === 'propose_str_replace') {
-    return 'Expected shape: { "path": string, "replacements": [{ "old": string, "new": string, "allowMultiple"?: boolean }] }.'
+    return 'Expected shape: { "path": string, "replacements": [{ "oldString": string, "newString": string, "allowMultiple"?: boolean }] }.'
   }
   if (toolName === 'write_file' || toolName === 'propose_write_file') {
     return 'Expected shape: { "path": string, "instructions": string, "content": string }. Quote string values and escape newlines/quotes inside content.'

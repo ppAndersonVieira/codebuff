@@ -7,7 +7,7 @@ import {
   FREEBUFF_GLM_MODEL_ID,
   isFreebuffDeploymentHours,
 } from '@codebuff/common/constants/freebuff-models'
-import { formatQuotaResetCountdown, postChatCompletions } from '../_post'
+import { postChatCompletions } from '../_post'
 import {
   checkFreeModeRateLimit,
   resetFreeModeRateLimits,
@@ -180,6 +180,13 @@ describe('/api/v1/chat/completions POST endpoint', () => {
       if (runId === 'run-gemini-thinker-child') {
         return {
           agent_id: 'thinker-with-files-gemini',
+          ancestor_run_ids: ['run-free'],
+          status: 'running',
+        }
+      }
+      if (runId === 'run-browser-use-child') {
+        return {
+          agent_id: 'browser-use',
           ancestor_run_ids: ['run-free'],
           status: 'running',
         }
@@ -510,8 +517,8 @@ describe('/api/v1/chat/completions POST endpoint', () => {
 
       expect(response.status).toBe(402)
       const body = await response.json()
-      const expectedResetCountdown = formatQuotaResetCountdown(nextQuotaReset)
-      expect(body.message).toContain(expectedResetCountdown)
+      expect(body.message).toContain('Out of credits. Please add credits at')
+      expect(body.message).toContain('/usage.')
       expect(body.message).not.toContain(nextQuotaReset)
     })
 
@@ -779,6 +786,10 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         const fetchedUrls: string[] = []
         const fetchViaDeepSeek = mock(
           async (url: string | URL | Request, init?: RequestInit) => {
+            if (String(url).startsWith('https://api.ipinfo.io/lookup/')) {
+              return Response.json({})
+            }
+
             fetchedUrls.push(String(url))
             fetchedBodies.push(JSON.parse(init?.body as string))
             return new Response(
@@ -911,6 +922,40 @@ describe('/api/v1/chat/completions POST endpoint', () => {
       const body = await response.json()
       expect(response.status).toBe(403)
       expect(body.error).toBe('free_mode_invalid_agent_model')
+    })
+
+    it('allows browser-use as a free-mode subagent under a freebuff root', async () => {
+      const req = new NextRequest(
+        'http://localhost:3000/api/v1/chat/completions',
+        {
+          method: 'POST',
+          headers: allowedFreeModeHeaders('test-api-key-new-free-gemini'),
+          body: JSON.stringify({
+            model: 'google/gemini-3.1-flash-lite-preview',
+            stream: false,
+            codebuff_metadata: {
+              run_id: 'run-browser-use-child',
+              client_id: 'test-client-id-123',
+              cost_mode: 'free',
+            },
+          }),
+        },
+      )
+
+      const response = await postChatCompletions({
+        req,
+        getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
+        logger: mockLogger,
+        trackEvent: mockTrackEvent,
+        getUserUsageData: mockGetUserUsageData,
+        getAgentRunFromId: mockGetAgentRunFromId,
+        fetch: mockFetch,
+        insertMessageBigquery: mockInsertMessageBigquery,
+        loggerWithContext: mockLoggerWithContext,
+        checkSessionAdmissible: mockCheckSessionAdmissibleAllow,
+      })
+
+      expect(response.status).toBe(200)
     })
 
     it('rejects standalone free-mode reviewer runs even when the model is allowlisted', async () => {

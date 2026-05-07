@@ -131,7 +131,8 @@ export const StatusBar = ({
 
       case 'clipboard':
         // Use green color for feedback success messages
-        const isFeedbackSuccess = statusIndicatorState.message.includes('Feedback sent')
+        const isFeedbackSuccess =
+          statusIndicatorState.message.includes('Feedback sent')
         return (
           <span fg={isFeedbackSuccess ? theme.success : theme.primary}>
             {statusIndicatorState.message}
@@ -142,12 +143,7 @@ export const StatusBar = ({
         return <span fg={theme.success}>Reconnected</span>
 
       case 'retrying':
-        return (
-          <ShimmerText
-            text="retrying..."
-            primaryColor={theme.warning}
-          />
-        )
+        return <ShimmerText text="retrying..." primaryColor={theme.warning} />
 
       case 'connecting':
         return <ShimmerText text="connecting..." />
@@ -182,7 +178,7 @@ export const StatusBar = ({
               : null
           return (
             <span fg={isUrgent ? theme.warning : theme.secondary}>
-              {modelName ? `${modelName} · ` : ''}Free session ·{' '}
+              {modelName ? `${modelName} · ` : ''}
               {formatSessionRemaining(sessionProgress.remainingMs)}
             </span>
           )
@@ -260,12 +256,18 @@ export const StatusBar = ({
         }}
       >
         <text style={{ wrapMode: 'none' }}>{elapsedTimeContent}</text>
-        {onStop && (statusIndicatorState.kind === 'waiting' || statusIndicatorState.kind === 'streaming') && (
-          <StatusActionButton onClick={onStop}>■ Esc</StatusActionButton>
-        )}
-        {onEndSession && statusIndicatorState.kind === 'idle' && freebuffSession?.status === 'active' && (
-          <StatusActionButton onClick={onEndSession}>✕ End session</StatusActionButton>
-        )}
+        {onStop &&
+          (statusIndicatorState.kind === 'waiting' ||
+            statusIndicatorState.kind === 'streaming') && (
+            <StatusActionButton onClick={onStop}>■ Esc</StatusActionButton>
+          )}
+        {onEndSession &&
+          statusIndicatorState.kind === 'idle' &&
+          freebuffSession?.status === 'active' && (
+            <StatusActionButton onClick={onEndSession}>
+              ✕ End session
+            </StatusActionButton>
+          )}
         {sessionProgress !== null &&
           sessionProgress.remainingMs < COUNTDOWN_VISIBLE_MS &&
           statusIndicatorState.kind !== 'idle' && (

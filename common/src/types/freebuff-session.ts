@@ -7,15 +7,21 @@
  */
 
 /**
- * Per-model usage counter surfaced to the CLI so the waiting-room UI can
- * render "N of M sessions used" alongside queue/active state. Present when
- * the joined model has a rate limit applied. `recentCount` is the number of
- * admissions inside `windowHours` at the time the response was produced —
- * see also the standalone `rate_limited` status for the reject path.
+ * Usage counter surfaced to the CLI so the waiting-room UI can render
+ * "N of M sessions used" alongside queue/active state. Present when the
+ * joined model consumes premium Freebuff sessions. `recentCount` is the
+ * rounded session units since the last midnight Pacific reset at the time
+ * the response was produced — see also the standalone `rate_limited` status
+ * for the reject path.
  */
 export interface FreebuffSessionRateLimit {
   model: string
   limit: number
+  period: 'pacific_day'
+  resetTimeZone: string
+  resetAt: string
+  /** Deprecated wire field kept for older clients. Premium usage now resets
+   *  at midnight Pacific time rather than using a rolling window. */
   windowHours: number
   recentCount: number
 }
@@ -61,9 +67,9 @@ export type FreebuffSessionServerResponse =
        *  Present on GET responses; not returned from POST (POST never
        *  produces `none`). */
       queueDepthByModel?: Record<string, number>
-      /** Current quota snapshots for rate-limited models, keyed by model id.
-       *  Lets the picker show exhausted daily/session caps before the user
-       *  commits to a queue. */
+      /** Current quota snapshots for premium models, keyed by model id. Lets
+       *  the picker show today's premium-session usage before the user commits
+       *  to a queue. */
       rateLimitsByModel?: FreebuffSessionRateLimitByModel
     }
   | {
@@ -81,9 +87,7 @@ export type FreebuffSessionServerResponse =
       queueDepthByModel: Record<string, number>
       estimatedWaitMs: number
       queuedAt: string
-      /** Rate-limit quota for rate-limited models. Absent
-       *  for unlimited models or when the status was produced outside the
-       *  rate-limit check path (e.g. pure read via GET). */
+      /** Premium-session quota for this model. Absent for unlimited models. */
       rateLimit?: FreebuffSessionRateLimit
       rateLimitsByModel?: FreebuffSessionRateLimitByModel
     }
@@ -95,9 +99,7 @@ export type FreebuffSessionServerResponse =
       admittedAt: string
       expiresAt: string
       remainingMs: number
-      /** Rate-limit quota for rate-limited models. Absent
-       *  for unlimited models or when the status was produced outside the
-       *  rate-limit check path (e.g. pure read via GET). */
+      /** Premium-session quota for this model. Absent for unlimited models. */
       rateLimit?: FreebuffSessionRateLimit
       rateLimitsByModel?: FreebuffSessionRateLimitByModel
     }
@@ -162,23 +164,23 @@ export type FreebuffSessionServerResponse =
       status: 'banned'
     }
   | {
-      /** User has used up their per-model admission quota in the rolling
-       *  window. Returned from POST
-       *  /session before the user is placed in the queue. `retryAfterMs` is
-       *  the time until the oldest admission inside the window falls off
-       *  and one quota slot opens up — clients should show the user when
-       *  they can try again. Terminal for the CLI's current poll session;
-       *  the user can exit and come back later. */
+      /** User has used up their shared premium-session quota for the current
+       *  Pacific day. Returned from POST /session before the user is placed in
+       *  the queue. `retryAfterMs` is the time until the next midnight Pacific
+       *  reset. Terminal for the CLI's current poll session; the user can exit
+       *  and come back later. */
       status: 'rate_limited'
       /** The freebuff model the user tried to join. */
       model: string
-      /** Max admissions permitted per window (e.g. 5). */
+      /** Max premium session units permitted per Pacific day (e.g. 5). */
       limit: number
-      /** Rolling window size in hours (e.g. 20). */
+      period: 'pacific_day'
+      resetTimeZone: string
+      resetAt: string
+      /** Deprecated wire field kept for older clients. */
       windowHours: number
-      /** Admission count inside the window at check time — will be ≥ limit. */
+      /** Premium session units since today's Pacific reset — will be ≥ limit. */
       recentCount: number
-      /** Milliseconds from now until the oldest admission in the window
-       *  exits and the user regains one quota slot. */
+      /** Milliseconds from now until the next Pacific midnight reset. */
       retryAfterMs: number
     }

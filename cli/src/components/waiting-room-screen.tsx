@@ -15,8 +15,10 @@ import { useSheenAnimation } from '../hooks/use-sheen-animation'
 import { useTerminalDimensions } from '../hooks/use-terminal-dimensions'
 import { useTheme } from '../hooks/use-theme'
 import { exitFreebuffCleanly } from '../utils/freebuff-exit'
+import { formatSessionUnits } from '../utils/format-session-units'
 import { getLogoAccentColor, getLogoBlockColor } from '../utils/theme-system'
 import { FREEBUFF_PREMIUM_SESSION_LIMIT } from '@codebuff/common/constants/freebuff-models'
+import { getRateLimitsByModel } from '@codebuff/common/types/freebuff-session'
 
 import type { FreebuffSessionResponse } from '../types/freebuff-session'
 import type { FreebuffIpPrivacySignal } from '@codebuff/common/types/freebuff-session'
@@ -58,9 +60,6 @@ const formatRetryAfter = (ms: number): string => {
   const rem = minutes % 60
   return rem === 0 ? `${hours}h` : `${hours}h ${rem}m`
 }
-
-const formatSessionUnits = (units: number): string =>
-  Number.isInteger(units) ? String(units) : units.toFixed(1)
 
 const PRIVACY_SIGNAL_LABELS: Partial<Record<FreebuffIpPrivacySignal, string>> =
   {
@@ -268,18 +267,19 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
   // pool; the server replicates the same snapshot under each premium model
   // id, so any entry has the right count. Renders amber when exhausted so
   // the limit reads as "you've hit it" rather than just another count.
-  const rateLimitsByModel =
-    session && 'rateLimitsByModel' in session
-      ? session.rateLimitsByModel
-      : undefined
+  const rateLimitsByModel = getRateLimitsByModel(session)
   const sharedPremiumUsed = rateLimitsByModel
     ? (Object.values(rateLimitsByModel)[0]?.recentCount ?? 0)
     : 0
-  const premiumLeft = Math.max(
-    0,
-    FREEBUFF_PREMIUM_SESSION_LIMIT - sharedPremiumUsed,
-  )
-  const premiumLeftColor = premiumLeft === 0 ? theme.secondary : theme.muted
+  const isPremiumExhausted =
+    sharedPremiumUsed >= FREEBUFF_PREMIUM_SESSION_LIMIT
+  const premiumUsedColor = isPremiumExhausted ? theme.secondary : theme.muted
+  // Pad the used count so the title's centered container doesn't shift width
+  // as the count ticks from "0" → "1.3" → "2" while loading.
+  const sessionUnitWidth = String(FREEBUFF_PREMIUM_SESSION_LIMIT).length + 2
+  const formattedSharedPremiumUsed = formatSessionUnits(
+    sharedPremiumUsed,
+  ).padStart(sessionUnitWidth)
 
   return (
     <box
@@ -366,9 +366,10 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                 <span fg={theme.foreground} attributes={TextAttributes.BOLD}>
                   Pick a model to start
                 </span>
-                <span fg={premiumLeftColor}>
+                <span fg={premiumUsedColor}>
                   {'  ·  '}
-                  {premiumLeft} premium left today
+                  {formattedSharedPremiumUsed} of{' '}
+                  {FREEBUFF_PREMIUM_SESSION_LIMIT} premium sessions used today
                 </span>
               </text>
               <FreebuffModelSelector />

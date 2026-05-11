@@ -234,7 +234,7 @@ export async function postChatCompletions(params: {
     // Get user info
     const userInfo = await getUserInfoFromApiKey({
       apiKey,
-      fields: ['id', 'email', 'discord_id', 'banned'],
+      fields: ['id', 'email', 'discord_id', 'banned', 'stripe_customer_id'],
       logger,
     })
     if (!userInfo) {
@@ -254,6 +254,7 @@ export async function postChatCompletions(params: {
     logger = loggerWithContext({ userInfo })
 
     const userId = userInfo.id
+    const stripeCustomerId = userInfo.stripe_customer_id
 
     // Check if user is banned.
     // We use a clear, helpful message rather than a cryptic error because:
@@ -429,10 +430,10 @@ export async function postChatCompletions(params: {
       const rootRunId = ancestorRunIds[0]
       const rootRun = rootRunId
         ? await getAgentRunFromId({
-            runId: rootRunId,
-            userId,
-            fields: ['agent_id', 'status'],
-          })
+          runId: rootRunId,
+          userId,
+          fields: ['agent_id', 'status'],
+        })
         : null
       if (
         !rootRun ||
@@ -663,13 +664,13 @@ export async function postChatCompletions(params: {
         }
         const stream = useLocalhost
           ? await handleLocalhostStream({
-              body,
-              userId,
-              agentId,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            })
+            body,
+            userId,
+            agentId,
+            fetch,
+            logger,
+            insertMessageBigquery,
+          })
           : useSiliconFlow
             ? await handleSiliconFlowStream(baseArgs)
             : useMoonshot
@@ -685,9 +686,9 @@ export async function postChatCompletions(params: {
                       : useOpenAIDirect
                         ? await handleOpenAIStream(baseArgs)
                         : await handleOpenRouterStream({
-                            ...baseArgs,
-                            openrouterApiKey,
-                          })
+                          ...baseArgs,
+                          openrouterApiKey,
+                        })
 
         trackEvent({
           event: AnalyticsEvent.CHAT_COMPLETIONS_STREAM_STARTED,
@@ -748,13 +749,13 @@ export async function postChatCompletions(params: {
         }
         const nonStreamRequest = useLocalhost
           ? handleLocalhostNonStream({
-              body,
-              userId,
-              agentId,
-              fetch,
-              logger,
-              insertMessageBigquery,
-            })
+            body,
+            userId,
+            agentId,
+            fetch,
+            logger,
+            insertMessageBigquery,
+          })
           : useSiliconFlow
             ? handleSiliconFlowNonStream(baseArgs)
             : useMoonshot
@@ -770,9 +771,9 @@ export async function postChatCompletions(params: {
                       : shouldUseOpenAIEndpoint
                         ? handleOpenAINonStream(baseArgs)
                         : handleOpenRouterNonStream({
-                            ...baseArgs,
-                            openrouterApiKey,
-                          })
+                          ...baseArgs,
+                          openrouterApiKey,
+                        })
         const result = await nonStreamRequest
 
         trackEvent({

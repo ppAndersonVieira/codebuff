@@ -39,7 +39,7 @@ Requires ATLASSIAN_API_TOKEN, ATLASSIAN_USER_EMAIL, and ATLASSIAN_BASE_URL envir
     mcpServers: {
         atlassian: {
             command: '/Users/anderson.vieira/.local/bin/uvx',
-            args: ['mcp-atlassian'],
+            args: ['--native-tls', 'mcp-atlassian'],
             env: {
                 JIRA_URL: '$ATLASSIAN_BASE_URL',
                 JIRA_USERNAME: '$ATLASSIAN_USER_EMAIL',

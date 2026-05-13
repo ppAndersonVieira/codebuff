@@ -1,12 +1,16 @@
 import { TextAttributes } from '@opentui/core'
 import { useKeyboard, useRenderer } from '@opentui/react'
-import React, { useCallback, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { Button } from './button'
 import { ChoiceAdBanner, CHOICE_AD_BANNER_HEIGHT } from './choice-ad-banner'
 import { FreebuffModelSelector } from './freebuff-model-selector'
+import { LimitedLandingPanel } from './limited-landing-panel'
 import { ShimmerText } from './shimmer-text'
-import { takeOverFreebuffSession } from '../hooks/use-freebuff-session'
+import {
+  refreshFreebuffLandingMetadata,
+  takeOverFreebuffSession,
+} from '../hooks/use-freebuff-session'
 import { useFreebuffCtrlCExit } from '../hooks/use-freebuff-ctrl-c-exit'
 import { useGravityAd } from '../hooks/use-gravity-ad'
 import { useLogo } from '../hooks/use-logo'
@@ -15,9 +19,16 @@ import { useSheenAnimation } from '../hooks/use-sheen-animation'
 import { useTerminalDimensions } from '../hooks/use-terminal-dimensions'
 import { useTheme } from '../hooks/use-theme'
 import { exitFreebuffCleanly } from '../utils/freebuff-exit'
+import {
+  formatFreebuffPremiumResetCountdown,
+  getFreebuffPremiumResetAt,
+} from '../utils/freebuff-premium-reset'
 import { formatSessionUnits } from '../utils/format-session-units'
 import { getLogoAccentColor, getLogoBlockColor } from '../utils/theme-system'
-import { FREEBUFF_PREMIUM_SESSION_LIMIT } from '@codebuff/common/constants/freebuff-models'
+import {
+  FREEBUFF_LIMITED_SESSION_LIMIT,
+  FREEBUFF_PREMIUM_SESSION_LIMIT,
+} from '@codebuff/common/constants/freebuff-models'
 import { getRateLimitsByModel } from '@codebuff/common/types/freebuff-session'
 
 import type { FreebuffSessionResponse } from '../types/freebuff-session'
@@ -69,6 +80,8 @@ const PRIVACY_SIGNAL_LABELS: Partial<Record<FreebuffIpPrivacySignal, string>> =
     res_proxy: 'residential proxy',
     tor: 'Tor',
     vpn: 'VPN',
+    hosting: 'hosting network',
+    service: 'privacy service',
   }
 
 const formatPrivacySignalList = (
@@ -88,6 +101,38 @@ const formatPrivacySignalList = (
   if (labels.length === 1) return labels[0]
   if (labels.length === 2) return `${labels[0]} or ${labels[1]}`
   return `${labels.slice(0, -1).join(', ')}, or ${labels[labels.length - 1]}`
+}
+
+const getLimitedModeReason = (
+  session: FreebuffSessionResponse | null,
+): string | null => {
+  if (!session || !('countryBlockReason' in session)) {
+    return 'reduced free model access'
+  }
+
+  const countryCode =
+    'countryCode' in session &&
+    session.countryCode &&
+    session.countryCode !== 'UNKNOWN'
+      ? session.countryCode
+      : null
+
+  switch (session.countryBlockReason) {
+    case 'anonymous_network':
+      return `${formatPrivacySignalList(
+        session.ipPrivacySignals ?? undefined,
+      )} detected`
+    case 'country_not_allowed':
+      return `outside available countries${countryCode ? ` (${countryCode})` : ''}`
+    case 'anonymized_or_unknown_country':
+    case 'missing_client_ip':
+    case 'unresolved_client_ip':
+      return 'location could not be verified'
+    case 'ip_privacy_lookup_failed':
+      return 'network check could not finish'
+    default:
+      return 'reduced free model access'
+  }
 }
 
 const TakeoverPrompt: React.FC = () => {
@@ -234,12 +279,12 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
   // Always enable ads in the waiting room — this is where monetization lives.
   // forceStart bypasses the "wait for first user message" gate inside the hook,
   // which would otherwise block ads here since no conversation exists yet.
-  // Try Gravity first, then fall back to Carbon when Gravity doesn't fill.
+  // Try Gravity first, then fall back to ZeroClick when Gravity doesn't fill.
   const { ads, recordImpression } = useGravityAd({
     enabled: true,
     forceStart: true,
     provider: 'gravity',
-    fallbackProvider: 'carbon',
+    fallbackProvider: 'zeroclick',
     surface: 'waiting_room',
   })
 
@@ -247,39 +292,75 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
 
   const [exitHover, setExitHover] = useState(false)
 
-  // Elapsed-in-queue timer. Starts from `queuedAt` so it keeps ticking even if
-  // the user wanders away and comes back.
-  const queuedAtMs = useMemo(() => {
-    if (session?.status === 'queued') return Date.parse(session.queuedAt)
-    return null
-  }, [session])
-  const now = useNow(1000, queuedAtMs !== null)
-  const elapsedMs = queuedAtMs ? now - queuedAtMs : 0
-
   const isQueued = session?.status === 'queued'
+  const accessTier =
+    session && 'accessTier' in session ? session.accessTier : 'full'
+  const limitedModeReason =
+    accessTier === 'limited' ? getLimitedModeReason(session) : null
   // 'none' = user hasn't joined any queue yet. We're in the pre-chat landing
   // state: show the picker with live N-in-line hints and a prompt. Picking a
   // model triggers joinFreebuffQueue, which POSTs and transitions us to
   // 'queued' (waiting room) or straight to 'active' (chat) if no wait.
   const isLanding = session?.status === 'none'
+  // Elapsed-in-queue timer. Starts from `queuedAt` so it keeps ticking even if
+  // the user wanders away and comes back. On the landing picker we tick once a
+  // minute so the premium reset countdown stays fresh.
+  const queuedAtMs = useMemo(() => {
+    if (session?.status === 'queued') return Date.parse(session.queuedAt)
+    return null
+  }, [session])
+  const now = useNow(isQueued ? 1000 : 60_000, isQueued || isLanding)
+  const elapsedMs = queuedAtMs ? now - queuedAtMs : 0
 
   // Premium quota counter for the title line. All premium models share one
   // pool; the server replicates the same snapshot under each premium model
   // id, so any entry has the right count. Renders amber when exhausted so
   // the limit reads as "you've hit it" rather than just another count.
   const rateLimitsByModel = getRateLimitsByModel(session)
-  const sharedPremiumUsed = rateLimitsByModel
-    ? (Object.values(rateLimitsByModel)[0]?.recentCount ?? 0)
-    : 0
+  const premiumRateLimit = rateLimitsByModel
+    ? Object.values(rateLimitsByModel)[0]
+    : undefined
+  const sharedPremiumUsed = premiumRateLimit?.recentCount ?? 0
   const isPremiumExhausted =
-    sharedPremiumUsed >= FREEBUFF_PREMIUM_SESSION_LIMIT
+    sharedPremiumUsed >=
+    (accessTier === 'limited'
+      ? FREEBUFF_LIMITED_SESSION_LIMIT
+      : FREEBUFF_PREMIUM_SESSION_LIMIT)
   const premiumUsedColor = isPremiumExhausted ? theme.secondary : theme.muted
   // Pad the used count so the title's centered container doesn't shift width
   // as the count ticks from "0" → "1.3" → "2" while loading.
-  const sessionUnitWidth = String(FREEBUFF_PREMIUM_SESSION_LIMIT).length + 2
-  const formattedSharedPremiumUsed = formatSessionUnits(
-    sharedPremiumUsed,
-  ).padStart(sessionUnitWidth)
+  const sessionLimit =
+    accessTier === 'limited'
+      ? FREEBUFF_LIMITED_SESSION_LIMIT
+      : FREEBUFF_PREMIUM_SESSION_LIMIT
+  // Limited-tier users don't see any premium models, so calling these "limited
+  // sessions" leaks the tier name without informing the user — just "sessions"
+  // reads naturally next to the count and reset countdown.
+  const sessionLabel =
+    accessTier === 'limited' ? 'sessions' : 'premium sessions'
+  const sessionUnitWidth = String(sessionLimit).length + 2
+  const formattedSharedPremiumUsed =
+    formatSessionUnits(sharedPremiumUsed).padStart(sessionUnitWidth)
+  const premiumResetAt = getFreebuffPremiumResetAt({
+    rateLimitsByModel,
+    nowMs: now,
+  })
+  const premiumResetAtMs = premiumResetAt.getTime()
+  const premiumResetCountdown = formatFreebuffPremiumResetCountdown(
+    premiumResetAt,
+    now,
+  )
+
+  useEffect(() => {
+    if (!isLanding || !premiumRateLimit) return
+
+    const delayMs = Math.max(0, premiumResetAtMs - Date.now() + 1_000)
+    const timer = setTimeout(() => {
+      refreshFreebuffLandingMetadata().catch(() => {})
+    }, delayMs)
+
+    return () => clearTimeout(timer)
+  }, [isLanding, premiumRateLimit, premiumResetAtMs])
 
   return (
     <box
@@ -292,17 +373,28 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
     >
       {/* Top-right exit affordance so mouse users have a clear way out even
           when they don't know Ctrl+C works. width: '100%' is required for
-          justifyContent: 'flex-end' to actually push the X to the right. */}
+          justifyContent to actually push the X to the right. */}
       <box
         style={{
           width: '100%',
           flexDirection: 'row',
-          justifyContent: 'flex-end',
+          justifyContent: 'space-between',
           paddingTop: 1,
+          paddingLeft: 2,
           paddingRight: 2,
           flexShrink: 0,
         }}
       >
+        <box>
+          {limitedModeReason && (
+            <text style={{ fg: theme.muted, wrapMode: 'word' }}>
+              <span fg={theme.secondary} attributes={TextAttributes.BOLD}>
+                Limited mode
+              </span>
+              <span fg={theme.muted}> · {limitedModeReason}</span>
+            </text>
+          )}
+        </box>
         <Button
           onClick={exitFreebuffCleanly}
           onMouseOver={() => setExitHover(true)}
@@ -354,7 +446,25 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
             </text>
           )}
 
-          {isLanding && (
+          {isLanding && accessTier === 'limited' && (
+            <LimitedLandingPanel
+              isQuotaExhausted={isPremiumExhausted}
+              sessionCounter={
+                <>
+                  <span fg={premiumUsedColor}>
+                    {formatSessionUnits(sharedPremiumUsed)} of {sessionLimit}{' '}
+                    {sessionLabel} used
+                  </span>
+                  <span fg={theme.muted}>
+                    {', '}
+                    resets in {premiumResetCountdown}
+                  </span>
+                </>
+              }
+            />
+          )}
+
+          {isLanding && accessTier !== 'limited' && (
             <box
               style={{
                 flexDirection: 'column',
@@ -366,10 +476,17 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                 <span fg={theme.foreground} attributes={TextAttributes.BOLD}>
                   Pick a model to start
                 </span>
+              </text>
+              <text
+                style={{ fg: theme.muted, marginBottom: 1, wrapMode: 'word' }}
+              >
                 <span fg={premiumUsedColor}>
-                  {'  ·  '}
-                  {formattedSharedPremiumUsed} of{' '}
-                  {FREEBUFF_PREMIUM_SESSION_LIMIT} premium sessions used today
+                  {formattedSharedPremiumUsed} of {sessionLimit} {sessionLabel}{' '}
+                  used
+                </span>
+                <span fg={theme.muted}>
+                  {', '}
+                  resets in {premiumResetCountdown}
                 </span>
               </text>
               <FreebuffModelSelector />
@@ -505,7 +622,10 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                 <span fg={theme.foreground}>
                   {formatSessionUnits(session.recentCount)} of {session.limit}
                 </span>{' '}
-                premium sessions today. Try again in{' '}
+                {session.accessTier === 'limited'
+                  ? 'sessions'
+                  : 'premium sessions'}{' '}
+                today. Try again in{' '}
                 <span fg={theme.foreground}>
                   {formatRetryAfter(session.retryAfterMs)}
                 </span>

@@ -1,6 +1,7 @@
 import { env } from '@codebuff/common/env'
 import {
   FALLBACK_FREEBUFF_MODEL_ID,
+  LIMITED_FREEBUFF_MODEL_ID,
   resolveFreebuffModel,
 } from '@codebuff/common/constants/freebuff-models'
 import { getRateLimitsByModel } from '@codebuff/common/types/freebuff-session'
@@ -215,6 +216,38 @@ function shouldReleaseSlot(current: FreebuffSessionResponse | null): boolean {
   )
 }
 
+function toLandingSession(
+  current: FreebuffSessionResponse | null,
+): Extract<FreebuffSessionResponse, { status: 'none' }> {
+  const accessTier =
+    current && 'accessTier' in current ? current.accessTier : undefined
+  const queueDepthByModel =
+    current && 'queueDepthByModel' in current
+      ? current.queueDepthByModel
+      : undefined
+  const rateLimitsByModel = getRateLimitsByModel(current)
+  const countryCode =
+    current && 'countryCode' in current ? current.countryCode : undefined
+  const countryBlockReason =
+    current && 'countryBlockReason' in current
+      ? current.countryBlockReason
+      : undefined
+  const ipPrivacySignals =
+    current && 'ipPrivacySignals' in current
+      ? current.ipPrivacySignals
+      : undefined
+
+  return {
+    status: 'none',
+    ...(accessTier ? { accessTier } : {}),
+    ...(queueDepthByModel ? { queueDepthByModel } : {}),
+    ...(rateLimitsByModel ? { rateLimitsByModel } : {}),
+    ...(countryCode ? { countryCode } : {}),
+    ...(countryBlockReason ? { countryBlockReason } : {}),
+    ...(ipPrivacySignals ? { ipPrivacySignals } : {}),
+  }
+}
+
 /** Best-effort DELETE of the caller's session row, gated on actually holding
  *  one. Used both by exit paths and any flow that wants the next POST to
  *  start clean (rejoin, return-to-landing). Always swallows errors — the
@@ -282,6 +315,13 @@ export function returnToFreebuffLanding(
     resetChat: opts.resetChat,
     releaseSlot: true,
   })
+}
+
+/** Refresh picker-only metadata (quota and queue depths) while staying on the
+ * model selection screen. Used when a midnight-Pacific premium quota reset
+ * passes while the landing screen is open. */
+export function refreshFreebuffLandingMetadata(): Promise<void> {
+  return restartFreebuffSession('landing')
 }
 
 /**
@@ -358,10 +398,14 @@ export function markFreebuffSessionCountryBlocked(params: {
 export function markFreebuffSessionEnded(): void {
   if (!IS_FREEBUFF) return
   controller?.abort()
-  const rateLimitsByModel = getRateLimitsByModel(
-    useFreebuffSessionStore.getState().session,
-  )
-  controller?.apply({ status: 'ended', rateLimitsByModel })
+  const current = useFreebuffSessionStore.getState().session
+  const rateLimitsByModel = getRateLimitsByModel(current)
+  controller?.apply({
+    status: 'ended',
+    accessTier:
+      current && 'accessTier' in current ? current.accessTier : undefined,
+    rateLimitsByModel,
+  })
 }
 
 interface UseFreebuffSessionResult {
@@ -417,7 +461,12 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
 
     const apply = (next: FreebuffSessionResponse) => {
       if (next.status === 'queued' || next.status === 'active') {
+        useFreebuffModelStore.getState().setSelectedModel(next.model)
         recordFreebuffInstanceOwner(next.instanceId)
+      } else if (next.status === 'none' && next.accessTier === 'limited') {
+        useFreebuffModelStore
+          .getState()
+          .setSelectedModel(LIMITED_FREEBUFF_MODEL_ID)
       }
       setSession(next)
       setError(null)
@@ -522,10 +571,18 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
           (previousStatus === 'active' || previousStatus === 'ended') &&
           next.status === 'none'
         ) {
+          const current = useFreebuffSessionStore.getState().session
           const rateLimitsByModel =
-            next.rateLimitsByModel ??
-            getRateLimitsByModel(useFreebuffSessionStore.getState().session)
-          apply({ status: 'ended', rateLimitsByModel })
+            next.rateLimitsByModel ?? getRateLimitsByModel(current)
+          apply({
+            status: 'ended',
+            accessTier:
+              next.accessTier ??
+              (current && 'accessTier' in current
+                ? current.accessTier
+                : undefined),
+            rateLimitsByModel,
+          })
           return
         }
 
@@ -563,7 +620,10 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
           // picker metadata from the response, ignoring whatever status it
           // claims. Polling resumes when the user commits to a model via
           // joinFreebuffQueue.
-          apply({ status: 'none' })
+          const landingSession = toLandingSession(
+            useFreebuffSessionStore.getState().session,
+          )
+          apply(landingSession)
           const fetchController = abortController
           callSession('GET', token, { signal: fetchController.signal })
             .then((response) => {
@@ -577,8 +637,21 @@ export function useFreebuffSession(): UseFreebuffSessionResult {
               if (response.status === 'none' || response.status === 'queued') {
                 apply({
                   status: 'none',
-                  queueDepthByModel: response.queueDepthByModel,
-                  rateLimitsByModel: response.rateLimitsByModel,
+                  accessTier:
+                    response.accessTier ?? landingSession.accessTier,
+                  queueDepthByModel:
+                    response.queueDepthByModel ??
+                    landingSession.queueDepthByModel,
+                  rateLimitsByModel:
+                    response.rateLimitsByModel ??
+                    landingSession.rateLimitsByModel,
+                  countryCode: response.countryCode ?? landingSession.countryCode,
+                  countryBlockReason:
+                    response.countryBlockReason ??
+                    landingSession.countryBlockReason,
+                  ipPrivacySignals:
+                    response.ipPrivacySignals ??
+                    landingSession.ipPrivacySignals,
                 })
               }
             })

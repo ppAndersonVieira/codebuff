@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, mock, it } from 'bun:test'
 import { NextRequest } from 'next/server'
 
+import { TEST_USER_ID } from '@codebuff/common/constants/paths'
 import {
+  FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID,
   FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
   FREEBUFF_GEMINI_PRO_MODEL_ID,
   FREEBUFF_GLM_MODEL_ID,
@@ -10,6 +12,7 @@ import {
 import { openCodeZenModels } from '@codebuff/common/constants/model-config'
 import { postChatCompletions } from '../_post'
 import { resetFreeModeRateLimits } from '../free-mode-rate-limiter'
+import { getFreeModeCountryAccess } from '@/server/free-mode-country'
 
 import type { TrackEventFn } from '@codebuff/common/types/contracts/analytics'
 import type { InsertMessageBigqueryFn } from '@codebuff/common/types/contracts/bigquery'
@@ -28,7 +31,7 @@ import type { GetUserPreferencesFn } from '../_post'
 describe('/api/v1/chat/completions POST endpoint', () => {
   const mockUserData: Record<string, { id: string; banned: boolean }> = {
     'test-api-key-123': {
-      id: 'user-123',
+      id: TEST_USER_ID,
       banned: false,
     },
     'test-api-key-no-credits': {
@@ -84,6 +87,18 @@ describe('/api/v1/chat/completions POST endpoint', () => {
   // path so downstream logic proceeds normally.
   const mockCheckSessionAdmissibleAllow = async () =>
     ({ ok: true, reason: 'disabled' }) as const
+  const mockResolveFreeModeCountryAccess = async (
+    _userId: string,
+    req: Parameters<typeof getFreeModeCountryAccess>[0],
+    options: Parameters<typeof getFreeModeCountryAccess>[1],
+  ) => getFreeModeCountryAccess(req, options)
+  const postChatCompletionsForTest = (
+    params: Parameters<typeof postChatCompletions>[0],
+  ) =>
+    postChatCompletions({
+      resolveFreeModeCountryAccess: mockResolveFreeModeCountryAccess,
+      ...params,
+    })
 
   const allowedFreeModeHeaders = (apiKey: string) => ({
     Authorization: `Bearer ${apiKey}`,
@@ -157,6 +172,13 @@ describe('/api/v1/chat/completions POST endpoint', () => {
       if (runId === 'run-free-deepseek') {
         return {
           agent_id: 'base2-free-deepseek',
+          ancestor_run_ids: [],
+          status: 'running',
+        }
+      }
+      if (runId === 'run-free-deepseek-flash') {
+        return {
+          agent_id: 'base2-free-deepseek-flash',
           ancestor_run_ids: [],
           status: 'running',
         }
@@ -280,7 +302,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -308,7 +330,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -338,7 +360,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -366,7 +388,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -397,7 +419,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -430,7 +452,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -465,7 +487,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -500,7 +522,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -539,7 +561,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           },
         )
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req,
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -553,6 +575,53 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         })
 
         expect(response.status).toBe(200)
+      },
+      FETCH_PATH_TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'classifies country access before the active freebuff session gate',
+      async () => {
+        const req = new NextRequest(
+          'http://localhost:3000/api/v1/chat/completions',
+          {
+            method: 'POST',
+            headers: {
+              Authorization: 'Bearer test-api-key-new-free',
+              'cf-ipcountry': 'T1',
+              'x-forwarded-for': '8.8.8.8',
+            },
+            body: JSON.stringify({
+              model: FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID,
+              stream: false,
+              codebuff_metadata: {
+                run_id: 'run-free-deepseek-flash',
+                client_id: 'test-client-id-123',
+                cost_mode: 'free',
+                freebuff_instance_id: 'active-instance-123',
+              },
+            }),
+          },
+        )
+
+        const response = await postChatCompletionsForTest({
+          req,
+          getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
+          logger: mockLogger,
+          trackEvent: mockTrackEvent,
+          getUserUsageData: mockGetUserUsageData,
+          getAgentRunFromId: mockGetAgentRunFromId,
+          fetch: mockFetch,
+          insertMessageBigquery: mockInsertMessageBigquery,
+          loggerWithContext: mockLoggerWithContext,
+          checkSessionAdmissible: async (params) => {
+            expect(params.accessTier).toBe('limited')
+            return { ok: true, reason: 'active', remainingMs: 60_000 } as const
+          },
+        })
+
+        expect(response.status).toBe(200)
+        expect(mockGetUserUsageData).not.toHaveBeenCalled()
       },
       FETCH_PATH_TEST_TIMEOUT_MS,
     )
@@ -579,7 +648,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           },
         )
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req,
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -617,7 +686,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           },
         )
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req,
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -635,7 +704,12 @@ describe('/api/v1/chat/completions POST endpoint', () => {
       FETCH_PATH_TEST_TIMEOUT_MS,
     )
 
-    it('rejects free-mode requests when location is unknown', async () => {
+    it('limits unknown-location free-mode requests to DeepSeek Flash', async () => {
+      const checkSessionAdmissible = mock(async () => {
+        throw new Error(
+          'limited model enforcement should run before session gate',
+        )
+      })
       // Use a TEST-NET-1 IP (RFC 5737) that geoip-lite cannot resolve, with
       // no cf-ipcountry header. This avoids the dev-only localhost bypass
       // (which kicks in when there is no cf-ipcountry AND no/loopback IP).
@@ -659,7 +733,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -669,17 +743,21 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         fetch: mockFetch,
         insertMessageBigquery: mockInsertMessageBigquery,
         loggerWithContext: mockLoggerWithContext,
-        checkSessionAdmissible: mockCheckSessionAdmissibleAllow,
+        checkSessionAdmissible,
       })
 
-      expect(response.status).toBe(403)
+      expect(response.status).toBe(409)
       const body = await response.json()
-      expect(body.error).toBe('free_mode_unavailable')
-      expect(body.countryCode).toBe('UNKNOWN')
-      expect(body.countryBlockReason).toBe('unresolved_client_ip')
+      expect(body.error).toBe('session_model_mismatch')
+      expect(checkSessionAdmissible).toHaveBeenCalledTimes(0)
     })
 
-    it('rejects free-mode requests from anonymized Cloudflare country codes', async () => {
+    it('classifies anonymized Cloudflare country codes as limited access', async () => {
+      const checkSessionAdmissible = mock(async () => {
+        throw new Error(
+          'limited model enforcement should run before session gate',
+        )
+      })
       const req = new NextRequest(
         'http://localhost:3000/api/v1/chat/completions',
         {
@@ -701,7 +779,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -711,14 +789,13 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         fetch: mockFetch,
         insertMessageBigquery: mockInsertMessageBigquery,
         loggerWithContext: mockLoggerWithContext,
-        checkSessionAdmissible: mockCheckSessionAdmissibleAllow,
+        checkSessionAdmissible,
       })
 
-      expect(response.status).toBe(403)
+      expect(response.status).toBe(409)
       const body = await response.json()
-      expect(body.error).toBe('free_mode_unavailable')
-      expect(body.countryCode).toBe('UNKNOWN')
-      expect(body.countryBlockReason).toBe('anonymized_or_unknown_country')
+      expect(body.error).toBe('session_model_mismatch')
+      expect(checkSessionAdmissible).toHaveBeenCalledTimes(0)
     })
 
     it(
@@ -764,7 +841,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           },
         )
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req,
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -795,9 +872,20 @@ describe('/api/v1/chat/completions POST endpoint', () => {
       FETCH_PATH_TEST_TIMEOUT_MS,
     )
 
-    it(
-      'lets the DeepSeek V4 free agent use the direct DeepSeek provider',
-      async () => {
+    it.each([
+      {
+        codebuffModel: FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
+        upstreamModel: 'deepseek-v4-pro',
+        runId: 'run-free-deepseek',
+      },
+      {
+        codebuffModel: FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID,
+        upstreamModel: 'deepseek-v4-flash',
+        runId: 'run-free-deepseek-flash',
+      },
+    ])(
+      'lets $codebuffModel use the direct DeepSeek provider',
+      async ({ codebuffModel, upstreamModel, runId }) => {
         const fetchedBodies: Record<string, unknown>[] = []
         const fetchedUrls: string[] = []
         const fetchViaDeepSeek = mock(
@@ -811,7 +899,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
             return new Response(
               JSON.stringify({
                 id: 'test-id',
-                model: 'deepseek-v4-pro',
+                model: upstreamModel,
                 choices: [{ message: { content: 'test response' } }],
                 usage: {
                   prompt_tokens: 10,
@@ -834,10 +922,10 @@ describe('/api/v1/chat/completions POST endpoint', () => {
             method: 'POST',
             headers: allowedFreeModeHeaders('test-api-key-new-free'),
             body: JSON.stringify({
-              model: FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
+              model: codebuffModel,
               stream: false,
               codebuff_metadata: {
-                run_id: 'run-free-deepseek',
+                run_id: runId,
                 client_id: 'test-client-id-123',
                 cost_mode: 'free',
               },
@@ -845,7 +933,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           },
         )
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req,
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -861,8 +949,8 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         const body = await response.json()
         expect(response.status).toBe(200)
         expect(fetchedUrls[0]).toBe('https://api.deepseek.com/chat/completions')
-        expect(fetchedBodies[0].model).toBe('deepseek-v4-pro')
-        expect(body.model).toBe(FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID)
+        expect(fetchedBodies[0].model).toBe(upstreamModel)
+        expect(body.model).toBe(codebuffModel)
         expect(body.provider).toBe('DeepSeek')
       },
       FETCH_PATH_TEST_TIMEOUT_MS,
@@ -962,7 +1050,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
             },
           )
 
-          const response = await postChatCompletions({
+          const response = await postChatCompletionsForTest({
             req,
             getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
             logger: mockLogger,
@@ -1019,7 +1107,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           },
         )
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req,
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -1058,7 +1146,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -1094,7 +1182,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -1132,7 +1220,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           },
         )
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req,
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -1168,7 +1256,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -1187,7 +1275,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
     })
 
     it('rejects the Gemini thinker subagent when the session gate rejects it', async () => {
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req: new NextRequest('http://localhost:3000/api/v1/chat/completions', {
           method: 'POST',
           headers: allowedFreeModeHeaders('test-api-key-new-free-gemini'),
@@ -1235,7 +1323,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           return { limited: false as const }
         })
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req: new NextRequest(
             'http://localhost:3000/api/v1/chat/completions',
             {
@@ -1322,8 +1410,10 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           checkFreeModeRateLimit: checkFreeModeRateLimitForTest,
         })
 
-        const firstResponse = await postChatCompletions(createPostParams())
-        const limitedResponse = await postChatCompletions(createPostParams())
+        const firstResponse =
+          await postChatCompletionsForTest(createPostParams())
+        const limitedResponse =
+          await postChatCompletionsForTest(createPostParams())
 
         expect(firstResponse.status).toBe(200)
         expect(limitedResponse.status).toBe(429)
@@ -1354,7 +1444,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           },
         )
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req,
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -1391,7 +1481,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -1429,7 +1519,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -1465,7 +1555,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -1504,7 +1594,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           },
         )
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req,
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -1549,7 +1639,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           },
         )
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req,
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -1610,7 +1700,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           fallbackToALaCarte: false,
         }))
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req: createValidRequest(),
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -1667,7 +1757,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           },
         )
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req: freeModeRequest,
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -1703,7 +1793,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           fallbackToALaCarte: false,
         }))
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req: createValidRequest(),
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -1743,7 +1833,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           fallbackToALaCarte: true,
         }))
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req: createValidRequest(),
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -1778,7 +1868,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           fallbackToALaCarte: false,
         }))
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req: createValidRequest(),
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -1808,7 +1898,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         fallbackToALaCarte: false,
       }))
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req: createValidRequest(),
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -1836,7 +1926,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           fallbackToALaCarte: false,
         }))
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req: createValidRequest(),
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -1871,7 +1961,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           async () => weeklyLimitError,
         )
 
-        const response = await postChatCompletions({
+        const response = await postChatCompletionsForTest({
           req: createValidRequest(),
           getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
           logger: mockLogger,
@@ -1936,7 +2026,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -1972,7 +2062,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,
@@ -2008,7 +2098,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         },
       )
 
-      const response = await postChatCompletions({
+      const response = await postChatCompletionsForTest({
         req,
         getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
         logger: mockLogger,

@@ -4,10 +4,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { Button } from './button'
 import {
-  DEFAULT_FREEBUFF_MODEL_ID,
   FALLBACK_FREEBUFF_MODEL_ID,
-  FREEBUFF_MODELS,
   getFreebuffDeploymentAvailabilityLabel,
+  getFreebuffModelsForAccessTier,
   isFreebuffModelAvailable,
   isFreebuffPremiumModelId,
 } from '@codebuff/common/constants/freebuff-models'
@@ -27,48 +26,21 @@ import {
 import type { FreebuffModelOption } from '@codebuff/common/constants/freebuff-models'
 import type { KeyEvent } from '@opentui/core'
 
-// Widen the readonly tuple from FREEBUFF_MODELS to FreebuffModelOption[] so
-// the selector can branch on optional fields (e.g. `warning`) and on
-// availability values that aren't present in today's set but might be added
-// later, without TS narrowing the literal types away.
-const FREEBUFF_MODEL_SELECTOR_MODELS: readonly FreebuffModelOption[] = [
-  ...FREEBUFF_MODELS.filter((model) => model.id === DEFAULT_FREEBUFF_MODEL_ID),
-  ...FREEBUFF_MODELS.filter((model) => model.id !== DEFAULT_FREEBUFF_MODEL_ID),
-]
-const FREEBUFF_MODEL_SELECTOR_MODEL_IDS = FREEBUFF_MODEL_SELECTOR_MODELS.map(
-  (model) => model.id,
-)
-
 // Section grouping: premium models share one quota pool, unlimited has none.
 // Putting the tier on a section header lets each row drop its redundant
 // "Premium"/"Unlimited" chip. The shared 0/5 counter lives in the page title
 // (rendered by the parent), not the section header — this picker is purely a
 // list of choices grouped by tier. Empty sections are filtered so a model set
 // with no premium (or no unlimited) entries doesn't render an orphan header.
+//
+// `label` may be empty: limited-tier users only ever see one section, so the
+// "LIMITED" header would just leak the internal tier name without organizing
+// anything. Renderer treats an empty label as "no header row".
 type Section = {
-  key: 'premium' | 'unlimited'
+  key: 'premium' | 'unlimited' | 'limited'
   label: string
   models: readonly FreebuffModelOption[]
 }
-
-const SECTIONS: readonly Section[] = (
-  [
-    {
-      key: 'premium',
-      label: 'PREMIUM',
-      models: FREEBUFF_MODEL_SELECTOR_MODELS.filter((m) =>
-        isFreebuffPremiumModelId(m.id),
-      ),
-    },
-    {
-      key: 'unlimited',
-      label: 'UNLIMITED',
-      models: FREEBUFF_MODEL_SELECTOR_MODELS.filter(
-        (m) => !isFreebuffPremiumModelId(m.id),
-      ),
-    },
-  ] satisfies readonly Section[]
-).filter((section) => section.models.length > 0)
 
 /**
  * Dual-purpose model picker:
@@ -97,6 +69,8 @@ export const FreebuffModelSelector: React.FC = () => {
   const selectedModel = useFreebuffModelStore((s) => s.selectedModel)
   const setSelectedModel = useFreebuffModelStore((s) => s.setSelectedModel)
   const session = useFreebuffSessionStore((s) => s.session)
+  const accessTier =
+    session && 'accessTier' in session ? session.accessTier : 'full'
   const now = useNow(60_000)
   const deploymentAvailabilityLabel = useMemo(
     () => getFreebuffDeploymentAvailabilityLabel(new Date(now)),
@@ -109,9 +83,52 @@ export const FreebuffModelSelector: React.FC = () => {
   // selected model whenever the selection changes (after a successful switch
   // or an external selectedModel update).
   const [focusedId, setFocusedId] = useState<string>(selectedModel)
+  const availableModels = useMemo(
+    () => getFreebuffModelsForAccessTier(accessTier),
+    [accessTier],
+  )
+  // Limited tier only ever surfaces one model, so a comparative tagline
+  // ("Most efficient") reads as filler. Hide it; the warning (data-collection)
+  // is the row's real content.
+  const showTagline = accessTier !== 'limited'
+  const availableModelIds = useMemo(
+    () => availableModels.map((m) => m.id),
+    [availableModels],
+  )
+  const sections = useMemo(() => {
+    if (accessTier === 'limited') {
+      return [
+        {
+          key: 'limited',
+          label: '',
+          models: availableModels,
+        },
+      ] satisfies readonly Section[]
+    }
+    return (
+      [
+        {
+          key: 'premium',
+          label: 'PREMIUM',
+          models: availableModels.filter((m) => isFreebuffPremiumModelId(m.id)),
+        },
+        {
+          key: 'unlimited',
+          label: 'UNLIMITED',
+          models: availableModels.filter(
+            (m) => !isFreebuffPremiumModelId(m.id),
+          ),
+        },
+      ] satisfies readonly Section[]
+    ).filter((section) => section.models.length > 0)
+  }, [accessTier, availableModels])
   useEffect(() => {
-    setFocusedId(selectedModel)
-  }, [selectedModel])
+    setFocusedId(
+      availableModelIds.includes(selectedModel)
+        ? selectedModel
+        : availableModelIds[0]!,
+    )
+  }, [availableModelIds, selectedModel])
 
   useEffect(() => {
     // Landing-screen safety net: if the in-memory selection becomes
@@ -121,11 +138,12 @@ export const FreebuffModelSelector: React.FC = () => {
     // preference (e.g. Kimi or DeepSeek) is preserved for the next launch.
     if (
       (session?.status === 'none' || !session) &&
-      !isFreebuffModelAvailable(selectedModel, new Date(now))
+      (!availableModelIds.includes(selectedModel) ||
+        !isFreebuffModelAvailable(selectedModel, new Date(now)))
     ) {
-      setSelectedModel(FALLBACK_FREEBUFF_MODEL_ID)
+      setSelectedModel(availableModelIds[0] ?? FALLBACK_FREEBUFF_MODEL_ID)
     }
-  }, [now, selectedModel, session, setSelectedModel])
+  }, [availableModelIds, now, selectedModel, session, setSelectedModel])
 
   const committedModelId = session?.status === 'queued' ? session.model : null
   const rateLimitsByModel = getRateLimitsByModel(session)
@@ -139,10 +157,11 @@ export const FreebuffModelSelector: React.FC = () => {
   // terminals where the secondary details spill to an indented second line.
   const { wrapDetails, buttonOuterWidth, nameColumnWidth } = useMemo(() => {
     const nameLen = (m: FreebuffModelOption) => m.displayName.length
-    const maxNameLen = Math.max(...FREEBUFF_MODEL_SELECTOR_MODELS.map(nameLen))
+    const maxNameLen = Math.max(...availableModels.map(nameLen))
 
     const detailsParts = (model: FreebuffModelOption): number[] => {
-      const parts = [model.tagline.length]
+      const parts: number[] = []
+      if (showTagline) parts.push(model.tagline.length)
       if (model.warning) parts.push(model.warning.length)
       if (model.availability === 'deployment_hours') {
         parts.push(deploymentAvailabilityLabel.length)
@@ -160,8 +179,7 @@ export const FreebuffModelSelector: React.FC = () => {
       joinedLen(detailsParts(model))
 
     const maxOneLineOuter =
-      Math.max(...FREEBUFF_MODEL_SELECTOR_MODELS.map(oneLineLen)) +
-      BUTTON_CHROME
+      Math.max(...availableModels.map(oneLineLen)) + BUTTON_CHROME
     if (maxOneLineOuter <= contentMaxWidth) {
       return {
         wrapDetails: false,
@@ -172,9 +190,10 @@ export const FreebuffModelSelector: React.FC = () => {
 
     // Narrow: line 1 = "indicator name · tagline", line 2 (if any) =
     // "  warning · hours". Compute the max of both so all buttons stay the
-    // same width.
+    // same width. When taglines are hidden (limited tier), line 1 is just
+    // "indicator name" with no separator.
     const labelLineLen = (m: FreebuffModelOption) =>
-      2 + m.displayName.length + 3 + m.tagline.length
+      2 + m.displayName.length + (showTagline ? 3 + m.tagline.length : 0)
     const detailsLineLen = (m: FreebuffModelOption) => {
       const parts: number[] = []
       if (m.warning) parts.push(m.warning.length)
@@ -184,7 +203,7 @@ export const FreebuffModelSelector: React.FC = () => {
       return parts.length === 0 ? 0 : 2 /* indent */ + joinedLen(parts)
     }
     const maxTwoLineInner = Math.max(
-      ...FREEBUFF_MODEL_SELECTOR_MODELS.map((m) =>
+      ...availableModels.map((m) =>
         Math.max(labelLineLen(m), detailsLineLen(m)),
       ),
     )
@@ -196,7 +215,7 @@ export const FreebuffModelSelector: React.FC = () => {
       ),
       nameColumnWidth: maxNameLen,
     }
-  }, [contentMaxWidth, deploymentAvailabilityLabel])
+  }, [availableModels, contentMaxWidth, deploymentAvailabilityLabel, showTagline])
 
   const isJoinable = useCallback(
     (modelId: string) => {
@@ -239,7 +258,7 @@ export const FreebuffModelSelector: React.FC = () => {
         }
         if (!direction) return
         const targetId = nextFreebuffModelId({
-          modelIds: FREEBUFF_MODEL_SELECTOR_MODEL_IDS,
+          modelIds: availableModelIds,
           focusedId,
           direction,
         })
@@ -249,7 +268,14 @@ export const FreebuffModelSelector: React.FC = () => {
           setFocusedId(targetId)
         }
       },
-      [pending, pick, focusedId, committedModelId, isJoinable],
+      [
+        pending,
+        pick,
+        focusedId,
+        committedModelId,
+        isJoinable,
+        availableModelIds,
+      ],
     ),
   )
 
@@ -323,10 +349,12 @@ export const FreebuffModelSelector: React.FC = () => {
             {model.displayName}
           </span>
           {wrapDetails ? (
-            <span fg={mutedColor}> · {model.tagline}</span>
+            showTagline && <span fg={mutedColor}> · {model.tagline}</span>
           ) : (
             <>
-              <span fg={mutedColor}>{namePadding + model.tagline}</span>
+              {showTagline && (
+                <span fg={mutedColor}>{namePadding + model.tagline}</span>
+              )}
               {hasWarning && <span fg={warningColor}> · {model.warning}</span>}
               {hasHours && (
                 <span fg={mutedColor}> · {deploymentAvailabilityLabel}</span>
@@ -356,7 +384,7 @@ export const FreebuffModelSelector: React.FC = () => {
         gap: 0,
       }}
     >
-      {SECTIONS.map((section, sectionIdx) => (
+      {sections.map((section, sectionIdx) => (
         <box
           key={section.key}
           style={{
@@ -366,7 +394,9 @@ export const FreebuffModelSelector: React.FC = () => {
             marginTop: sectionIdx === 0 ? 0 : 1,
           }}
         >
-          <text style={{ fg: theme.muted }}>{section.label}</text>
+          {section.label && (
+            <text style={{ fg: theme.muted }}>{section.label}</text>
+          )}
           {section.models.map(renderModelButton)}
         </box>
       ))}

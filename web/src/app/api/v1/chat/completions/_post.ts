@@ -157,8 +157,8 @@ function sampleSuccessLogger(logger: Logger, sampled: boolean): Logger {
   if (sampled) return logger
   return {
     ...logger,
-    info: (() => {}) as Logger['info'],
-    debug: (() => {}) as Logger['debug'],
+    info: (() => { }) as Logger['info'],
+    debug: (() => { }) as Logger['debug'],
   }
 }
 
@@ -221,7 +221,7 @@ export async function postChatCompletions(params: {
 
   try {
     // Parse request body
-    let body: {}
+    let body: unknown
     try {
       body = await req.json()
     } catch (error) {
@@ -906,7 +906,7 @@ export async function postChatCompletions(params: {
       // Log detailed error information for debugging
       const errorDetails = openrouterError?.toJSON()
       const shouldRecordMessages = freebuffAccessTier !== 'limited'
-      const { messages: _messages, ...bodyWithoutMessages } = body
+      const { messages: _messages, ...bodyWithoutMessages } = body as Record<string, unknown>
       const telemetryBody = shouldRecordMessages ? body : bodyWithoutMessages
       const providerLabel = siliconflowError
         ? 'SiliconFlow'

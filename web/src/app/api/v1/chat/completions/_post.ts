@@ -90,6 +90,10 @@ import {
   handleOpenRouterStream,
   OpenRouterError,
 } from '@/llm-api/openrouter'
+import {
+  handleLocalhostNonStream,
+  handleLocalhostStream,
+} from '@/llm-api/localhost'
 import { checkSessionAdmissible } from '@/server/free-session/public-api'
 import { getCachedFreeModeCountryAccess } from '@/server/free-mode-country-access-cache'
 import { getFreeModeAccessTier } from '@/server/free-mode-country'
@@ -153,8 +157,8 @@ function sampleSuccessLogger(logger: Logger, sampled: boolean): Logger {
   if (sampled) return logger
   return {
     ...logger,
-    info: (() => {}) as Logger['info'],
-    debug: (() => {}) as Logger['debug'],
+    info: (() => { }) as Logger['info'],
+    debug: (() => { }) as Logger['debug'],
   }
 }
 
@@ -467,10 +471,10 @@ export async function postChatCompletions(params: {
       const rootRunId = ancestorRunIds[0]
       const rootRun = rootRunId
         ? await getAgentRunFromId({
-            runId: rootRunId,
-            userId,
-            fields: ['agent_id', 'status'],
-          })
+          runId: rootRunId,
+          userId,
+          fields: ['agent_id', 'status'],
+        })
         : null
       if (
         !rootRun ||
@@ -747,10 +751,7 @@ export async function postChatCompletions(params: {
                     ? await handleFireworksStream(baseArgs)
                     : useOpenAIDirect
                       ? await handleOpenAIStream(baseArgs)
-                      : await handleOpenRouterStream({
-                          ...baseArgs,
-                          openrouterApiKey,
-                        })
+                      : await handleLocalhostStream(baseArgs)
 
         trackSuccessEvent({
           event: AnalyticsEvent.CHAT_COMPLETIONS_STREAM_STARTED,
@@ -820,10 +821,7 @@ export async function postChatCompletions(params: {
                     ? handleFireworksNonStream(baseArgs)
                     : shouldUseOpenAIEndpoint
                       ? handleOpenAINonStream(baseArgs)
-                      : handleOpenRouterNonStream({
-                          ...baseArgs,
-                          openrouterApiKey,
-                        })
+                      : handleLocalhostNonStream(baseArgs)
         const result = await nonStreamRequest
 
         trackSuccessEvent({

@@ -4,6 +4,7 @@ import type {
   PublishAgentsResponse,
 } from '@codebuff/common/types/api/agents/publish'
 import type { FeedbackRequest } from '@codebuff/common/schemas/feedback'
+import { getSystemProcessEnv } from './env'
 
 /**
  * API response types for consistent error handling.
@@ -110,6 +111,8 @@ export interface CodebuffApiClientConfig {
    * vars are present.
    */
   proxy?: string | null
+  /** Environment variables (defaults to process.env for testing purposes) */
+  env?: Record<string, string | undefined>
 }
 
 /**
@@ -208,7 +211,7 @@ export interface CodebuffApiClient {
  * Returns undefined when no proxy is configured.
  */
 export function resolveProxyUrl(
-  env: Record<string, string | undefined> = process.env,
+  env: Record<string, string | undefined>,
 ): string | undefined {
   return (
     env['HTTPS_PROXY'] ||
@@ -278,6 +281,7 @@ export function createCodebuffApiClient(
     defaultTimeoutMs = 30000,
     retry: defaultRetryConfig = {},
     proxy: proxyConfig,
+    env: envConfig = getSystemProcessEnv(),
   } = config
 
   // Resolve proxy: explicit config wins, then env vars, then no proxy.
@@ -285,7 +289,7 @@ export function createCodebuffApiClient(
   const proxyUrl: string | undefined =
     proxyConfig === null
       ? undefined
-      : (proxyConfig ?? resolveProxyUrl())
+      : (proxyConfig ?? resolveProxyUrl(envConfig))
 
   const mergedDefaultRetry: Required<RetryConfig> = {
     ...DEFAULT_RETRY_CONFIG,

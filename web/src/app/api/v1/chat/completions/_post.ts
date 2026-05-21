@@ -16,11 +16,6 @@ import { pluralize } from '@codebuff/common/util/string'
 import { env } from '@codebuff/internal/env'
 import { NextResponse } from 'next/server'
 
-import {
-  handleLocalhostNonStream,
-  handleLocalhostStream,
-} from '@/llm-api/localhost'
-
 import type { TrackEventFn } from '@codebuff/common/types/contracts/analytics'
 import type { InsertMessageBigqueryFn } from '@codebuff/common/types/contracts/bigquery'
 import type { GetUserUsageDataFn } from '@codebuff/common/types/contracts/billing'
@@ -47,6 +42,7 @@ import type { NextRequest } from 'next/server'
 
 import type { ChatCompletionRequestBody } from '@/llm-api/types'
 
+import { createRequestAuditRecord } from '@/llm-api/helpers'
 import {
   CanopyWaveError,
   handleCanopyWaveNonStream,
@@ -157,8 +153,8 @@ function sampleSuccessLogger(logger: Logger, sampled: boolean): Logger {
   if (sampled) return logger
   return {
     ...logger,
-    info: (() => { }) as Logger['info'],
-    debug: (() => { }) as Logger['debug'],
+    info: (() => {}) as Logger['info'],
+    debug: (() => {}) as Logger['debug'],
   }
 }
 
@@ -221,7 +217,7 @@ export async function postChatCompletions(params: {
 
   try {
     // Parse request body
-    let body: unknown
+    let body: Record<string, unknown>
     try {
       body = await req.json()
     } catch (error) {
@@ -276,7 +272,7 @@ export async function postChatCompletions(params: {
     // Get user info
     const userInfo = await getUserInfoFromApiKey({
       apiKey,
-      fields: ['id', 'email', 'discord_id', 'banned', 'stripe_customer_id'],
+      fields: ['id', 'email', 'discord_id', 'stripe_customer_id', 'banned'],
       logger,
     })
     if (!userInfo) {
@@ -471,10 +467,10 @@ export async function postChatCompletions(params: {
       const rootRunId = ancestorRunIds[0]
       const rootRun = rootRunId
         ? await getAgentRunFromId({
-          runId: rootRunId,
-          userId,
-          fields: ['agent_id', 'status'],
-        })
+            runId: rootRunId,
+            userId,
+            fields: ['agent_id', 'status'],
+          })
         : null
       if (
         !rootRun ||
@@ -702,31 +698,26 @@ export async function postChatCompletions(params: {
     const providerLogger = sampleSuccessLogger(logger, sampleFreebuffSuccess)
 
     // Handle streaming vs non-streaming
-    // Set useLocalhost = true to route all requests to localhost:4141 (PicPay fork)
-    const useLocalhost = true
     try {
       if (bodyStream) {
         // Streaming request — route supported models to direct providers.
         const useSiliconFlow = false // isSiliconFlowModel(typedBody.model)
-        const useOpenCodeZen = !useLocalhost && isOpenCodeZenModel(typedBody.model)
-        const useMoonshot = !useLocalhost && !useOpenCodeZen && isMoonshotModel(typedBody.model)
+        const useOpenCodeZen = isOpenCodeZenModel(typedBody.model)
+        const useMoonshot = !useOpenCodeZen && isMoonshotModel(typedBody.model)
         const useCanopyWave =
-          !useLocalhost && !useMoonshot && !useOpenCodeZen && isCanopyWaveModel(typedBody.model)
+          !useMoonshot && !useOpenCodeZen && isCanopyWaveModel(typedBody.model)
         const useDeepSeek =
-          !useLocalhost &&
           !useMoonshot &&
           !useOpenCodeZen &&
           !useCanopyWave &&
           isDeepSeekModel(typedBody.model)
         const useFireworks =
-          !useLocalhost &&
           !useMoonshot &&
           !useOpenCodeZen &&
           !useCanopyWave &&
           !useDeepSeek &&
           isFireworksModel(typedBody.model)
         const useOpenAIDirect =
-          !useLocalhost &&
           !useMoonshot &&
           !useOpenCodeZen &&
           !useCanopyWave &&
@@ -742,30 +733,21 @@ export async function postChatCompletions(params: {
           logger: providerLogger,
           insertMessageBigquery,
         }
-        const stream = useLocalhost
-          ? await handleLocalhostStream({
-            body,
-            userId,
-            agentId,
-            fetch,
-            logger,
-            insertMessageBigquery,
-          })
-          : useSiliconFlow
-            ? await handleSiliconFlowStream(baseArgs)
-            : useMoonshot
-              ? await handleMoonshotStream(baseArgs)
-              : useOpenCodeZen
-                ? await handleOpenCodeZenStream(baseArgs)
-                : useCanopyWave
-                  ? await handleCanopyWaveStream(baseArgs)
-                  : useDeepSeek
-                    ? await handleDeepSeekStream(baseArgs)
-                    : useFireworks
-                      ? await handleFireworksStream(baseArgs)
-                      : useOpenAIDirect
-                        ? await handleOpenAIStream(baseArgs)
-                        : await handleOpenRouterStream({
+        const stream = useSiliconFlow
+          ? await handleSiliconFlowStream(baseArgs)
+          : useMoonshot
+            ? await handleMoonshotStream(baseArgs)
+            : useOpenCodeZen
+              ? await handleOpenCodeZenStream(baseArgs)
+              : useCanopyWave
+                ? await handleCanopyWaveStream(baseArgs)
+                : useDeepSeek
+                  ? await handleDeepSeekStream(baseArgs)
+                  : useFireworks
+                    ? await handleFireworksStream(baseArgs)
+                    : useOpenAIDirect
+                      ? await handleOpenAIStream(baseArgs)
+                      : await handleOpenRouterStream({
                           ...baseArgs,
                           openrouterApiKey,
                         })
@@ -792,25 +774,22 @@ export async function postChatCompletions(params: {
         // Non-streaming request — route to direct providers for supported models
         const model = typedBody.model
         const useSiliconFlow = false // isSiliconFlowModel(model)
-        const useOpenCodeZen = !useLocalhost && isOpenCodeZenModel(model)
-        const useMoonshot = !useLocalhost && !useOpenCodeZen && isMoonshotModel(model)
+        const useOpenCodeZen = isOpenCodeZenModel(model)
+        const useMoonshot = !useOpenCodeZen && isMoonshotModel(model)
         const useCanopyWave =
-          !useLocalhost && !useMoonshot && !useOpenCodeZen && isCanopyWaveModel(model)
+          !useMoonshot && !useOpenCodeZen && isCanopyWaveModel(model)
         const useDeepSeek =
-          !useLocalhost &&
           !useMoonshot &&
           !useOpenCodeZen &&
           !useCanopyWave &&
           isDeepSeekModel(model)
         const useFireworks =
-          !useLocalhost &&
           !useMoonshot &&
           !useOpenCodeZen &&
           !useCanopyWave &&
           !useDeepSeek &&
           isFireworksModel(model)
         const shouldUseOpenAIEndpoint =
-          !useLocalhost &&
           !useMoonshot &&
           !useOpenCodeZen &&
           !useCanopyWave &&
@@ -827,30 +806,21 @@ export async function postChatCompletions(params: {
           logger: providerLogger,
           insertMessageBigquery,
         }
-        const nonStreamRequest = useLocalhost
-          ? handleLocalhostNonStream({
-            body,
-            userId,
-            agentId,
-            fetch,
-            logger,
-            insertMessageBigquery,
-          })
-          : useSiliconFlow
-            ? handleSiliconFlowNonStream(baseArgs)
-            : useMoonshot
-              ? handleMoonshotNonStream(baseArgs)
-              : useOpenCodeZen
-                ? handleOpenCodeZenNonStream(baseArgs)
-                : useCanopyWave
-                  ? handleCanopyWaveNonStream(baseArgs)
-                  : useDeepSeek
-                    ? handleDeepSeekNonStream(baseArgs)
-                    : useFireworks
-                      ? handleFireworksNonStream(baseArgs)
-                      : shouldUseOpenAIEndpoint
-                        ? handleOpenAINonStream(baseArgs)
-                        : handleOpenRouterNonStream({
+        const nonStreamRequest = useSiliconFlow
+          ? handleSiliconFlowNonStream(baseArgs)
+          : useMoonshot
+            ? handleMoonshotNonStream(baseArgs)
+            : useOpenCodeZen
+              ? handleOpenCodeZenNonStream(baseArgs)
+              : useCanopyWave
+                ? handleCanopyWaveNonStream(baseArgs)
+                : useDeepSeek
+                  ? handleDeepSeekNonStream(baseArgs)
+                  : useFireworks
+                    ? handleFireworksNonStream(baseArgs)
+                    : shouldUseOpenAIEndpoint
+                      ? handleOpenAINonStream(baseArgs)
+                      : handleOpenRouterNonStream({
                           ...baseArgs,
                           openrouterApiKey,
                         })
@@ -905,9 +875,7 @@ export async function postChatCompletions(params: {
 
       // Log detailed error information for debugging
       const errorDetails = openrouterError?.toJSON()
-      const shouldRecordMessages = freebuffAccessTier !== 'limited'
-      const { messages: _messages, ...bodyWithoutMessages } = body as Record<string, unknown>
-      const telemetryBody = shouldRecordMessages ? body : bodyWithoutMessages
+      const telemetryBody = createRequestAuditRecord(body)
       const providerLabel = siliconflowError
         ? 'SiliconFlow'
         : opencodeZenError
@@ -926,18 +894,17 @@ export async function postChatCompletions(params: {
       logger.error(
         {
           error: getErrorObject(error),
-          body,
           userId,
           agentId,
           runId: runIdFromBody,
           model: typedBody.model,
           streaming: !!bodyStream,
-          messageCount: Array.isArray((body as any)?.messages)
-            ? (body as any).messages.length
+          hasByokKey: !!openrouterApiKey,
+          messageCount: Array.isArray(typedBody.messages)
+            ? typedBody.messages.length
             : 0,
-          ...(shouldRecordMessages
-            ? { messages: typedBody.messages }
-            : { messagesOmitted: true, accessTier: freebuffAccessTier }),
+          messagesOmitted: true,
+          accessTier: freebuffAccessTier,
           providerStatusCode: (
             openrouterError ??
             fireworksError ??
@@ -964,7 +931,7 @@ export async function postChatCompletions(params: {
           openrouterProviderName: errorDetails?.error?.metadata?.provider_name,
           openrouterProviderRaw: errorDetails?.error?.metadata?.raw,
         },
-        'Error with localhost request',
+        `${providerLabel} request failed`,
       )
       trackEvent({
         event: AnalyticsEvent.CHAT_COMPLETIONS_ERROR,

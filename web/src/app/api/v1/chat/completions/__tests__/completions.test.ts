@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, mock, it } from 'bun:test'
 import { NextRequest } from 'next/server'
 
+import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import { TEST_USER_ID } from '@codebuff/common/constants/paths'
 import {
   FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID,
   FREEBUFF_DEEPSEEK_V4_PRO_MODEL_ID,
   FREEBUFF_GEMINI_PRO_MODEL_ID,
-  FREEBUFF_GLM_MODEL_ID,
-  isFreebuffDeploymentHours,
 } from '@codebuff/common/constants/freebuff-models'
 import { openCodeZenModels } from '@codebuff/common/constants/model-config'
 import { postChatCompletions } from '../_post'
@@ -588,7 +587,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
             method: 'POST',
             headers: {
               Authorization: 'Bearer test-api-key-new-free',
-              'cf-ipcountry': 'T1',
+              'cf-ipcountry': 'XX',
               'x-forwarded-for': '8.8.8.8',
             },
             body: JSON.stringify({
@@ -622,6 +621,160 @@ describe('/api/v1/chat/completions POST endpoint', () => {
 
         expect(response.status).toBe(200)
         expect(mockGetUserUsageData).not.toHaveBeenCalled()
+      },
+      FETCH_PATH_TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'puts VPN/proxy privacy signals in limited mode before the session gate',
+      async () => {
+        const req = new NextRequest(
+          'http://localhost:3000/api/v1/chat/completions',
+          {
+            method: 'POST',
+            headers: allowedFreeModeHeaders('test-api-key-new-free'),
+            body: JSON.stringify({
+              model: FREEBUFF_DEEPSEEK_V4_FLASH_MODEL_ID,
+              stream: false,
+              codebuff_metadata: {
+                run_id: 'run-free-deepseek-flash',
+                client_id: 'test-client-id-123',
+                cost_mode: 'free',
+                freebuff_instance_id: 'active-instance-123',
+              },
+            }),
+          },
+        )
+
+        const endFreebuffSession = mock(async () => {})
+        const checkSessionAdmissible = mock(async (params) => {
+          expect(params.accessTier).toBe('limited')
+          return { ok: true, reason: 'active', remainingMs: 60_000 } as const
+        })
+        const response = await postChatCompletionsForTest({
+          req,
+          getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
+          logger: mockLogger,
+          trackEvent: mockTrackEvent,
+          getUserUsageData: mockGetUserUsageData,
+          getAgentRunFromId: mockGetAgentRunFromId,
+          fetch: mockFetch,
+          insertMessageBigquery: mockInsertMessageBigquery,
+          loggerWithContext: mockLoggerWithContext,
+          checkSessionAdmissible,
+          endFreebuffSession,
+          resolveFreeModeCountryAccess: async () => ({
+            allowed: false,
+            countryCode: 'US',
+            blockReason: 'anonymous_network',
+            cfCountry: 'US',
+            geoipCountry: null,
+            ipPrivacy: { signals: ['vpn', 'hosting'] },
+            spurIpPrivacy: { signals: ['vpn'] },
+            spurStatus: 'suspicious',
+            scamalyticsIpPrivacy: null,
+            scamalyticsStatus: 'failed',
+            scamalyticsScore: null,
+            scamalyticsRisk: null,
+            hasClientIp: true,
+            clientIpHash: 'test-ip-hash',
+          }),
+        })
+
+        expect(response.status).toBe(200)
+        expect(endFreebuffSession).not.toHaveBeenCalled()
+        expect(checkSessionAdmissible).toHaveBeenCalledTimes(1)
+        const validationEvent = (
+          mockTrackEvent as ReturnType<typeof mock>
+        ).mock.calls
+          .map(([params]) => params as Parameters<TrackEventFn>[0])
+          .find(
+            ({ event, properties }) =>
+              event === AnalyticsEvent.CHAT_COMPLETIONS_VALIDATION_ERROR &&
+              properties?.error === 'free_mode_not_available_in_country',
+          )
+        expect(validationEvent?.properties).toMatchObject({
+          accessTier: 'limited',
+          accessStatus: 'limited',
+          countryCode: 'US',
+          ipPrivacySignals: ['vpn', 'hosting'],
+          spurStatus: 'suspicious',
+          privacyDecision: 'scamalytics_failed_limited',
+          privacyProviderDecision: 'scamalytics_failed',
+          privacyHardBlocked: false,
+        })
+      },
+      FETCH_PATH_TEST_TIMEOUT_MS,
+    )
+
+    it(
+      'includes full freebuff access tier on successful usage analytics',
+      async () => {
+        const originalRandom = Math.random
+        Math.random = () => 0
+        try {
+          const req = new NextRequest(
+            'http://localhost:3000/api/v1/chat/completions',
+            {
+              method: 'POST',
+              headers: allowedFreeModeHeaders('test-api-key-new-free'),
+              body: JSON.stringify({
+                model: 'minimax/minimax-m2.7',
+                stream: false,
+                codebuff_metadata: {
+                  run_id: 'run-free',
+                  client_id: 'test-client-id-123',
+                  cost_mode: 'free',
+                },
+              }),
+            },
+          )
+
+          const response = await postChatCompletionsForTest({
+            req,
+            getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
+            logger: mockLogger,
+            trackEvent: mockTrackEvent,
+            getUserUsageData: mockGetUserUsageData,
+            getAgentRunFromId: mockGetAgentRunFromId,
+            fetch: mockFetch,
+            insertMessageBigquery: mockInsertMessageBigquery,
+            loggerWithContext: mockLoggerWithContext,
+            checkSessionAdmissible: mockCheckSessionAdmissibleAllow,
+          })
+
+          expect(response.status).toBe(200)
+
+          const trackedEvents = (
+            mockTrackEvent as ReturnType<typeof mock>
+          ).mock.calls.map(([params]) => params as Parameters<TrackEventFn>[0])
+          const requestEvent = trackedEvents.find(
+            ({ event }) => event === AnalyticsEvent.CHAT_COMPLETIONS_REQUEST,
+          )
+          const generationEvent = trackedEvents.find(
+            ({ event }) =>
+              event === AnalyticsEvent.CHAT_COMPLETIONS_GENERATION_STARTED,
+          )
+
+          expect(requestEvent?.properties).toMatchObject({
+            freebuff: true,
+            accessTier: 'full',
+            privacyDecision: 'allowed_clean',
+            privacyProviderDecision: 'ipinfo_clean',
+            privacyHardBlocked: false,
+            spurStatus: 'not_checked',
+          })
+          expect(generationEvent?.properties).toMatchObject({
+            freebuff: true,
+            accessTier: 'full',
+            privacyDecision: 'allowed_clean',
+            privacyProviderDecision: 'ipinfo_clean',
+            privacyHardBlocked: false,
+            spurStatus: 'not_checked',
+          })
+        } finally {
+          Math.random = originalRandom
+        }
       },
       FETCH_PATH_TEST_TIMEOUT_MS,
     )
@@ -750,6 +903,19 @@ describe('/api/v1/chat/completions POST endpoint', () => {
       const body = await response.json()
       expect(body.error).toBe('session_model_mismatch')
       expect(checkSessionAdmissible).toHaveBeenCalledTimes(0)
+      const validationEvent = (
+        mockTrackEvent as ReturnType<typeof mock>
+      ).mock.calls
+        .map(([params]) => params as Parameters<TrackEventFn>[0])
+        .find(
+          ({ event, properties }) =>
+            event === AnalyticsEvent.CHAT_COMPLETIONS_VALIDATION_ERROR &&
+            properties?.error === 'session_model_mismatch',
+        )
+      expect(validationEvent?.properties).toMatchObject({
+        freebuff: true,
+        accessTier: 'limited',
+      })
     })
 
     it('classifies anonymized Cloudflare country codes as limited access', async () => {
@@ -764,7 +930,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
           method: 'POST',
           headers: {
             Authorization: 'Bearer test-api-key-new-free',
-            'cf-ipcountry': 'T1',
+            'cf-ipcountry': 'XX',
             'x-forwarded-for': '8.8.8.8',
           },
           body: JSON.stringify({
@@ -799,7 +965,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
     })
 
     it(
-      'lets old freebuff clients keep using GLM 5.1 through Fireworks availability rules',
+      'rejects removed GLM 5.1 for free mode before provider calls',
       async () => {
         const fetchedBodies: Record<string, unknown>[] = []
         const fetchViaFireworks = mock(
@@ -830,7 +996,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
             method: 'POST',
             headers: allowedFreeModeHeaders('test-api-key-new-free'),
             body: JSON.stringify({
-              model: FREEBUFF_GLM_MODEL_ID,
+              model: 'z-ai/glm-5.1',
               stream: false,
               codebuff_metadata: {
                 run_id: 'run-free',
@@ -855,19 +1021,9 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         })
 
         const body = await response.json()
-        if (isFreebuffDeploymentHours()) {
-          expect(response.status).toBe(200)
-          expect(fetchedBodies).toHaveLength(1)
-          expect(fetchedBodies[0].model).toBe(
-            'accounts/fireworks/models/glm-5p1',
-          )
-          expect(body.model).toBe(FREEBUFF_GLM_MODEL_ID)
-          expect(body.provider).toBe('Fireworks')
-        } else {
-          expect(response.status).toBe(503)
-          expect(fetchedBodies).toHaveLength(0)
-          expect(body.error.code).toBe('DEPLOYMENT_OUTSIDE_HOURS')
-        }
+        expect(response.status).toBe(403)
+        expect(fetchedBodies).toHaveLength(0)
+        expect(body.error).toBe('free_mode_invalid_agent_model')
       },
       FETCH_PATH_TEST_TIMEOUT_MS,
     )
@@ -1615,6 +1771,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
         expect(response.headers.get('Content-Type')).toBe('text/event-stream')
         expect(response.headers.get('Cache-Control')).toBe('no-cache')
         expect(response.headers.get('Connection')).toBe('keep-alive')
+        expect(await response.text()).toContain(' stream')
       },
       FETCH_PATH_TEST_TIMEOUT_MS,
     )

@@ -1,6 +1,7 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import { BYOK_OPENROUTER_HEADER } from '@codebuff/common/constants/byok'
 import {
+  type FreebuffAccessTier,
   FREEBUFF_GEMINI_PRO_MODEL_ID,
   isFreebuffModelAllowedForAccessTier,
   isSupportedFreebuffModelId,
@@ -12,12 +13,16 @@ import {
   isFreeModeAllowedAgentModel,
 } from '@codebuff/common/constants/free-agents'
 import { getErrorObject } from '@codebuff/common/util/error'
+import { formatFreebuffHardBlockedMessage } from '@codebuff/common/util/freebuff-privacy'
 import { pluralize } from '@codebuff/common/util/string'
 import { env } from '@codebuff/internal/env'
 import { NextResponse } from 'next/server'
 
 import type { TrackEventFn } from '@codebuff/common/types/contracts/analytics'
-import type { InsertMessageBigqueryFn } from '@codebuff/common/types/contracts/bigquery'
+import type {
+  InsertChatCompletionTraceBigqueryFn,
+  InsertMessageBigqueryFn,
+} from '@codebuff/common/types/contracts/bigquery'
 import type { GetUserUsageDataFn } from '@codebuff/common/types/contracts/billing'
 import type {
   GetAgentRunFromIdFn,
@@ -42,6 +47,7 @@ import type { NextRequest } from 'next/server'
 
 import type { ChatCompletionRequestBody } from '@/llm-api/types'
 
+import { recordChatCompletionTrace } from '@/llm-api/chat-completion-trace'
 import { createRequestAuditRecord } from '@/llm-api/helpers'
 import {
   CanopyWaveError,
@@ -94,9 +100,18 @@ import {
   handleLocalhostNonStream,
   handleLocalhostStream,
 } from '@/llm-api/localhost'
-import { checkSessionAdmissible } from '@/server/free-session/public-api'
+import {
+  checkSessionAdmissible,
+  endUserSession,
+} from '@/server/free-session/public-api'
 import { getCachedFreeModeCountryAccess } from '@/server/free-mode-country-access-cache'
-import { getFreeModeAccessTier } from '@/server/free-mode-country'
+import {
+  getFreeModeAccessTier,
+  getFreeModePrivacyDecision,
+  getFreeModePrivacyProviderDecision,
+  getFreeModeRiskScore,
+  shouldHardBlockFreeModeAccess,
+} from '@/server/free-mode-country'
 
 import type { SessionGateResult } from '@/server/free-session/public-api'
 import type {
@@ -106,6 +121,7 @@ import type {
 import { extractApiKeyFromHeader } from '@/util/auth'
 import { withDefaultProperties } from '@codebuff/common/analytics'
 import { checkFreeModeRateLimit as defaultCheckFreeModeRateLimit } from './free-mode-rate-limiter'
+import { beginChatCompletionRequestMetrics } from './request-metrics'
 
 export const formatQuotaResetCountdown = (
   nextQuotaReset: string | null | undefined,
@@ -144,6 +160,7 @@ export const formatQuotaResetCountdown = (
 }
 
 export type CheckSessionAdmissibleFn = typeof checkSessionAdmissible
+export type EndUserSessionFn = typeof endUserSession
 export type CheckFreeModeRateLimitFn = typeof defaultCheckFreeModeRateLimit
 export type ResolveFreeModeCountryAccessFn = (
   userId: string,
@@ -173,6 +190,12 @@ const STATUS_BY_GATE_CODE = {
   freebuff_update_required: 426,
 } satisfies Record<GateRejectCode, number>
 
+function getHardBlockedFreeModeMessage(
+  countryAccess: Pick<FreeModeCountryAccess, 'ipPrivacy'>,
+): string {
+  return formatFreebuffHardBlockedMessage(countryAccess.ipPrivacy?.signals)
+}
+
 export async function postChatCompletions(params: {
   req: NextRequest
   getUserInfoFromApiKey: GetUserInfoFromApiKeyFn
@@ -183,6 +206,7 @@ export async function postChatCompletions(params: {
   getAgentRunFromId: GetAgentRunFromIdFn
   fetch: typeof globalThis.fetch
   insertMessageBigquery: InsertMessageBigqueryFn
+  insertChatCompletionTraceBigquery?: InsertChatCompletionTraceBigqueryFn
   ensureSubscriberBlockGrant?: (params: {
     userId: string
     logger: Logger
@@ -197,6 +221,8 @@ export async function postChatCompletions(params: {
   /** Optional override for country/cache checks. Tests inject this to avoid
    *  coupling to Postgres-backed cache state. */
   resolveFreeModeCountryAccess?: ResolveFreeModeCountryAccessFn
+  /** Optional override for releasing stale waiting-room rows on hard blocks. */
+  endFreebuffSession?: EndUserSessionFn
 }) {
   const {
     req,
@@ -206,11 +232,13 @@ export async function postChatCompletions(params: {
     getAgentRunFromId,
     fetch,
     insertMessageBigquery,
+    insertChatCompletionTraceBigquery,
     ensureSubscriberBlockGrant,
     getUserPreferences,
     checkSessionAdmissible: checkSession = checkSessionAdmissible,
     checkFreeModeRateLimit = defaultCheckFreeModeRateLimit,
     resolveFreeModeCountryAccess,
+    endFreebuffSession = endUserSession,
   } = params
   let { logger } = params
   let { trackEvent } = params
@@ -297,7 +325,7 @@ export async function postChatCompletions(params: {
 
     const userId = userInfo.id
     const stripeCustomerId = userInfo.stripe_customer_id ?? null
-    let freebuffAccessTier: 'full' | 'limited' = 'full'
+    let freebuffAccessTier: FreebuffAccessTier = 'full'
 
     // Check if user is banned.
     // We use a clear, helpful message rather than a cryptic error because:
@@ -315,6 +343,135 @@ export async function postChatCompletions(params: {
       )
     }
 
+    // For free mode requests, classify the request into full or limited
+    // access. Most non-allowlist/privacy cases, including VPN/proxy traffic,
+    // are limited to the cheap DeepSeek Flash path; Cloudflare Tor remains a
+    // hard block.
+    if (isFreeModeRequest) {
+      const countryAccess = await resolveCountryAccess(userId, req, {
+        fetch,
+        ipinfoToken: env.IPINFO_TOKEN,
+        spurToken: env.SPUR_TOKEN,
+        scamalyticsApiKey: env.SCAMALYTICS_API_KEY,
+        ipHashSecret: env.NEXTAUTH_SECRET,
+        allowLocalhost: env.NEXT_PUBLIC_CB_ENVIRONMENT === 'dev',
+        forceLimited:
+          env.NEXT_PUBLIC_CB_ENVIRONMENT === 'dev' &&
+          env.FREEBUFF_DEV_FORCE_LIMITED,
+      })
+      freebuffAccessTier = getFreeModeAccessTier(countryAccess)
+      const hardBlocked = shouldHardBlockFreeModeAccess(countryAccess)
+      const privacyDecision = getFreeModePrivacyDecision(countryAccess)
+      const privacyProviderDecision =
+        getFreeModePrivacyProviderDecision(countryAccess)
+      const privacyRiskScore = getFreeModeRiskScore(countryAccess)
+
+      if (!countryAccess.allowed || sampleFreebuffSuccess) {
+        logger.info(
+          {
+            cfHeader: countryAccess.cfCountry,
+            geoipResult: countryAccess.geoipCountry,
+            resolvedCountry: countryAccess.countryCode,
+            countryBlockReason: countryAccess.blockReason,
+            ipPrivacySignals: countryAccess.ipPrivacy?.signals,
+            spurIpPrivacySignals: countryAccess.spurIpPrivacy?.signals,
+            spurStatus: countryAccess.spurStatus,
+            scamalyticsIpPrivacySignals:
+              countryAccess.scamalyticsIpPrivacy?.signals,
+            scamalyticsStatus: countryAccess.scamalyticsStatus,
+            scamalyticsScore: countryAccess.scamalyticsScore,
+            scamalyticsRisk: countryAccess.scamalyticsRisk,
+            privacyRiskScore,
+            privacyDecision,
+            privacyProviderDecision,
+            privacyHardBlocked: hardBlocked,
+            clientIp: countryAccess.hasClientIp ? '[redacted]' : undefined,
+          },
+          'Free mode country detection',
+        )
+      }
+
+      if (hardBlocked) {
+        const error = 'free_mode_unavailable'
+        const message = getHardBlockedFreeModeMessage(countryAccess)
+        await endFreebuffSession({
+          userId,
+          userEmail: userInfo.email ?? null,
+        })
+        trackEvent({
+          event: AnalyticsEvent.CHAT_COMPLETIONS_VALIDATION_ERROR,
+          userId,
+          properties: {
+            error,
+            countryCode: countryAccess.countryCode,
+            countryBlockReason: countryAccess.blockReason,
+            ipPrivacySignals: countryAccess.ipPrivacy?.signals,
+            spurIpPrivacySignals: countryAccess.spurIpPrivacy?.signals,
+            spurStatus: countryAccess.spurStatus,
+            scamalyticsIpPrivacySignals:
+              countryAccess.scamalyticsIpPrivacy?.signals,
+            scamalyticsStatus: countryAccess.scamalyticsStatus,
+            scamalyticsScore: countryAccess.scamalyticsScore,
+            scamalyticsRisk: countryAccess.scamalyticsRisk,
+            privacyRiskScore,
+            privacyDecision,
+            privacyProviderDecision,
+            privacyHardBlocked: hardBlocked,
+            clientIp: countryAccess.hasClientIp ? '[redacted]' : undefined,
+            accessStatus: 'blocked',
+          },
+          logger,
+        })
+        return NextResponse.json(
+          {
+            error,
+            message,
+            countryCode: countryAccess.countryCode ?? 'UNKNOWN',
+            countryBlockReason: countryAccess.blockReason ?? undefined,
+            ipPrivacySignals: countryAccess.ipPrivacy?.signals ?? undefined,
+          },
+          { status: 403 },
+        )
+      }
+
+      trackEvent = withDefaultProperties(trackEvent, {
+        accessTier: freebuffAccessTier,
+        accessStatus: freebuffAccessTier,
+        privacyDecision,
+        privacyProviderDecision,
+        privacyHardBlocked: hardBlocked,
+        privacyRiskScore,
+        spurStatus: countryAccess.spurStatus,
+        scamalyticsStatus: countryAccess.scamalyticsStatus,
+      })
+
+      if (!countryAccess.allowed) {
+        trackEvent({
+          event: AnalyticsEvent.CHAT_COMPLETIONS_VALIDATION_ERROR,
+          userId,
+          properties: {
+            error: 'free_mode_not_available_in_country',
+            countryCode: countryAccess.countryCode,
+            countryBlockReason: countryAccess.blockReason,
+            ipPrivacySignals: countryAccess.ipPrivacy?.signals,
+            spurIpPrivacySignals: countryAccess.spurIpPrivacy?.signals,
+            spurStatus: countryAccess.spurStatus,
+            scamalyticsIpPrivacySignals:
+              countryAccess.scamalyticsIpPrivacy?.signals,
+            scamalyticsStatus: countryAccess.scamalyticsStatus,
+            scamalyticsScore: countryAccess.scamalyticsScore,
+            scamalyticsRisk: countryAccess.scamalyticsRisk,
+            privacyRiskScore,
+            privacyDecision,
+            privacyProviderDecision,
+            privacyHardBlocked: hardBlocked,
+            clientIp: countryAccess.hasClientIp ? '[redacted]' : undefined,
+          },
+          logger,
+        })
+      }
+    }
+
     // Track API request. Freebuff success-path analytics are sampled to keep
     // high-volume free traffic from dominating PostHog and log forwarding.
     trackSuccessEvent({
@@ -327,51 +484,6 @@ export async function postChatCompletions(params: {
       },
       logger,
     })
-
-    // For free mode requests, classify the request into full or limited
-    // access. Disallowed countries and anonymized networks are no longer
-    // blocked outright; they are limited to the cheap DeepSeek Flash path.
-    if (isFreeModeRequest) {
-      const countryAccess = await resolveCountryAccess(userId, req, {
-        fetch,
-        ipinfoToken: env.IPINFO_TOKEN,
-        ipHashSecret: env.NEXTAUTH_SECRET,
-        allowLocalhost: env.NEXT_PUBLIC_CB_ENVIRONMENT === 'dev',
-        forceLimited:
-          env.NEXT_PUBLIC_CB_ENVIRONMENT === 'dev' &&
-          env.FREEBUFF_DEV_FORCE_LIMITED,
-      })
-      freebuffAccessTier = getFreeModeAccessTier(countryAccess)
-
-      if (!countryAccess.allowed || sampleFreebuffSuccess) {
-        logger.info(
-          {
-            cfHeader: countryAccess.cfCountry,
-            geoipResult: countryAccess.geoipCountry,
-            resolvedCountry: countryAccess.countryCode,
-            countryBlockReason: countryAccess.blockReason,
-            ipPrivacySignals: countryAccess.ipPrivacy?.signals,
-            clientIp: countryAccess.hasClientIp ? '[redacted]' : undefined,
-          },
-          'Free mode country detection',
-        )
-      }
-
-      if (!countryAccess.allowed) {
-        trackEvent({
-          event: AnalyticsEvent.CHAT_COMPLETIONS_VALIDATION_ERROR,
-          userId,
-          properties: {
-            error: 'free_mode_not_available_in_country',
-            countryCode: countryAccess.countryCode,
-            countryBlockReason: countryAccess.blockReason,
-            ipPrivacySignals: countryAccess.ipPrivacy?.signals,
-            clientIp: countryAccess.hasClientIp ? '[redacted]' : undefined,
-          },
-          logger,
-        })
-      }
-    }
 
     // Extract and validate agent run ID
     const runIdFromBody = typedBody.codebuff_metadata?.run_id
@@ -701,6 +813,25 @@ export async function postChatCompletions(params: {
     const openrouterApiKey = req.headers.get(BYOK_OPENROUTER_HEADER)
     const providerLogger = sampleSuccessLogger(logger, sampleFreebuffSuccess)
 
+    recordChatCompletionTrace({
+      body: typedBody,
+      userId,
+      agentId,
+      ancestorRunIds,
+      logger: providerLogger,
+      insertChatCompletionTraceBigquery,
+    })
+
+    const requestMetrics = beginChatCompletionRequestMetrics({
+      logger,
+      userId,
+      agentId,
+      runId: runIdFromBody,
+      model: typedBody.model,
+      streaming: bodyStream,
+      costMode,
+    })
+
     // Handle streaming vs non-streaming
     try {
       if (bodyStream) {
@@ -763,7 +894,7 @@ export async function postChatCompletions(params: {
           logger,
         })
 
-        return new NextResponse(stream, {
+        return new NextResponse(requestMetrics.wrapStream(stream), {
           headers: {
             'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
@@ -835,9 +966,11 @@ export async function postChatCompletions(params: {
           logger,
         })
 
+        requestMetrics.end('completed')
         return NextResponse.json(result)
       }
     } catch (error) {
+      requestMetrics.end('error', { error: getErrorObject(error) })
       let openrouterError: OpenRouterError | undefined
       if (error instanceof OpenRouterError) {
         openrouterError = error

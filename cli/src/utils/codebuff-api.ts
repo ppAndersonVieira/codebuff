@@ -1,4 +1,5 @@
 import { WEBSITE_URL } from '@codebuff/sdk'
+import { getSystemProcessEnv } from './env'
 
 import type {
   PublishAgentsResponse,
@@ -211,7 +212,7 @@ export interface CodebuffApiClient {
  * Returns undefined when no proxy is configured.
  */
 export function resolveProxyUrl(
-  env: Record<string, string | undefined>,
+  env: Record<string, string | undefined> = getSystemProcessEnv(),
 ): string | undefined {
   return (
     env['HTTPS_PROXY'] ||

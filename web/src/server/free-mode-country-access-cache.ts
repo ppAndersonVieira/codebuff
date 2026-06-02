@@ -6,8 +6,13 @@ import { and, eq, gt, isNull } from 'drizzle-orm'
 import {
   extractClientIp,
   getFreeModeCountryAccess,
+  getFreeModePrivacyDecision,
+  getFreeModePrivacyProviderDecision,
+  getFreeModeRiskScore,
+  hasHardBlockedPrivacySignal,
   hashClientIp,
   IPINFO_PRIVACY_CACHE_TTL_MS,
+  shouldHardBlockFreeModeAccess,
 } from './free-mode-country'
 
 import type {
@@ -18,6 +23,7 @@ import type { Logger } from '@codebuff/common/types/contracts/logger'
 
 export const FREE_MODE_COUNTRY_CACHE_ALLOWED_TTL_MS =
   IPINFO_PRIVACY_CACHE_TTL_MS
+export const FREE_MODE_COUNTRY_CACHE_SPUR_CLEARED_TTL_MS = 10 * 60 * 1000
 export const FREE_MODE_COUNTRY_CACHE_ANONYMOUS_NETWORK_TTL_MS = 15 * 60 * 1000
 export const FREE_MODE_COUNTRY_CACHE_COUNTRY_NOT_ALLOWED_TTL_MS =
   6 * 60 * 60 * 1000
@@ -37,13 +43,48 @@ export type FreeModeCountryAccessCacheStore = {
   }): Promise<void>
 }
 
+export function shouldCacheCountryAccess(
+  access: FreeModeCountryAccess,
+): boolean {
+  return Boolean(access.clientIpHash) && !shouldHardBlockFreeModeAccess(access)
+}
+
+export function shouldIgnoreCountryAccessCacheRow(
+  row: Pick<
+    typeof schema.freeModeCountryAccessCache.$inferSelect,
+    | 'country_block_reason'
+    | 'ip_privacy_signals'
+    | 'spur_status'
+    | 'scamalytics_status'
+  >,
+): boolean {
+  return (
+    row.country_block_reason === 'anonymous_network' &&
+    (row.spur_status === null || row.scamalytics_status === null) &&
+    hasHardBlockedPrivacySignal(
+      row.ip_privacy_signals ? { signals: row.ip_privacy_signals } : null,
+    )
+  )
+}
+
 export function expiresAtForCountryAccess(
   access: FreeModeCountryAccess,
   now: Date,
 ): Date {
   let ttlMs = FREE_MODE_COUNTRY_CACHE_TRANSIENT_BLOCK_TTL_MS
-  if (access.allowed) {
+  if (
+    access.allowed &&
+    access.spurStatus === 'clean' &&
+    (access.ipPrivacy?.signals.length ?? 0) > 0
+  ) {
+    ttlMs = FREE_MODE_COUNTRY_CACHE_SPUR_CLEARED_TTL_MS
+  } else if (access.allowed) {
     ttlMs = FREE_MODE_COUNTRY_CACHE_ALLOWED_TTL_MS
+  } else if (
+    access.blockReason === 'anonymous_network' &&
+    (access.spurStatus === 'failed' || access.scamalyticsStatus === 'failed')
+  ) {
+    ttlMs = FREE_MODE_COUNTRY_CACHE_TRANSIENT_BLOCK_TTL_MS
   } else if (access.blockReason === 'anonymous_network') {
     ttlMs = FREE_MODE_COUNTRY_CACHE_ANONYMOUS_NETWORK_TTL_MS
   } else if (access.blockReason === 'country_not_allowed') {
@@ -62,8 +103,21 @@ function countryAccessFromCacheRow(
     cfCountry: row.cf_country,
     geoipCountry: row.geoip_country,
     ipPrivacy: row.ip_privacy_signals
-      ? { signals: row.ip_privacy_signals }
+      ? {
+          signals: row.ip_privacy_signals,
+        }
       : null,
+    spurIpPrivacy: row.spur_ip_privacy_signals
+      ? { signals: row.spur_ip_privacy_signals }
+      : null,
+    spurStatus: row.spur_status ?? 'not_checked',
+    scamalyticsIpPrivacy: row.scamalytics_ip_privacy_signals
+      ? { signals: row.scamalytics_ip_privacy_signals }
+      : null,
+    scamalyticsStatus: row.scamalytics_status ?? 'not_checked',
+    scamalyticsScore: row.scamalytics_score,
+    scamalyticsRisk: row.scamalytics_risk,
+    riskScore: row.risk_score,
     hasClientIp: true,
     clientIpHash: row.client_ip_hash,
   }
@@ -83,24 +137,41 @@ export const dbFreeModeCountryAccessCacheStore: FreeModeCountryAccessCacheStore 
         ),
       })
       if (!row) return null
+      if (shouldIgnoreCountryAccessCacheRow(row)) return null
       return countryAccessFromCacheRow(row)
     },
 
     async set({ userId, access, now }) {
-      if (!access.clientIpHash) return
+      if (!shouldCacheCountryAccess(access)) return
+
+      const clientIpHash = access.clientIpHash
+      if (!clientIpHash) return
 
       const expiresAt = expiresAtForCountryAccess(access, now)
+      const privacyDecision = getFreeModePrivacyDecision(access)
+      const privacyProviderDecision = getFreeModePrivacyProviderDecision(access)
+      const riskScore = getFreeModeRiskScore(access)
       await db
         .insert(schema.freeModeCountryAccessCache)
         .values({
           user_id: userId,
-          client_ip_hash: access.clientIpHash,
+          client_ip_hash: clientIpHash,
           allowed: access.allowed,
           country_code: access.countryCode,
           cf_country: access.cfCountry,
           geoip_country: access.geoipCountry,
           country_block_reason: access.blockReason,
           ip_privacy_signals: access.ipPrivacy?.signals ?? null,
+          spur_ip_privacy_signals: access.spurIpPrivacy?.signals ?? null,
+          spur_status: access.spurStatus,
+          scamalytics_ip_privacy_signals:
+            access.scamalyticsIpPrivacy?.signals ?? null,
+          scamalytics_status: access.scamalyticsStatus,
+          scamalytics_score: access.scamalyticsScore,
+          scamalytics_risk: access.scamalyticsRisk,
+          risk_score: riskScore,
+          privacy_decision: privacyDecision,
+          privacy_provider_decision: privacyProviderDecision,
           checked_at: now,
           expires_at: expiresAt,
           created_at: now,
@@ -118,6 +189,16 @@ export const dbFreeModeCountryAccessCacheStore: FreeModeCountryAccessCacheStore 
             geoip_country: access.geoipCountry,
             country_block_reason: access.blockReason,
             ip_privacy_signals: access.ipPrivacy?.signals ?? null,
+            spur_ip_privacy_signals: access.spurIpPrivacy?.signals ?? null,
+            spur_status: access.spurStatus,
+            scamalytics_ip_privacy_signals:
+              access.scamalyticsIpPrivacy?.signals ?? null,
+            scamalytics_status: access.scamalyticsStatus,
+            scamalytics_score: access.scamalyticsScore,
+            scamalytics_risk: access.scamalyticsRisk,
+            risk_score: riskScore,
+            privacy_decision: privacyDecision,
+            privacy_provider_decision: privacyProviderDecision,
             checked_at: now,
             expires_at: expiresAt,
             updated_at: now,
@@ -170,7 +251,7 @@ export async function getCachedFreeModeCountryAccess(params: {
   }
 
   const access = await getFreeModeCountryAccess(req, options)
-  if (access.clientIpHash) {
+  if (shouldCacheCountryAccess(access)) {
     try {
       await cacheStore.set({ userId, access, now })
     } catch (error) {

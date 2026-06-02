@@ -22,6 +22,10 @@ import type { AdapterAccount } from 'next-auth/adapters'
 import type {
   FreebuffCountryBlockReason,
   FreebuffIpPrivacySignal,
+  FreebuffPrivacyDecision,
+  FreebuffPrivacyProviderDecision,
+  FreebuffScamalyticsStatus,
+  FreebuffSpurStatus,
 } from '@codebuff/common/types/freebuff-session'
 
 export const ReferralStatus = pgEnum('referral_status', [
@@ -300,6 +304,19 @@ export const encryptedApiKeys = pgTable(
     pk: primaryKey({ columns: [table.user_id, table.type] }),
   }),
 )
+
+export const composioSession = pgTable('composio_session', {
+  user_id: text('user_id')
+    .primaryKey()
+    .references(() => user.id, { onDelete: 'cascade' }),
+  session_id: text('session_id').notNull().unique(),
+  created_at: timestamp('created_at', { mode: 'date', withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updated_at: timestamp('updated_at', { mode: 'date', withTimezone: true })
+    .notNull()
+    .defaultNow(),
+})
 
 // Organization tables
 export const orgRoleEnum = pgEnum('org_role', ['owner', 'admin', 'member'])
@@ -937,6 +954,25 @@ export const freeModeCountryAccessCache = pgTable(
     ip_privacy_signals: text('ip_privacy_signals')
       .array()
       .$type<FreebuffIpPrivacySignal[] | null>(),
+    spur_ip_privacy_signals: text('spur_ip_privacy_signals')
+      .array()
+      .$type<FreebuffIpPrivacySignal[] | null>(),
+    spur_status: text('spur_status').$type<FreebuffSpurStatus | null>(),
+    scamalytics_ip_privacy_signals: text('scamalytics_ip_privacy_signals')
+      .array()
+      .$type<FreebuffIpPrivacySignal[] | null>(),
+    scamalytics_status: text(
+      'scamalytics_status',
+    ).$type<FreebuffScamalyticsStatus | null>(),
+    scamalytics_score: integer('scamalytics_score'),
+    scamalytics_risk: text('scamalytics_risk'),
+    risk_score: integer('risk_score'),
+    privacy_decision: text(
+      'privacy_decision',
+    ).$type<FreebuffPrivacyDecision | null>(),
+    privacy_provider_decision: text(
+      'privacy_provider_decision',
+    ).$type<FreebuffPrivacyProviderDecision | null>(),
     checked_at: timestamp('checked_at', {
       mode: 'date',
       withTimezone: true,

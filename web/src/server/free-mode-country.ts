@@ -1,12 +1,20 @@
 import { createHmac } from 'node:crypto'
 
 import geoip from 'geoip-lite'
+import {
+  FREEBUFF_HARD_BLOCKED_PRIVACY_SIGNALS,
+  isFreebuffHardBlockedPrivacySignal,
+} from '@codebuff/common/util/freebuff-privacy'
 
 import type { NextRequest } from 'next/server'
 import type { FreebuffAccessTier } from '@codebuff/common/constants/freebuff-models'
 import type {
   FreebuffCountryBlockReason,
   FreebuffIpPrivacySignal,
+  FreebuffPrivacyDecision,
+  FreebuffPrivacyProviderDecision,
+  FreebuffScamalyticsStatus,
+  FreebuffSpurStatus,
 } from '@codebuff/common/types/freebuff-session'
 
 export const FREE_MODE_ALLOWED_COUNTRIES = new Set([
@@ -37,13 +45,20 @@ export const FREE_MODE_ALLOWED_COUNTRIES = new Set([
   'IS',
 ])
 
-const CLOUDFLARE_ANONYMIZED_OR_UNKNOWN_COUNTRIES = new Set(['T1', 'XX'])
+const CLOUDFLARE_TOR_COUNTRY = 'T1'
+const CLOUDFLARE_ANONYMIZED_OR_UNKNOWN_COUNTRIES = new Set([
+  CLOUDFLARE_TOR_COUNTRY,
+  'XX',
+])
 
 export type FreeModeCountryBlockReason = FreebuffCountryBlockReason
 export type FreeModeIpPrivacySignal = FreebuffIpPrivacySignal
 
 export type FreeModeIpPrivacy = {
   signals: FreeModeIpPrivacySignal[]
+  providerName?: string | null
+  lastSeen?: string | null
+  percentDaysSeen?: number | null
 }
 
 export type FreeModeCountryAccess = {
@@ -53,6 +68,13 @@ export type FreeModeCountryAccess = {
   cfCountry: string | null
   geoipCountry: string | null
   ipPrivacy: FreeModeIpPrivacy | null
+  spurIpPrivacy: FreeModeIpPrivacy | null
+  spurStatus: FreebuffSpurStatus
+  scamalyticsIpPrivacy: FreeModeIpPrivacy | null
+  scamalyticsStatus: FreebuffScamalyticsStatus
+  scamalyticsScore: number | null
+  scamalyticsRisk: string | null
+  riskScore?: number | null
   hasClientIp: boolean
   clientIpHash: string | null
 }
@@ -60,6 +82,19 @@ export type FreeModeCountryAccess = {
 export type LookupIpPrivacyFn = (
   ip: string,
 ) => Promise<FreeModeIpPrivacy | null>
+
+export type LookupSpurIpPrivacyFn = (
+  ip: string,
+) => Promise<FreeModeIpPrivacy | null>
+
+export type FreeModeScamalyticsIpRisk = FreeModeIpPrivacy & {
+  score: number | null
+  risk: string | null
+}
+
+export type LookupScamalyticsIpRiskFn = (
+  ip: string,
+) => Promise<FreeModeScamalyticsIpRisk | null>
 
 export function getFreeModeAccessTier(
   countryAccess: Pick<FreeModeCountryAccess, 'allowed'>,
@@ -69,8 +104,13 @@ export function getFreeModeAccessTier(
 
 export type FreeModeCountryAccessOptions = {
   lookupIpPrivacy?: LookupIpPrivacyFn
+  lookupSpurIpPrivacy?: LookupSpurIpPrivacyFn
+  lookupScamalyticsIpRisk?: LookupScamalyticsIpRiskFn
   fetch?: typeof globalThis.fetch
   ipinfoToken: string
+  spurToken: string
+  scamalyticsApiKey?: string
+  scamalyticsUser?: string
   ipHashSecret?: string
   allowLocalhost?: boolean
   /** Dev-only escape hatch: when true (and `allowLocalhost` is also true),
@@ -100,17 +140,307 @@ const ipinfoPrivacyCache = new Map<
   string,
   { expiresAt: number; privacy: FreeModeIpPrivacy | null }
 >()
+const spurPrivacyCache = new Map<
+  string,
+  { expiresAt: number; privacy: FreeModeIpPrivacy | null }
+>()
+const scamalyticsPrivacyCache = new Map<
+  string,
+  { expiresAt: number; risk: FreeModeScamalyticsIpRisk | null }
+>()
 
-const FREE_MODE_BLOCKED_PRIVACY_SIGNALS = new Set<FreeModeIpPrivacySignal>([
+const SCAMALYTICS_DEFAULT_USER = 'codebuff'
+export const SCAMALYTICS_LIMITED_RISK_SCORE = 50
+
+const FREE_MODE_LIMITED_PRIVACY_SIGNALS = new Set<FreeModeIpPrivacySignal>([
+  ...FREEBUFF_HARD_BLOCKED_PRIVACY_SIGNALS,
   'anonymous',
-  'vpn',
-  'proxy',
-  'tor',
   'relay',
-  'res_proxy',
   'hosting',
   'service',
 ])
+
+export function hasHardBlockedPrivacySignal(
+  ipPrivacy: FreeModeIpPrivacy | null | undefined,
+): boolean {
+  return ipPrivacy?.signals.some(isFreebuffHardBlockedPrivacySignal) ?? false
+}
+
+function hasTorPrivacySignal(
+  ipPrivacy: FreeModeIpPrivacy | null | undefined,
+): boolean {
+  return ipPrivacy?.signals.includes('tor') ?? false
+}
+
+function hasResidentialProxySignal(
+  ipPrivacy: FreeModeIpPrivacy | null | undefined,
+): boolean {
+  return ipPrivacy?.signals.includes('res_proxy') ?? false
+}
+
+function hasCorroboratedTorSignal(
+  countryAccess: Partial<
+    Pick<
+      FreeModeCountryAccess,
+      'ipPrivacy' | 'spurIpPrivacy' | 'scamalyticsIpPrivacy'
+    >
+  >,
+): boolean {
+  return (
+    hasTorPrivacySignal(countryAccess.ipPrivacy) &&
+    (hasTorPrivacySignal(countryAccess.spurIpPrivacy) ||
+      hasTorPrivacySignal(countryAccess.scamalyticsIpPrivacy))
+  )
+}
+
+function hasCorroboratedResidentialProxySignal(
+  countryAccess: Partial<
+    Pick<
+      FreeModeCountryAccess,
+      | 'ipPrivacy'
+      | 'spurIpPrivacy'
+      | 'scamalyticsIpPrivacy'
+      | 'scamalyticsScore'
+    >
+  >,
+): boolean {
+  const ipinfoResidentialProxy = hasResidentialProxySignal(
+    countryAccess.ipPrivacy,
+  )
+  const spurResidentialProxy = hasResidentialProxySignal(
+    countryAccess.spurIpPrivacy,
+  )
+  const scamalyticsResidentialProxy = hasResidentialProxySignal(
+    countryAccess.scamalyticsIpPrivacy,
+  )
+  const scamalyticsCorroborates =
+    scamalyticsResidentialProxy ||
+    hasHardBlockedPrivacySignal(countryAccess.scamalyticsIpPrivacy) ||
+    (countryAccess.scamalyticsScore ?? 0) >= SCAMALYTICS_LIMITED_RISK_SCORE
+
+  return (
+    (ipinfoResidentialProxy && scamalyticsCorroborates) ||
+    (spurResidentialProxy && scamalyticsCorroborates) ||
+    (scamalyticsResidentialProxy &&
+      (hasHardBlockedPrivacySignal(countryAccess.ipPrivacy) ||
+        hasHardBlockedPrivacySignal(countryAccess.spurIpPrivacy)))
+  )
+}
+
+function maxPrivacySignalRisk(
+  ipPrivacy: FreeModeIpPrivacy | null | undefined,
+): number {
+  let risk = 0
+  const hasHardSignal = ipPrivacy?.signals.some(
+    isFreebuffHardBlockedPrivacySignal,
+  )
+  for (const signal of ipPrivacy?.signals ?? []) {
+    if (signal === 'tor') risk = Math.max(risk, 100)
+    else if (isFreebuffHardBlockedPrivacySignal(signal)) {
+      risk = Math.max(risk, 70)
+    } else if (signal === 'anonymous' || signal === 'relay') {
+      risk = Math.max(risk, 55)
+    } else if (signal === 'hosting' || signal === 'service') {
+      risk = Math.max(risk, 40)
+    }
+  }
+  if (ipPrivacy?.providerName && hasHardSignal) {
+    risk = Math.max(risk, 80)
+  }
+  if (
+    hasHardSignal &&
+    typeof ipPrivacy?.percentDaysSeen === 'number' &&
+    ipPrivacy.percentDaysSeen >= 50
+  ) {
+    risk = Math.max(risk, 85)
+  }
+  if (ipPrivacy?.lastSeen && hasHardSignal) {
+    const lastSeenMs = Date.parse(ipPrivacy.lastSeen)
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000
+    if (Number.isFinite(lastSeenMs) && Date.now() - lastSeenMs <= sevenDaysMs) {
+      risk = Math.max(risk, 85)
+    }
+  }
+  return risk
+}
+
+export function getFreeModeRiskScore(
+  countryAccess: Pick<
+    FreeModeCountryAccess,
+    | 'blockReason'
+    | 'cfCountry'
+    | 'ipPrivacy'
+    | 'spurIpPrivacy'
+    | 'spurStatus'
+    | 'scamalyticsIpPrivacy'
+    | 'scamalyticsStatus'
+    | 'scamalyticsScore'
+    | 'riskScore'
+  >,
+): number {
+  if (typeof countryAccess.riskScore === 'number') {
+    return countryAccess.riskScore
+  }
+
+  if (countryAccess.cfCountry === CLOUDFLARE_TOR_COUNTRY) return 100
+
+  let score = 0
+  if (countryAccess.blockReason === 'country_not_allowed') score = 35
+  if (
+    countryAccess.blockReason === 'missing_client_ip' ||
+    countryAccess.blockReason === 'unresolved_client_ip' ||
+    countryAccess.blockReason === 'anonymized_or_unknown_country'
+  ) {
+    score = Math.max(score, 50)
+  }
+  if (countryAccess.blockReason === 'ip_privacy_lookup_failed') {
+    score = Math.max(score, 55)
+  }
+
+  score = Math.max(score, maxPrivacySignalRisk(countryAccess.ipPrivacy))
+  score = Math.max(score, maxPrivacySignalRisk(countryAccess.spurIpPrivacy))
+  score = Math.max(
+    score,
+    maxPrivacySignalRisk(countryAccess.scamalyticsIpPrivacy),
+  )
+  if (countryAccess.spurStatus === 'failed') score = Math.max(score, 55)
+  if (countryAccess.spurStatus === 'suspicious') score = Math.max(score, 75)
+  if (countryAccess.scamalyticsStatus === 'failed') {
+    score = Math.max(score, 55)
+  }
+  if (countryAccess.scamalyticsStatus === 'suspicious') {
+    score = Math.max(
+      score,
+      countryAccess.scamalyticsScore ?? SCAMALYTICS_LIMITED_RISK_SCORE,
+    )
+  }
+  if (typeof countryAccess.scamalyticsScore === 'number') {
+    score = Math.max(score, countryAccess.scamalyticsScore)
+  }
+  if (hasCorroboratedTorSignal(countryAccess)) {
+    score = Math.max(score, 95)
+  }
+  if (hasCorroboratedResidentialProxySignal(countryAccess)) {
+    score = Math.max(score, 95)
+  }
+
+  return Math.min(100, Math.max(0, Math.round(score)))
+}
+
+export function shouldHardBlockFreeModeAccess(
+  countryAccess: Pick<FreeModeCountryAccess, 'cfCountry'> &
+    Partial<
+      Pick<
+        FreeModeCountryAccess,
+        | 'blockReason'
+        | 'ipPrivacy'
+        | 'spurIpPrivacy'
+        | 'scamalyticsIpPrivacy'
+        | 'scamalyticsScore'
+      >
+    >,
+): boolean {
+  if (countryAccess.cfCountry === CLOUDFLARE_TOR_COUNTRY) return true
+  if (countryAccess.blockReason !== 'anonymous_network') return false
+  return (
+    hasCorroboratedTorSignal(countryAccess) ||
+    hasCorroboratedResidentialProxySignal(countryAccess)
+  )
+}
+
+export function getFreeModePrivacyDecision(
+  countryAccess: Pick<
+    FreeModeCountryAccess,
+    | 'allowed'
+    | 'blockReason'
+    | 'cfCountry'
+    | 'ipPrivacy'
+    | 'spurIpPrivacy'
+    | 'spurStatus'
+    | 'scamalyticsIpPrivacy'
+    | 'scamalyticsStatus'
+    | 'scamalyticsScore'
+  >,
+): FreebuffPrivacyDecision {
+  if (countryAccess.allowed) {
+    return countryAccess.spurStatus === 'clean' &&
+      countryAccess.ipPrivacy?.signals.length
+      ? 'ipinfo_suspicious_spur_clean'
+      : 'allowed_clean'
+  }
+  if (countryAccess.cfCountry === CLOUDFLARE_TOR_COUNTRY) {
+    return 'cloudflare_tor_block'
+  }
+  if (countryAccess.blockReason === 'ip_privacy_lookup_failed') {
+    return 'ipinfo_failed_limited'
+  }
+  if (countryAccess.blockReason === 'anonymous_network') {
+    if (shouldHardBlockFreeModeAccess(countryAccess)) {
+      return 'corroborated_block'
+    }
+    if (countryAccess.spurStatus === 'failed') {
+      return 'spur_failed_limited'
+    }
+    if (countryAccess.scamalyticsStatus === 'failed') {
+      return 'scamalytics_failed_limited'
+    }
+    if (countryAccess.scamalyticsStatus === 'suspicious') {
+      return 'scamalytics_suspicious_limited'
+    }
+  }
+  return 'limited_other'
+}
+
+export function getFreeModePrivacyProviderDecision(
+  countryAccess: Pick<
+    FreeModeCountryAccess,
+    | 'blockReason'
+    | 'cfCountry'
+    | 'ipPrivacy'
+    | 'spurIpPrivacy'
+    | 'spurStatus'
+    | 'scamalyticsStatus'
+  >,
+): FreebuffPrivacyProviderDecision {
+  if (countryAccess.cfCountry === CLOUDFLARE_TOR_COUNTRY) {
+    return 'cloudflare_tor'
+  }
+  if (countryAccess.blockReason === 'ip_privacy_lookup_failed') {
+    return 'ipinfo_failed'
+  }
+  if (!countryAccess.ipPrivacy) {
+    return 'not_checked'
+  }
+  if (countryAccess.ipPrivacy.signals.length === 0) {
+    return 'ipinfo_clean'
+  }
+  if (countryAccess.spurStatus === 'failed') {
+    return 'spur_failed'
+  }
+  if (countryAccess.scamalyticsStatus === 'failed') {
+    return 'scamalytics_failed'
+  }
+  if (
+    countryAccess.spurStatus === 'clean' &&
+    countryAccess.scamalyticsStatus === 'suspicious'
+  ) {
+    return 'scamalytics_only'
+  }
+  if (countryAccess.spurStatus === 'clean') {
+    return 'ipinfo_only'
+  }
+  if (
+    countryAccess.spurStatus === 'suspicious' &&
+    hasHardBlockedPrivacySignal(countryAccess.ipPrivacy) &&
+    hasHardBlockedPrivacySignal(countryAccess.spurIpPrivacy)
+  ) {
+    return 'corroborated_hard'
+  }
+  if (countryAccess.spurStatus === 'suspicious') {
+    return 'corroborated_soft'
+  }
+  return 'not_checked'
+}
 
 export function extractClientIp(req: NextRequest): string | undefined {
   const cfConnectingIp = req.headers.get('cf-connecting-ip')?.trim()
@@ -150,6 +480,38 @@ function setIpinfoPrivacyCache(
   })
 }
 
+function setSpurPrivacyCache(
+  ip: string,
+  privacy: FreeModeIpPrivacy | null,
+): void {
+  while (spurPrivacyCache.size >= IPINFO_PRIVACY_CACHE_MAX_ENTRIES) {
+    const oldestIp = spurPrivacyCache.keys().next().value
+    if (!oldestIp) break
+    spurPrivacyCache.delete(oldestIp)
+  }
+
+  spurPrivacyCache.set(ip, {
+    expiresAt: Date.now() + IPINFO_PRIVACY_CACHE_TTL_MS,
+    privacy,
+  })
+}
+
+function setScamalyticsPrivacyCache(
+  ip: string,
+  risk: FreeModeScamalyticsIpRisk | null,
+): void {
+  while (scamalyticsPrivacyCache.size >= IPINFO_PRIVACY_CACHE_MAX_ENTRIES) {
+    const oldestIp = scamalyticsPrivacyCache.keys().next().value
+    if (!oldestIp) break
+    scamalyticsPrivacyCache.delete(oldestIp)
+  }
+
+  scamalyticsPrivacyCache.set(ip, {
+    expiresAt: Date.now() + IPINFO_PRIVACY_CACHE_TTL_MS,
+    risk,
+  })
+}
+
 function privacySignalsFromIpinfo(
   data: Record<string, unknown>,
 ): FreeModeIpPrivacySignal[] {
@@ -178,6 +540,195 @@ function privacySignalsFromIpinfo(
   return signals
 }
 
+function privacyMetadataFromIpinfo(
+  data: Record<string, unknown>,
+): Pick<FreeModeIpPrivacy, 'providerName' | 'lastSeen' | 'percentDaysSeen'> {
+  const anonymous =
+    data.anonymous && typeof data.anonymous === 'object'
+      ? (data.anonymous as Record<string, unknown>)
+      : {}
+
+  return {
+    providerName:
+      typeof anonymous.name === 'string' && anonymous.name.length > 0
+        ? anonymous.name
+        : typeof data.service === 'string' && data.service.length > 0
+          ? data.service
+          : null,
+    lastSeen:
+      typeof anonymous.last_seen === 'string' && anonymous.last_seen.length > 0
+        ? anonymous.last_seen
+        : null,
+    percentDaysSeen:
+      typeof anonymous.percent_days_seen === 'number' &&
+      Number.isFinite(anonymous.percent_days_seen)
+        ? anonymous.percent_days_seen
+        : null,
+  }
+}
+
+function pushUniqueSignal(
+  signals: FreeModeIpPrivacySignal[],
+  signal: FreeModeIpPrivacySignal,
+): void {
+  if (!signals.includes(signal)) signals.push(signal)
+}
+
+function signalFromSpurValue(value: unknown): FreeModeIpPrivacySignal | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.toUpperCase()
+  if (normalized.includes('RESIDENTIAL') || normalized.includes('RES_PROXY')) {
+    return 'res_proxy'
+  }
+  if (normalized.includes('TOR')) return 'tor'
+  if (normalized.includes('VPN')) return 'vpn'
+  if (normalized.includes('PROXY')) return 'proxy'
+  return null
+}
+
+function signalFromSpurService(value: unknown): FreeModeIpPrivacySignal | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.toUpperCase()
+  if (
+    normalized === 'OPENVPN' ||
+    normalized === 'WIREGUARD' ||
+    normalized === 'IPSEC' ||
+    normalized.includes('VPN')
+  ) {
+    return 'vpn'
+  }
+  return null
+}
+
+export function privacySignalsFromSpur(
+  data: Record<string, unknown>,
+): FreeModeIpPrivacySignal[] {
+  const signals: FreeModeIpPrivacySignal[] = []
+
+  const services = Array.isArray(data.services) ? data.services : []
+  for (const service of services) {
+    const signal = signalFromSpurService(service)
+    if (signal) pushUniqueSignal(signals, signal)
+  }
+
+  const tunnels = Array.isArray(data.tunnels) ? data.tunnels : []
+  for (const tunnel of tunnels) {
+    if (!tunnel || typeof tunnel !== 'object') continue
+    const tunnelRecord = tunnel as Record<string, unknown>
+    const operatorSignal = signalFromSpurValue(tunnelRecord.operator)
+    if (operatorSignal) pushUniqueSignal(signals, operatorSignal)
+    const signal = signalFromSpurValue(tunnelRecord.type)
+    if (signal) pushUniqueSignal(signals, signal)
+  }
+
+  const client =
+    data.client && typeof data.client === 'object'
+      ? (data.client as Record<string, unknown>)
+      : {}
+  const behaviors = Array.isArray(client.behaviors) ? client.behaviors : []
+  for (const behavior of behaviors) {
+    const signal = signalFromSpurValue(behavior)
+    if (signal) pushUniqueSignal(signals, signal)
+  }
+
+  const proxies = Array.isArray(client.proxies) ? client.proxies : []
+  for (const proxy of proxies) {
+    const signal = signalFromSpurValue(proxy) ?? 'proxy'
+    pushUniqueSignal(signals, signal)
+  }
+
+  return signals
+}
+
+function pushScamalyticsProxyType(
+  signals: FreeModeIpPrivacySignal[],
+  proxyType: unknown,
+  includeGenericProxy: boolean,
+): void {
+  if (typeof proxyType !== 'string') return
+  const normalized = proxyType.toUpperCase()
+  if (normalized === 'TOR') {
+    pushUniqueSignal(signals, 'tor')
+  } else if (normalized === 'VPN') {
+    pushUniqueSignal(signals, 'vpn')
+  } else if (
+    includeGenericProxy &&
+    (normalized === 'PUB' ||
+      normalized === 'WEB' ||
+      normalized.includes('PROXY'))
+  ) {
+    pushUniqueSignal(signals, 'proxy')
+  } else if (normalized === 'DCH' || normalized === 'SES') {
+    pushUniqueSignal(signals, 'hosting')
+  }
+}
+
+function scamalyticsRoot(
+  data: Record<string, unknown>,
+): Record<string, unknown> {
+  return data.scamalytics && typeof data.scamalytics === 'object'
+    ? (data.scamalytics as Record<string, unknown>)
+    : data
+}
+
+function numberFromScamalyticsValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+export function privacySignalsFromScamalytics(
+  data: Record<string, unknown>,
+): FreeModeIpPrivacySignal[] {
+  const root = scamalyticsRoot(data)
+  const signals: FreeModeIpPrivacySignal[] = []
+  const proxy =
+    root.scamalytics_proxy && typeof root.scamalytics_proxy === 'object'
+      ? (root.scamalytics_proxy as Record<string, unknown>)
+      : {}
+
+  if (proxy.is_vpn === true) pushUniqueSignal(signals, 'vpn')
+  if (proxy.is_tor === true) pushUniqueSignal(signals, 'tor')
+  if (proxy.is_proxy === true || proxy.is_public_proxy === true) {
+    pushUniqueSignal(signals, 'proxy')
+  }
+  if (proxy.is_web_proxy === true) pushUniqueSignal(signals, 'proxy')
+  if (proxy.is_residential_proxy === true || proxy.is_res_proxy === true) {
+    pushUniqueSignal(signals, 'res_proxy')
+  }
+  if (proxy.is_apple_icloud_private_relay === true) {
+    pushUniqueSignal(signals, 'relay')
+  }
+  if (
+    proxy.is_datacenter === true ||
+    proxy.is_amazon_aws === true ||
+    proxy.is_google === true
+  ) {
+    pushUniqueSignal(signals, 'hosting')
+  }
+
+  const external =
+    data.external_datasources && typeof data.external_datasources === 'object'
+      ? (data.external_datasources as Record<string, unknown>)
+      : {}
+  for (const source of Object.values(external)) {
+    if (!source || typeof source !== 'object') continue
+    const sourceRecord = source as Record<string, unknown>
+    if (sourceRecord.is_vpn === true) pushUniqueSignal(signals, 'vpn')
+    if (sourceRecord.is_tor === true) pushUniqueSignal(signals, 'tor')
+    if (sourceRecord.is_datacenter === true) {
+      pushUniqueSignal(signals, 'hosting')
+    }
+    pushScamalyticsProxyType(signals, sourceRecord.proxy_type, false)
+    pushScamalyticsProxyType(signals, sourceRecord.usage_type, false)
+  }
+
+  return signals
+}
+
 export async function lookupIpinfoPrivacy(params: {
   ip: string
   token: string
@@ -199,9 +750,155 @@ export async function lookupIpinfoPrivacy(params: {
   const signals = privacySignalsFromIpinfo(data)
   const privacy = {
     signals,
+    ...privacyMetadataFromIpinfo(data),
   }
   setIpinfoPrivacyCache(params.ip, privacy)
   return privacy
+}
+
+export async function lookupSpurIpPrivacy(params: {
+  ip: string
+  token: string
+  fetch: typeof globalThis.fetch
+}): Promise<FreeModeIpPrivacy | null> {
+  const cached = spurPrivacyCache.get(params.ip)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.privacy
+  }
+
+  const response = await params.fetch(
+    `https://api.spur.us/v2/context/${encodeURIComponent(params.ip)}`,
+    {
+      headers: {
+        Token: params.token,
+      },
+    },
+  )
+  if (!response.ok) {
+    return null
+  }
+
+  const data = (await response.json()) as Record<string, unknown>
+  const privacy = {
+    signals: privacySignalsFromSpur(data),
+  }
+  setSpurPrivacyCache(params.ip, privacy)
+  return privacy
+}
+
+export async function lookupScamalyticsIpRisk(params: {
+  ip: string
+  user?: string
+  apiKey: string
+  fetch: typeof globalThis.fetch
+}): Promise<FreeModeScamalyticsIpRisk | null> {
+  const cached = scamalyticsPrivacyCache.get(params.ip)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.risk
+  }
+
+  if (!params.apiKey) return null
+
+  const user = params.user ?? SCAMALYTICS_DEFAULT_USER
+  const response = await params.fetch(
+    `https://api11.scamalytics.com/v3/${encodeURIComponent(
+      user,
+    )}/?key=${encodeURIComponent(params.apiKey)}&ip=${encodeURIComponent(
+      params.ip,
+    )}`,
+  )
+  if (!response.ok) {
+    return null
+  }
+
+  const data = (await response.json()) as Record<string, unknown>
+  const root = scamalyticsRoot(data)
+  if (root.status && root.status !== 'ok') {
+    return null
+  }
+
+  const risk = {
+    signals: privacySignalsFromScamalytics(data),
+    score:
+      numberFromScamalyticsValue(root.scamalytics_score) ??
+      numberFromScamalyticsValue(root.score),
+    risk:
+      typeof root.scamalytics_risk === 'string'
+        ? root.scamalytics_risk
+        : typeof root.risk === 'string'
+          ? root.risk
+          : null,
+  }
+  setScamalyticsPrivacyCache(params.ip, risk)
+  return risk
+}
+
+async function lookupSpurPrivacyStatus(
+  clientIp: string,
+  options: FreeModeCountryAccessOptions,
+): Promise<{
+  privacy: FreeModeIpPrivacy | null
+  status: FreebuffSpurStatus
+}> {
+  try {
+    const privacy = options.lookupSpurIpPrivacy
+      ? await options.lookupSpurIpPrivacy(clientIp)
+      : await lookupSpurIpPrivacy({
+          ip: clientIp,
+          token: options.spurToken,
+          fetch: options.fetch ?? globalThis.fetch,
+        })
+    if (!privacy) return { privacy: null, status: 'failed' }
+    return {
+      privacy,
+      status: hasHardBlockedPrivacySignal(privacy) ? 'suspicious' : 'clean',
+    }
+  } catch {
+    return { privacy: null, status: 'failed' }
+  }
+}
+
+async function lookupScamalyticsStatus(
+  clientIp: string,
+  options: FreeModeCountryAccessOptions,
+): Promise<{
+  risk: FreeModeScamalyticsIpRisk | null
+  status: FreebuffScamalyticsStatus
+}> {
+  try {
+    const risk = options.lookupScamalyticsIpRisk
+      ? await options.lookupScamalyticsIpRisk(clientIp)
+      : await lookupScamalyticsIpRisk({
+          ip: clientIp,
+          user: options.scamalyticsUser,
+          apiKey: options.scamalyticsApiKey ?? '',
+          fetch: options.fetch ?? globalThis.fetch,
+        })
+    if (!risk) return { risk: null, status: 'failed' }
+    const score = risk.score ?? 0
+    return {
+      risk,
+      status:
+        hasHardBlockedPrivacySignal(risk) ||
+        score >= SCAMALYTICS_LIMITED_RISK_SCORE
+          ? 'suspicious'
+          : 'clean',
+    }
+  } catch {
+    return { risk: null, status: 'failed' }
+  }
+}
+
+const NOT_CHECKED_SPUR_CONTEXT = {
+  spurIpPrivacy: null,
+  spurStatus: 'not_checked' as const,
+}
+
+const NOT_CHECKED_SCAMALYTICS_CONTEXT = {
+  scamalyticsIpPrivacy: null,
+  scamalyticsStatus: 'not_checked' as const,
+  scamalyticsScore: null,
+  scamalyticsRisk: null,
 }
 
 export async function getFreeModeCountryAccess(
@@ -230,6 +927,8 @@ export async function getFreeModeCountryAccess(
         cfCountry: null,
         geoipCountry: null,
         ipPrivacy: { signals: [] },
+        ...NOT_CHECKED_SPUR_CONTEXT,
+        ...NOT_CHECKED_SCAMALYTICS_CONTEXT,
         hasClientIp: Boolean(clientIp),
         // Null hash skips the country-access cache so toggling the env var
         // takes effect immediately without evicting prior allowed=true rows.
@@ -243,6 +942,8 @@ export async function getFreeModeCountryAccess(
       cfCountry: null,
       geoipCountry: null,
       ipPrivacy: { signals: [] },
+      ...NOT_CHECKED_SPUR_CONTEXT,
+      ...NOT_CHECKED_SCAMALYTICS_CONTEXT,
       hasClientIp: Boolean(clientIp),
       clientIpHash,
     }
@@ -255,7 +956,10 @@ export async function getFreeModeCountryAccess(
       blockReason: 'anonymized_or_unknown_country',
       cfCountry,
       geoipCountry: null,
-      ipPrivacy: null,
+      ipPrivacy:
+        cfCountry === CLOUDFLARE_TOR_COUNTRY ? { signals: ['tor'] } : null,
+      ...NOT_CHECKED_SPUR_CONTEXT,
+      ...NOT_CHECKED_SCAMALYTICS_CONTEXT,
       hasClientIp: Boolean(clientIp),
       clientIpHash,
     }
@@ -268,6 +972,8 @@ export async function getFreeModeCountryAccess(
       countryCode: cfCountry,
       cfCountry,
       geoipCountry: null,
+      ...NOT_CHECKED_SPUR_CONTEXT,
+      ...NOT_CHECKED_SCAMALYTICS_CONTEXT,
       hasClientIp: Boolean(clientIp),
       clientIpHash,
     }
@@ -279,6 +985,8 @@ export async function getFreeModeCountryAccess(
       cfCountry: null,
       geoipCountry: null,
       ipPrivacy: null,
+      ...NOT_CHECKED_SPUR_CONTEXT,
+      ...NOT_CHECKED_SCAMALYTICS_CONTEXT,
       hasClientIp: false,
       clientIpHash,
     }
@@ -292,6 +1000,8 @@ export async function getFreeModeCountryAccess(
         cfCountry: null,
         geoipCountry: null,
         ipPrivacy: null,
+        ...NOT_CHECKED_SPUR_CONTEXT,
+        ...NOT_CHECKED_SCAMALYTICS_CONTEXT,
         hasClientIp: true,
         clientIpHash,
       }
@@ -301,6 +1011,8 @@ export async function getFreeModeCountryAccess(
       countryCode: geoipCountry,
       cfCountry: null,
       geoipCountry,
+      ...NOT_CHECKED_SPUR_CONTEXT,
+      ...NOT_CHECKED_SCAMALYTICS_CONTEXT,
       hasClientIp: true,
       clientIpHash,
     }
@@ -312,6 +1024,8 @@ export async function getFreeModeCountryAccess(
       allowed: false,
       blockReason: 'country_not_allowed',
       ipPrivacy: null,
+      ...NOT_CHECKED_SPUR_CONTEXT,
+      ...NOT_CHECKED_SCAMALYTICS_CONTEXT,
       clientIpHash,
     }
   }
@@ -324,6 +1038,8 @@ export async function getFreeModeCountryAccess(
       cfCountry,
       geoipCountry: null,
       ipPrivacy: null,
+      ...NOT_CHECKED_SPUR_CONTEXT,
+      ...NOT_CHECKED_SCAMALYTICS_CONTEXT,
       hasClientIp: false,
       clientIpHash,
     }
@@ -348,20 +1064,59 @@ export async function getFreeModeCountryAccess(
       allowed: false,
       blockReason: 'ip_privacy_lookup_failed',
       ipPrivacy: null,
+      ...NOT_CHECKED_SPUR_CONTEXT,
+      ...NOT_CHECKED_SCAMALYTICS_CONTEXT,
       clientIpHash,
     }
   }
 
   if (
     ipPrivacy.signals.some((signal) =>
-      FREE_MODE_BLOCKED_PRIVACY_SIGNALS.has(signal),
+      FREE_MODE_LIMITED_PRIVACY_SIGNALS.has(signal),
     )
   ) {
+    const [
+      { privacy: spurIpPrivacy, status: spurStatus },
+      { risk: scamalyticsIpRisk, status: scamalyticsStatus },
+    ] = await Promise.all([
+      lookupSpurPrivacyStatus(clientIp, options),
+      lookupScamalyticsStatus(clientIp, options),
+    ])
+    const scamalyticsContext = {
+      scamalyticsIpPrivacy: scamalyticsIpRisk
+        ? { signals: scamalyticsIpRisk.signals }
+        : null,
+      scamalyticsStatus,
+      scamalyticsScore: scamalyticsIpRisk?.score ?? null,
+      scamalyticsRisk: scamalyticsIpRisk?.risk ?? null,
+    }
+
+    if (
+      spurIpPrivacy &&
+      spurStatus === 'clean' &&
+      scamalyticsIpRisk &&
+      scamalyticsStatus === 'clean'
+    ) {
+      return {
+        ...baseAccess,
+        allowed: true,
+        blockReason: null,
+        ipPrivacy,
+        spurIpPrivacy,
+        spurStatus,
+        ...scamalyticsContext,
+        clientIpHash,
+      }
+    }
+
     return {
       ...baseAccess,
       allowed: false,
       blockReason: 'anonymous_network',
       ipPrivacy,
+      spurIpPrivacy,
+      spurStatus,
+      ...scamalyticsContext,
       clientIpHash,
     }
   }
@@ -371,6 +1126,8 @@ export async function getFreeModeCountryAccess(
     allowed: true,
     blockReason: null,
     ipPrivacy,
+    spurIpPrivacy: null,
+    spurStatus: 'not_checked',
     clientIpHash,
   }
 }

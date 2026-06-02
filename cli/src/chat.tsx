@@ -174,10 +174,9 @@ export const Chat = ({
   })
   const hasSubscription = subscriptionData?.hasSubscription ?? false
 
-  const { ads, recordImpression } = useGravityAd({
+  const { ads, recordClick, recordImpression } = useGravityAd({
     enabled: IS_FREEBUFF || !hasSubscription,
     provider: 'gravity',
-    fallbackProvider: 'zeroclick',
   })
 
   // Set initial mode from CLI flag on mount
@@ -1464,7 +1463,11 @@ export const Chat = ({
         )}
 
         {ads && (IS_FREEBUFF || getAdsEnabled()) && (
-          <ChoiceAdBanner ads={ads} onImpression={recordImpression} />
+          <ChoiceAdBanner
+            ads={ads}
+            onClick={recordClick}
+            onImpression={recordImpression}
+          />
         )}
 
         {reviewMode ? (

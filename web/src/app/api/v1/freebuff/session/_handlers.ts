@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { formatFreebuffHardBlockedMessage } from '@codebuff/common/util/freebuff-privacy'
 import { env } from '@codebuff/internal/env'
 
 import {
@@ -6,7 +7,12 @@ import {
   getSessionState,
   requestSession,
 } from '@/server/free-session/public-api'
-import { getFreeModeAccessTier } from '@/server/free-mode-country'
+import {
+  getFreeModeAccessTier,
+  getFreeModePrivacyDecision,
+  getFreeModePrivacyProviderDecision,
+  shouldHardBlockFreeModeAccess,
+} from '@/server/free-mode-country'
 import { getCachedFreeModeCountryAccess } from '@/server/free-mode-country-access-cache'
 import { extractApiKeyFromHeader } from '@/util/auth'
 
@@ -35,6 +41,8 @@ async function getCountryAccess(
       logger: deps.logger,
       options: {
         ipinfoToken: env.IPINFO_TOKEN,
+        spurToken: env.SPUR_TOKEN,
+        scamalyticsApiKey: env.SCAMALYTICS_API_KEY,
         ipHashSecret: env.NEXTAUTH_SECRET,
         allowLocalhost: env.NEXT_PUBLIC_CB_ENVIRONMENT === 'dev',
         forceLimited:
@@ -66,6 +74,64 @@ function toLimitedModeReason(countryAccess: FreeModeCountryAccess) {
     countryBlockReason: countryAccess.blockReason,
     ipPrivacySignals: countryAccess.ipPrivacy?.signals ?? null,
   }
+}
+
+function hardBlockedResponse(countryAccess: FreeModeCountryAccess) {
+  return NextResponse.json(
+    {
+      status: 'country_blocked',
+      message: formatFreebuffHardBlockedMessage(
+        countryAccess.ipPrivacy?.signals,
+      ),
+      countryCode: countryAccess.countryCode ?? 'UNKNOWN',
+      countryBlockReason: countryAccess.blockReason ?? undefined,
+      ipPrivacySignals: countryAccess.ipPrivacy?.signals ?? undefined,
+    },
+    { status: 403 },
+  )
+}
+
+function logCountryAccess(
+  route: 'GET' | 'POST',
+  userId: string,
+  countryAccess: FreeModeCountryAccess,
+  deps: FreebuffSessionDeps,
+): void {
+  const privacyProviderDecision =
+    getFreeModePrivacyProviderDecision(countryAccess)
+  if (countryAccess.allowed && privacyProviderDecision !== 'ipinfo_only') return
+
+  const privacyHardBlocked = shouldHardBlockFreeModeAccess(countryAccess)
+  deps.logger.info(
+    {
+      route,
+      userId,
+      accessTier: getFreeModeAccessTier(countryAccess),
+      cfHeader: countryAccess.cfCountry,
+      geoipResult: countryAccess.geoipCountry,
+      resolvedCountry: countryAccess.countryCode,
+      countryBlockReason: countryAccess.blockReason,
+      ipPrivacySignals: countryAccess.ipPrivacy?.signals,
+      spurIpPrivacySignals: countryAccess.spurIpPrivacy?.signals,
+      spurStatus: countryAccess.spurStatus,
+      privacyDecision: getFreeModePrivacyDecision(countryAccess),
+      privacyProviderDecision,
+      privacyHardBlocked,
+      clientIp: countryAccess.hasClientIp ? '[redacted]' : undefined,
+    },
+    '[freebuff/session] country detection',
+  )
+}
+
+async function endSessionForHardBlock(
+  auth: Extract<AuthResult, { userId: string }>,
+  deps: FreebuffSessionDeps,
+): Promise<void> {
+  await endUserSession({
+    userId: auth.userId,
+    userEmail: auth.userEmail,
+    deps: deps.sessionDeps,
+  })
 }
 
 /** Header the CLI uses to identify which instance is polling. Used by GET to
@@ -162,6 +228,11 @@ export async function postFreebuffSession(
   if ('error' in auth) return auth.error
 
   const countryAccess = await getCountryAccess(auth.userId, req, deps)
+  logCountryAccess('POST', auth.userId, countryAccess, deps)
+  if (shouldHardBlockFreeModeAccess(countryAccess)) {
+    await endSessionForHardBlock(auth, deps)
+    return hardBlockedResponse(countryAccess)
+  }
   const accessTier = getFreeModeAccessTier(countryAccess)
 
   const requestedModel = req.headers.get(FREEBUFF_MODEL_HEADER) ?? ''
@@ -209,6 +280,11 @@ export async function getFreebuffSession(
 
   try {
     const countryAccess = await getCountryAccess(auth.userId, req, deps)
+    logCountryAccess('GET', auth.userId, countryAccess, deps)
+    if (shouldHardBlockFreeModeAccess(countryAccess)) {
+      await endSessionForHardBlock(auth, deps)
+      return hardBlockedResponse(countryAccess)
+    }
     const accessTier = getFreeModeAccessTier(countryAccess)
 
     const claimedInstanceId =

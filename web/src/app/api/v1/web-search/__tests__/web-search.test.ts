@@ -15,7 +15,7 @@ import type {
 } from '@codebuff/common/types/contracts/logger'
 import type { BlockGrantResult } from '@codebuff/billing/subscription'
 
-const testServerEnv = { LINKUP_API_KEY: 'test-linkup-key' }
+const testServerEnv = { SERPER_API_KEY: 'test-serper-key' }
 
 describe('/api/v1/web-search POST endpoint', () => {
   let mockLogger: Logger
@@ -55,13 +55,25 @@ describe('/api/v1/web-search POST endpoint', () => {
       value: { chargedToOrganization: false },
     })) as ConsumeCreditsWithFallbackFn
 
-    // Mock fetch to return Linkup-like response
+    // Mock fetch to return Serper-like response
     mockFetch = Object.assign(
       async () =>
-        new Response(JSON.stringify({ answer: 'result', sources: [] }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        }),
+        new Response(
+          JSON.stringify({
+            organic: [
+              {
+                title: 'Result',
+                link: 'https://example.com',
+                snippet: 'result',
+                position: 1,
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        ),
       { preconnect: () => {} },
     ) as typeof fetch
   })
@@ -89,7 +101,7 @@ describe('/api/v1/web-search POST endpoint', () => {
     expect(res.status).toBe(401)
   })
 
-  test('402 when insufficient credits', async () => {
+  test('200 when zero-credit search user has no credits', async () => {
     mockGetUserUsageData = mock(async () => ({
       usageThisCycle: 0,
       balance: {
@@ -117,7 +129,11 @@ describe('/api/v1/web-search POST endpoint', () => {
       fetch: mockFetch,
       serverEnv: testServerEnv,
     })
-    expect(res.status).toBe(402)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.creditsUsed).toBe(0)
+    expect(mockGetUserUsageData).not.toHaveBeenCalled()
+    expect(mockConsumeCreditsWithFallback).not.toHaveBeenCalled()
   })
 
   test('200 on success', async () => {
@@ -140,26 +156,37 @@ describe('/api/v1/web-search POST endpoint', () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.result).toBeDefined()
+    expect(body.creditsUsed).toBe(0)
+    expect(mockConsumeCreditsWithFallback).not.toHaveBeenCalled()
   })
 
   test('200 for subscriber with 0 a-la-carte credits but active block grant', async () => {
-    mockGetUserUsageData = mock(async ({ includeSubscriptionCredits }: { includeSubscriptionCredits?: boolean }) => ({
-      usageThisCycle: 0,
-      balance: {
-        totalRemaining: includeSubscriptionCredits ? 350 : 0,
-        totalDebt: 0,
-        netBalance: includeSubscriptionCredits ? 350 : 0,
-        breakdown: {},
-        principals: {},
-      },
-      nextQuotaReset: 'soon',
-    }))
+    mockGetUserUsageData = mock(
+      async ({
+        includeSubscriptionCredits,
+      }: {
+        includeSubscriptionCredits?: boolean
+      }) => ({
+        usageThisCycle: 0,
+        balance: {
+          totalRemaining: includeSubscriptionCredits ? 350 : 0,
+          totalDebt: 0,
+          netBalance: includeSubscriptionCredits ? 350 : 0,
+          breakdown: {},
+          principals: {},
+        },
+        nextQuotaReset: 'soon',
+      }),
+    )
     const mockEnsureSubscriberBlockGrant = mock(async () => ({
       grantId: 'grant-1',
       credits: 350,
       expiresAt: new Date(Date.now() + 5 * 60 * 60 * 1000),
       isNew: true,
-    })) as unknown as (params: { userId: string; logger: Logger }) => Promise<BlockGrantResult | null>
+    })) as unknown as (params: {
+      userId: string
+      logger: Logger
+    }) => Promise<BlockGrantResult | null>
 
     const req = new NextRequest('http://localhost:3000/api/v1/web-search', {
       method: 'POST',
@@ -181,7 +208,7 @@ describe('/api/v1/web-search POST endpoint', () => {
     expect(res.status).toBe(200)
   })
 
-  test('402 for non-subscriber with 0 credits and no block grant', async () => {
+  test('200 for non-subscriber with 0 credits and no block grant', async () => {
     mockGetUserUsageData = mock(async () => ({
       usageThisCycle: 0,
       balance: {
@@ -193,7 +220,12 @@ describe('/api/v1/web-search POST endpoint', () => {
       },
       nextQuotaReset: 'soon',
     }))
-    const mockEnsureSubscriberBlockGrant = mock(async () => null) as unknown as (params: { userId: string; logger: Logger }) => Promise<BlockGrantResult | null>
+    const mockEnsureSubscriberBlockGrant = mock(
+      async () => null,
+    ) as unknown as (params: {
+      userId: string
+      logger: Logger
+    }) => Promise<BlockGrantResult | null>
 
     const req = new NextRequest('http://localhost:3000/api/v1/web-search', {
       method: 'POST',
@@ -212,6 +244,10 @@ describe('/api/v1/web-search POST endpoint', () => {
       serverEnv: testServerEnv,
       ensureSubscriberBlockGrant: mockEnsureSubscriberBlockGrant,
     })
-    expect(res.status).toBe(402)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.creditsUsed).toBe(0)
+    expect(mockGetUserUsageData).not.toHaveBeenCalled()
+    expect(mockConsumeCreditsWithFallback).not.toHaveBeenCalled()
   })
 })

@@ -30,6 +30,7 @@ import {
   FREEBUFF_PREMIUM_SESSION_LIMIT,
 } from '@codebuff/common/constants/freebuff-models'
 import { getRateLimitsByModel } from '@codebuff/common/types/freebuff-session'
+import { formatFreebuffHardBlockedPrivacySignals } from '@codebuff/common/util/freebuff-privacy'
 
 import type { FreebuffSessionResponse } from '../types/freebuff-session'
 import type { FreebuffIpPrivacySignal } from '@codebuff/common/types/freebuff-session'
@@ -297,12 +298,11 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
   // Always enable ads in the waiting room — this is where monetization lives.
   // forceStart bypasses the "wait for first user message" gate inside the hook,
   // which would otherwise block ads here since no conversation exists yet.
-  // Try Gravity first, then fall back to ZeroClick when Gravity doesn't fill.
-  const { ads, recordImpression } = useGravityAd({
+  // The server tries Gravity first, then falls back to ZeroClick and Carbon.
+  const { ads, recordClick, recordImpression } = useGravityAd({
     enabled: true,
     forceStart: true,
     provider: 'gravity',
-    fallbackProvider: 'zeroclick',
     surface: 'waiting_room',
   })
 
@@ -519,6 +519,7 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
           {isLanding && accessTier === 'limited' && (
             <LimitedLandingPanel
               isQuotaExhausted={isPremiumExhausted}
+              exhaustedMessageText={`You've used your ${sessionLimit} ${sessionLabel} for today. Resets in ${premiumResetCountdown}.`}
               maxHeight={limitedPanelMaxHeight}
               sessionCounterText={`${formatSessionUnits(
                 sharedPremiumUsed,
@@ -642,7 +643,10 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                 {session.countryBlockReason === 'anonymous_network' ? (
                   <>
                     We detected{' '}
-                    {formatPrivacySignalList(session.ipPrivacySignals)} traffic
+                    {formatFreebuffHardBlockedPrivacySignals(
+                      session.ipPrivacySignals,
+                    )}{' '}
+                    traffic
                     {session.countryCode === 'UNKNOWN' ? (
                       ''
                     ) : (
@@ -652,8 +656,8 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
                         <span fg={theme.foreground}>{session.countryCode}</span>
                       </>
                     )}
-                    . Freebuff can't be used from anonymized networks. Press
-                    Ctrl+C to exit.
+                    . Freebuff can't be used from VPN, proxy, or Tor traffic.
+                    Disable it and restart Freebuff to try again.
                   </>
                 ) : session.countryCode === 'UNKNOWN' ? (
                   <>
@@ -729,7 +733,11 @@ export const WaitingRoomScreen: React.FC<WaitingRoomScreenProps> = ({
           }}
         >
           {ads ? (
-            <ChoiceAdBanner ads={ads} onImpression={recordImpression} />
+            <ChoiceAdBanner
+              ads={ads}
+              onClick={recordClick}
+              onImpression={recordImpression}
+            />
           ) : (
             <text style={{ fg: theme.muted }}>
               {'─'.repeat(terminalWidth)}

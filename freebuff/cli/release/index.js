@@ -17,11 +17,9 @@ const packageName = 'freebuff'
  * Terminal escape sequences to reset terminal state after the child process exits.
  * When the binary is SIGKILL'd, it can't clean up its own terminal state.
  * The wrapper (this process) survives and must reset these modes.
- *
- * Keep in sync with TERMINAL_RESET_SEQUENCES in cli/src/utils/renderer-cleanup.ts
  */
-const TERMINAL_RESET_SEQUENCES =
-  '\x1b[?1049l' + // Exit alternate screen buffer
+const EXIT_ALTERNATE_SCREEN_SEQUENCE = '\x1b[?1049l'
+const SAFE_TERMINAL_RESET_SEQUENCES =
   '\x1b[?1000l' + // Disable X10 mouse mode
   '\x1b[?1002l' + // Disable button event mouse mode
   '\x1b[?1003l' + // Disable any-event mouse mode (all motion)
@@ -30,7 +28,12 @@ const TERMINAL_RESET_SEQUENCES =
   '\x1b[?2004l' + // Disable bracketed paste mode
   '\x1b[?25h' // Show cursor
 
-function resetTerminal() {
+const FULL_TERMINAL_RESET_SEQUENCES =
+  EXIT_ALTERNATE_SCREEN_SEQUENCE + SAFE_TERMINAL_RESET_SEQUENCES
+
+function resetTerminal(options = {}) {
+  const { exitAlternateScreen = false } = options
+
   try {
     if (process.stdin.isTTY && process.stdin.setRawMode) {
       process.stdin.setRawMode(false)
@@ -40,11 +43,35 @@ function resetTerminal() {
   }
   try {
     if (process.stdout.isTTY) {
-      process.stdout.write(TERMINAL_RESET_SEQUENCES)
+      // Exiting the alternate screen is only safe after an interactive child.
+      // Plain CLI paths like --help never enter it, and ?1049l can erase output.
+      process.stdout.write(
+        exitAlternateScreen
+          ? FULL_TERMINAL_RESET_SEQUENCES
+          : SAFE_TERMINAL_RESET_SEQUENCES,
+      )
     }
   } catch {
     // stdout may be closed
   }
+}
+
+function getUnsignedExitCode(code) {
+  return code != null && code < 0 ? (code >>> 0) : code
+}
+
+function isWindowsNativeCrashCode(code) {
+  const unsignedCode = getUnsignedExitCode(code)
+  return (
+    process.platform === 'win32' &&
+    (unsignedCode === 0xC000001D ||
+      unsignedCode === 0xC0000005 ||
+      unsignedCode === 0xC0000409)
+  )
+}
+
+function shouldExitAlternateScreen(code, signal) {
+  return Boolean(signal) || isWindowsNativeCrashCode(code)
 }
 
 function createConfig(packageName) {
@@ -472,25 +499,19 @@ async function checkForUpdates(runningProcess, exitListener) {
         }, 5000)
       })
 
-      resetTerminal()
+      resetTerminal({ exitAlternateScreen: true })
       console.log(`Update available: ${currentVersion} → ${latestVersion}`)
 
       await downloadBinary(latestVersion)
 
-      const newChild = spawn(CONFIG.binaryPath, process.argv.slice(2), {
-        stdio: 'inherit',
-        detached: false,
-      })
+      const newChild = spawnInstalledBinary({ detached: false })
 
       newChild.on('exit', (code, signal) => {
-        resetTerminal()
+        resetTerminal({
+          exitAlternateScreen: shouldExitAlternateScreen(code, signal),
+        })
         printCrashDiagnostics(code, signal)
         process.exit(signal ? 1 : (code || 0))
-      })
-
-      newChild.on('error', (err) => {
-        console.error('Failed to start freebuff:', err.message)
-        process.exit(1)
       })
 
       return new Promise(() => {})
@@ -502,7 +523,7 @@ async function checkForUpdates(runningProcess, exitListener) {
 
 function printCrashDiagnostics(code, signal) {
   // Windows NTSTATUS codes (unsigned DWORD)
-  const unsignedCode = code != null && code < 0 ? (code >>> 0) : code
+  const unsignedCode = getUnsignedExitCode(code)
   const isIllegalInstruction =
     signal === 'SIGILL' ||
     (process.platform === 'win32' && unsignedCode === 0xC000001D)
@@ -548,25 +569,86 @@ function printCrashDiagnostics(code, signal) {
   console.error('')
 }
 
-async function main() {
-  await ensureBinaryExists()
+function getInstalledBinaryStatus() {
+  try {
+    const stats = fs.statSync(CONFIG.binaryPath)
+    return stats.isFile() ? `yes (${formatBytes(stats.size)})` : 'no'
+  } catch {
+    return 'no'
+  }
+}
+
+function printSpawnFailure(err) {
+  resetTerminal()
+  const code = err && err.code ? ` (${err.code})` : ''
+
+  console.error(`Failed to start ${packageName}: ${err.message}${code}`)
+  console.error('')
+  console.error('System info:')
+  console.error(`  Platform: ${process.platform} ${process.arch}`)
+  console.error(`  Node:     ${process.version}`)
+  console.error(`  Binary:   ${CONFIG.binaryPath}`)
+  console.error(`  Exists:   ${getInstalledBinaryStatus()}`)
+
+  if (process.platform === 'win32') {
+    console.error('')
+    console.error(
+      'On Windows, this can happen when Windows Security or antivirus blocks',
+    )
+    console.error(
+      'or quarantines the downloaded executable, or when the binary requires',
+    )
+    console.error('CPU instructions that are not available on this machine.')
+  }
+
+  console.error('')
+  console.error('Try deleting the downloaded files and running again:')
+  console.error(`  ${CONFIG.configDir}`)
+  console.error('')
+}
+
+function spawnInstalledBinary(options = {}) {
+  if (!fs.existsSync(CONFIG.binaryPath)) {
+    try {
+      if (fs.existsSync(CONFIG.metadataPath)) fs.unlinkSync(CONFIG.metadataPath)
+    } catch {
+      // best effort
+    }
+    const error = new Error(
+      `downloaded binary is missing at ${CONFIG.binaryPath}`,
+    )
+    error.code = 'BINARY_MISSING'
+    printSpawnFailure(error)
+    process.exit(1)
+  }
 
   const child = spawn(CONFIG.binaryPath, process.argv.slice(2), {
     stdio: 'inherit',
+    ...options,
   })
 
+  child.on('error', (err) => {
+    printSpawnFailure(err)
+    process.exit(1)
+  })
+
+  return child
+}
+
+async function main() {
+  await ensureBinaryExists()
+
+  const child = spawnInstalledBinary()
+
   const exitListener = (code, signal) => {
-    resetTerminal()
+    resetTerminal({
+      exitAlternateScreen: shouldExitAlternateScreen(code, signal),
+    })
     printCrashDiagnostics(code, signal)
     process.exit(signal ? 1 : (code || 0))
   }
 
   child.on('exit', exitListener)
-
-  child.on('error', (err) => {
-    console.error('Failed to start freebuff:', err.message)
-    process.exit(1)
-  })
 
   setTimeout(() => {
     checkForUpdates(child, exitListener)
